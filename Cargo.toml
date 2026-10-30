@@ -1,0 +1,122 @@
+[package]
+name = "zhimaterm"
+version = "0.1.0"
+edition = "2024"
+# 编译期下限：gpui-pre 0.3.10 要求 Rust ≥ 1.98，本项目不引入更高的下限。
+# 实际开发用的工具链由 rust-toolchain.toml 固定，两者职责不同。
+rust-version = "1.98"
+description = "Developer-focused desktop terminal with local and SSH shells, multi-tab sessions, and integrated SFTP"
+license = "MIT"
+default-run = "zhimaterm"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1"
+chrono = "0.4"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+libc = "0.2"
+libssh2-sys = "=0.3.3"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
+regex = "1"
+smol = "2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+ssh2 = { version = "=0.9.6", features = ["vendored-openssl", "openssl-on-win32"] }
+unicode-segmentation = "1"
+# 保存连接的条目 id（ADR-018 修订）：凭据按条目 id 挂钥匙串，条目身份不再
+# 参与；需要不受存档内容影响的唯一键
+uuid = { version = "1", features = ["v4"] }
+# 组合文本（输入法 preedit）按 wcwidth 折算占格：终端自己写的字符宽度由
+# 上游网格给出，组合文本不在网格里，得有自己的前进模型。
+# 该 crate 已在依赖树中（alacritty_terminal 依赖同一版本），提为直接依赖
+# 不引入新代码、不增加编译时间。
+unicode-width = "0.2"
+
+# 端口转发的监听 socket 要在 bind 前设 SO_REUSEADDR（ADR-038）：运行中
+# 删掉规则后马上用同一端口重建时，旧连接的 TIME_WAIT 不能挡住监听。
+# std 的 TcpListener 不暴露这个选项，socket2 只做这一件事；Windows 不用
+# SO_REUSEADDR（会允许端口劫持），只在 Unix 引入。
+[target.'cfg(unix)'.dependencies]
+socket2 = "0.5"
+
+# 窗口几何恢复时用 AppKit 类方法实测标准标题栏高度（外框→内容区换算，见
+# main.rs）。三个 crate 与 gpui 同版本，已在依赖树中（gpui-pre-macos 经
+# objc2-app-kit 引入），声明为直接依赖不增加编译产物。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSResponder",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSGeometry",
+] }
+
+# 实体级单测（connect 表单往返/dirty/展开）需要 gpui 的 TestAppContext；
+# 只经 dev-dependency 开启，release 构建不带 test-support
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+
+[[bin]]
+name = "zhimaterm"
+path = "src/main.rs"
+
+[[bin]]
+name = "zhimaterm-ssh-sftp-probe"
+path = "src/bin/ssh_sftp_probe.rs"
+
+# Windows E2E 探针（ADR-025）：ConPTY 里裸读 VT 应答字节的原生工具
+[[bin]]
+name = "zhimaterm-pty-probe"
+path = "src/bin/pty_probe.rs"
+
+# debug 构建下依赖（gpui 的 DirectWrite 整形包装等）不优化，cat 满屏刷时单帧
+# 整形 ~100ms（实测），UI 线程被占满。应用代码保持可调试，依赖全部开优化。
+[profile.dev.package."*"]
+opt-level = 2
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# WSL 发行版枚举（ADR-021）与自研 PTY 的 ConPTY 调用（ADR-025）：
+# 均锁定为依赖树中已有的版本，不引入新代码；perf 验收的子进程计数
+# （ADR 系列外，tests/perf_acceptance）另开 ToolHelp 快照；跨进程 cwd/argv
+# 读取（peb 模块）与探针补齐（ADR-028）用 NtQueryInformationProcess 一族
+[target.'cfg(windows)'.dependencies]
+windows-registry = "=0.6.1"
+windows-sys = { version = "=0.61.2", features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_Kernel",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[package.metadata.packager]
+productName = "ZhimaTerm"
+version = "0.1.0"
+identifier = "me.kazma.zhimaterm"
+description = "Developer-focused desktop terminal with local and SSH shells, multi-tab sessions, and integrated SFTP"
+publisher = "kazma"
+category = "Utility"
+outDir = "target/release"
+binariesDir = "target/release"
+icons = [
+    "icons/icon.icns",
+    "icons/icon.ico",
+    "icons/icon.png",
+    "icons/icon-1024.png",
+]
+
+[[package.metadata.packager.binaries]]
+path = "zhimaterm"
+main = true

@@ -1,0 +1,9 @@
+# 固定的开发工具链：可复现构建的前提之一（requirements §2）。
+#
+# 用具体版本而不是 "stable"：stable 会随上游推进漂移，本地、CI 与发布
+# 产物就不再是同一个行为基线。换版本时先在本机验证 `cargo test` 全绿，
+# 再改这里。msrv（编译期下限）见 Cargo.toml 的 rust-version，两者不是一回事：
+# 这里决定"用什么构建"，那里决定"最低能用什么构建"。
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

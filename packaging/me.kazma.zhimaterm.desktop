@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ZhimaTerm
+GenericName=Terminal
+Comment=Developer-focused desktop terminal with local and SSH shells, multi-tab sessions, and integrated SFTP
+Exec=zhimaterm
+Icon=me.kazma.zhimaterm
+Categories=System;TerminalEmulator;
+Keywords=terminal;ssh;sftp;shell;
+StartupWMClass=zhimaterm
+StartupNotify=true
+Terminal=false

@@ -1,0 +1,95 @@
+version: '3'
+
+vars:
+  APP: zhimaterm
+  PRODUCT: ZhimaTerm
+  ID: me.kazma.zhimaterm
+  # 代码签名证书名(security find-identity -v -p codesigning 可列出);
+  # 本地网络/TCC 授权按签名身份追踪,ad-hoc 签名每次重编身份都变、授权即失效,
+  # 留空则退回链接器的 ad-hoc 签名。
+  # 这里的值只是本仓库维护者自签证书的默认名,换机器请改成自己钥匙串里的
+  # 身份名(或留空),不影响功能。
+  SIGN_IDENTITY: "ZhimaTerm Dev"
+
+tasks:
+  default:
+    desc: 列出所有任务
+    cmds:
+      - task --list
+
+  build:
+    desc: 构建 release 二进制
+    sources:
+      - src/**/*.rs
+      - Cargo.toml
+    cmds:
+      - cargo build --release
+
+  install:
+    desc: 安装到当前用户(构建 + 平台桌面集成)
+    cmds:
+      - task: build
+      - task: install-{{OS}}
+
+  uninstall:
+    desc: 卸载当前用户安装
+    cmds:
+      - task: uninstall-{{OS}}
+
+  # ----- Linux: XDG 用户目录,发行版无关,无需 root -----
+  install-linux:
+    platforms: [linux]
+    cmds:
+      - install -Dm755 target/release/{{.APP}} "$HOME/.local/bin/{{.APP}}"
+      - install -Dm644 icons/icon.png "$HOME/.local/share/icons/hicolor/512x512/apps/{{.ID}}.png"
+      - install -Dm644 packaging/{{.ID}}.desktop "$HOME/.local/share/applications/{{.ID}}.desktop"
+      - command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
+      - command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" || true
+      - echo "installed {{.PRODUCT}} -> $HOME/.local"
+
+  uninstall-linux:
+    platforms: [linux]
+    cmds:
+      - rm -f "$HOME/.local/bin/{{.APP}}"
+      - rm -f "$HOME/.local/share/icons/hicolor/512x512/apps/{{.ID}}.png"
+      - rm -f "$HOME/.local/share/applications/{{.ID}}.desktop"
+      - command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
+
+  # ----- macOS: ~/Applications 下组装 .app bundle,Launchpad 自动识别 -----
+  install-darwin:
+    platforms: [darwin]
+    vars:
+      # 取 Cargo.toml [package] 的 version;[package.metadata.packager] 里的
+      # 同名键在其后,grep -m1 固定命中前者。挂在本任务而非全局:
+      # 全局动态变量在 Windows 由 cmd 执行,grep/cut 与单引号引法都不可用
+      VERSION:
+        sh: grep -m1 '^version' Cargo.toml | cut -d'"' -f2
+    cmds:
+      - |
+        set -e
+        app="$HOME/Applications/{{.PRODUCT}}.app"
+        mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+        cp target/release/{{.APP}} "$app/Contents/MacOS/{{.APP}}"
+        cp icons/icon.icns "$app/Contents/Resources/icon.icns"
+        sed "s/@VERSION@/{{.VERSION}}/" packaging/Info.plist > "$app/Contents/Info.plist"
+        if [ -n "{{.SIGN_IDENTITY}}" ]; then
+          codesign --force --sign "{{.SIGN_IDENTITY}}" "$app"
+        fi
+        echo "installed {{.PRODUCT}} -> $app"
+
+  uninstall-darwin:
+    platforms: [darwin]
+    cmds:
+      - rm -rf "$HOME/Applications/{{.PRODUCT}}.app"
+
+  # ----- Windows: %LOCALAPPDATA%\Programs + 开始菜单快捷方式 -----
+  # exe 由 build.rs 内嵌了图标,快捷方式直接指向 exe 即可
+  install-windows:
+    platforms: [windows]
+    cmds:
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -App {{.APP}} -Id {{.ID}}
+
+  uninstall-windows:
+    platforms: [windows]
+    cmds:
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -App {{.APP}} -Id {{.ID}} -Uninstall
