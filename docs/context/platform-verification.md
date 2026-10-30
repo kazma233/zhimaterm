@@ -49,12 +49,11 @@
   修复 wrong_password 用例 bug、转发用例读超时与 runbook 滞后（记录见
   `../archive/ssh-e2e-wsl-tester-verification.md`，含 SOCKS5 与运行中增删的验证）。
 - **2026-10-27~29 批次**（ADR-044~048、连接期密码询问全链路、gpui-pre 0.3.10
-  升级、views()/transcript/reconnect 系列重构）：3f3093f 提交信息记录
-  「单测 372、门控 SSH e2e 26 全绿」；探针结束进程 macOS 已实机验收
+  升级、views()/transcript/reconnect 系列重构）：该批次记录「单测 372、门控
+  SSH e2e 26 全绿」；探针结束进程 macOS 已实机验收
   （`manual-acceptance.md` 2026-10-28 小节）。
-- Windows/Linux 在上述批次**无实机验证记录**（unverified）：d135f9d 自述
-  「Windows 侧编译门控 unverified」，61d254f 升级 gpui-pre 后需 Rust ≥1.98
-  的工具链前提也未在两端复核。
+- Windows/Linux 在上述批次**无实机验证记录**（unverified）：Windows 侧编译门控
+  未验证；升级 gpui-pre 后需 Rust ≥1.98 的工具链前提也未在两端复核。
 
 ## 待办
 

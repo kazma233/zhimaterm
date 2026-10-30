@@ -40,7 +40,7 @@ perf-acceptance §5、mobaxterm-gap-and-priorities，现以本文件为唯一入
   （合并、幂等、锁互斥 ×1 + forget 原有 2 个）应同过。
 - 2026-10-23 之后的批次（连接弹窗列表优先、侧栏重命名、探针结束进程与详情弹层、
   连接期密码询问全链路、gpui-pre 0.3.10 升级）只在本机（macOS）验证过；
-  Windows/Linux 无实机记录（d135f9d 自述 Windows 编译门控 unverified）。
+  Windows/Linux 无实机记录（Windows 侧编译门控 unverified）。
 - CI 三平台 matrix：暂缓（见「明确不管/后置」）。
 
 ## 功能池 P2 剩余

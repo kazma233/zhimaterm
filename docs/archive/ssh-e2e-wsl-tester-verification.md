@@ -54,7 +54,7 @@ runbook(`docs/runbooks/ssh-e2e.md`)的 docker 方案在这台机器上无法复�
 
 ## 发现的 bug(均已修复,见文末「修复记录」)
 
-1. **测试代码 bug(任何环境必失败)**:`wrong_password_lists_every_attempted_method` 调用 `trust_and_start`,但该 helper(tests/support.rs)收到 `ControlEvent::Failed` 即 `panic!`,而本用例密码必然错误、必然产生 `Failed`——用例自己的断言(消息含「键盘交互」+「密码」)永远执行不到。成因:重构提交 `7f6136f` 把旧 helper `trust_host`(不因认证失败 panic)统一替换为 `trust_and_start` 时机械替换了调用点;门控用例平时无人执行,故未暴露。
+1. **测试代码 bug(任何环境必失败)**:`wrong_password_lists_every_attempted_method` 调用 `trust_and_start`,但该 helper(tests/support.rs)收到 `ControlEvent::Failed` 即 `panic!`,而本用例密码必然错误、必然产生 `Failed`——用例自己的断言(消息含「键盘交互」+「密码」)永远执行不到。成因:早前的重构把旧 helper `trust_host`(不因认证失败 panic)统一替换为 `trust_and_start` 时机械替换了调用点;门控用例平时无人执行,故未暴露。
 2. **测试健壮性**:`local_forward_carries_the_remote_banner` 与 `jump_session_carries_local_forward_rules` 的 `tunnel.read` 未设 `read_timeout`(`remote_forward` 用例设了 10s 可对照),对端不回数据会挂死整个测试进程而非超时失败。
 3. **runbook 滞后**:`docs/runbooks/ssh-e2e.md` 用例表中 `shell_exit_keeps_sftp_usable_until_the_session_closes` 已更名为 `shell_exit_closes_the_session_and_sftp`(语义也变了:shell 退出即关闭会话与 SFTP),且缺 `dropping_the_sftp_handle_keeps_the_shell_alive` 一行;docker 方案在 mirrored 网络 + 宿主占用 22 的机器上不可复刻。
 
