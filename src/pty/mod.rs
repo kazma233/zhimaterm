@@ -170,7 +170,7 @@ impl Command {
                 (entry.preferred.clone(), entry.value.clone()),
             );
         }
-        env.into_iter().map(|(_, entry)| entry)
+        env.into_values()
     }
 
     /// 调用方追加的环境覆盖（不含继承环境）。

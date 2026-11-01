@@ -103,7 +103,7 @@ impl ProcessReader {
             basic.PebBaseAddress as usize + core::mem::offset_of!(PEB, ProcessParameters),
             &mut pointer,
         )?;
-        let parameters = usize::from_le_bytes(pointer.try_into().ok()?);
+        let parameters = usize::from_le_bytes(pointer);
         let mut block = vec![0u8; core::mem::size_of::<RTL_USER_PROCESS_PARAMETERS>()];
         self.read(parameters, &mut block)?;
         Some(block)
@@ -113,14 +113,16 @@ impl ProcessReader {
     /// 真实上限远小于此。
     fn read_utf16(&self, address: usize, byte_len: usize) -> Option<String> {
         const MAX_BYTES: usize = 1 << 20;
-        if address == 0 || byte_len == 0 || byte_len % 2 != 0 || byte_len > MAX_BYTES {
+        if address == 0 || byte_len == 0 || !byte_len.is_multiple_of(2) || byte_len > MAX_BYTES {
             return None;
         }
         let mut bytes = vec![0u8; byte_len];
         self.read(address, &mut bytes)?;
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let end = units
             .iter()

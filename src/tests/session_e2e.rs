@@ -1212,7 +1212,7 @@ fn ime_text_is_typed_into_the_pty_verbatim() {
         // 命令回显里的 "raw"/"IME-" 证明探针行已被执行
         "raw",
     );
-    type_line(&session, probe);
+    type_line(&session, &probe);
     assert!(
         wait_for_frame(&events, Duration::from_secs(5), |snapshot| {
             rendered(snapshot).contains("IME-") || rendered(snapshot).contains(ready)
@@ -1301,7 +1301,7 @@ fn shell_queries_are_answered_on_the_pty() {
         r#"if [ "$reply" = "$(printf '\033[0n')" ]; then "#,
         r#"printf 'DSR-%s\n' ANSWER-MATCHED; else printf 'DSR-%s\n' ANSWER-WRONG; fi"#,
     );
-    type_line(&session, probe);
+    type_line(&session, &probe);
 
     let output = wait_for_frame(&events, Duration::from_secs(5), |snapshot| {
         rendered(snapshot).contains("DSR-ANSWER-MATCHED")

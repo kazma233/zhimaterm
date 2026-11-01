@@ -242,6 +242,8 @@ impl SettingsForm {
     }
 
     /// 切换 ⌥ 键当 Alt 的选择；生效仍由「应用」触发。
+    /// 仅 macOS 渲染该开关（ADR-033），其余平台无调用方。
+    #[cfg(target_os = "macos")]
     pub fn toggle_option_as_alt(&mut self, cx: &mut Context<Self>) {
         self.option_as_alt = !self.option_as_alt;
         cx.notify();
