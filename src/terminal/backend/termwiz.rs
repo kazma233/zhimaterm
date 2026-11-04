@@ -5,6 +5,11 @@
 //! 语义对齐 alacritty 后端（同一批契约测试跑两个后端）。同步输出（2026）按
 //! ADR-032 的口径实现：BSU 起缓冲动作、ESU 一次性回放，宿主按 deadline 兜底。
 //!
+//! 与 alacritty 后端的有意分歧（ADR-050）：打印按**字形簇**定占格，
+//! VS16/VS15 与修饰符、ZWJ 序列回写光标前已落格的簇（`⚠️` 2 格、`👍🏽`
+//! 2 格），alacritty 是逐码点定宽（`⚠️` 1 格、`👍🏽` 4 格）。回写不缓冲：
+//! 末字符对快照立即可见，字节块劈在簇中间也不影响结果。
+//!
 //! 本文件的 `fuzz` 测试用确定性随机输出 + 随机 resize 灌不变量（视口行数、
 //! 行宽一致、光标在网格内）：会话线程上任何 panic 都会带走全部会话，这里
 //! 不允许越界。
@@ -208,6 +213,111 @@ enum Charset {
     DecLineDrawing,
 }
 
+/// 字形簇续接的结果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinOutcome {
+    /// 已并进光标前的簇（或按规则丢弃），不再落格。
+    Handled,
+    /// 按普通字符落格。
+    Fallback,
+}
+
+/// 有文本变体的 emoji（emoji-variation-sequences.txt 的全部基字符）：
+/// `#`、`*`、`0-9` 与各 emoji，VS15/VS16 只对它们生效。
+fn is_variation_base(c: char) -> bool {
+    let cp = u32::from(c);
+    VARIATION_BASES
+        .binary_search_by(|&(lo, hi)| {
+            if cp < lo {
+                std::cmp::Ordering::Greater
+            } else if cp > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// 肤色修饰符（Fitzpatrick U+1F3FB..=U+1F3FF）：跟在 emoji 基后并入簇尾
+/// 不占格，独立出现是普通宽字符。
+fn is_emoji_modifier(c: char) -> bool {
+    ('\u{1f3fb}'..='\u{1f3ff}').contains(&c)
+}
+
+/// 可被修饰符结合的 emoji 基：宽 emoji，或有文本变体的窄 emoji（`☝🏽`）。
+fn is_emoji_base(c: char) -> bool {
+    c.width().unwrap_or(0) >= 2 || is_variation_base(c)
+}
+
+/// 变体选择符合法基字符表：emoji-variation-sequences.txt（Unicode 16.0.0 与
+/// 17.0.0 内容一致，2024-05-01）的全部基字符，闭区间按起点升序，二分查找。
+/// 数据源 https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-variation-sequences.txt
+#[rustfmt::skip]
+static VARIATION_BASES: [(u32, u32); 183] = [
+    (0x23, 0x23), (0x2A, 0x2A), (0x30, 0x39),
+    (0xA9, 0xA9), (0xAE, 0xAE), (0x203C, 0x203C),
+    (0x2049, 0x2049), (0x2122, 0x2122), (0x2139, 0x2139),
+    (0x2194, 0x2199), (0x21A9, 0x21AA), (0x231A, 0x231B),
+    (0x2328, 0x2328), (0x23CF, 0x23CF), (0x23E9, 0x23F3),
+    (0x23F8, 0x23FA), (0x24C2, 0x24C2), (0x25AA, 0x25AB),
+    (0x25B6, 0x25B6), (0x25C0, 0x25C0), (0x25FB, 0x25FE),
+    (0x2600, 0x2604), (0x260E, 0x260E), (0x2611, 0x2611),
+    (0x2614, 0x2615), (0x2618, 0x2618), (0x261D, 0x261D),
+    (0x2620, 0x2620), (0x2622, 0x2623), (0x2626, 0x2626),
+    (0x262A, 0x262A), (0x262E, 0x262F), (0x2638, 0x263A),
+    (0x2640, 0x2640), (0x2642, 0x2642), (0x2648, 0x2653),
+    (0x265F, 0x2660), (0x2663, 0x2663), (0x2665, 0x2666),
+    (0x2668, 0x2668), (0x267B, 0x267B), (0x267E, 0x267F),
+    (0x2692, 0x2697), (0x2699, 0x2699), (0x269B, 0x269C),
+    (0x26A0, 0x26A1), (0x26A7, 0x26A7), (0x26AA, 0x26AB),
+    (0x26B0, 0x26B1), (0x26BD, 0x26BE), (0x26C4, 0x26C5),
+    (0x26C8, 0x26C8), (0x26CE, 0x26CF), (0x26D1, 0x26D1),
+    (0x26D3, 0x26D4), (0x26E9, 0x26EA), (0x26F0, 0x26F5),
+    (0x26F7, 0x26FA), (0x26FD, 0x26FD), (0x2702, 0x2702),
+    (0x2705, 0x2705), (0x2708, 0x270D), (0x270F, 0x270F),
+    (0x2712, 0x2712), (0x2714, 0x2714), (0x2716, 0x2716),
+    (0x271D, 0x271D), (0x2721, 0x2721), (0x2728, 0x2728),
+    (0x2733, 0x2734), (0x2744, 0x2744), (0x2747, 0x2747),
+    (0x274C, 0x274C), (0x274E, 0x274E), (0x2753, 0x2755),
+    (0x2757, 0x2757), (0x2763, 0x2764), (0x2795, 0x2797),
+    (0x27A1, 0x27A1), (0x27B0, 0x27B0), (0x27BF, 0x27BF),
+    (0x2934, 0x2935), (0x2B05, 0x2B07), (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50), (0x2B55, 0x2B55), (0x3030, 0x3030),
+    (0x303D, 0x303D), (0x3297, 0x3297), (0x3299, 0x3299),
+    (0x1F004, 0x1F004), (0x1F170, 0x1F171), (0x1F17E, 0x1F17F),
+    (0x1F202, 0x1F202), (0x1F21A, 0x1F21A), (0x1F22F, 0x1F22F),
+    (0x1F237, 0x1F237), (0x1F30D, 0x1F30F), (0x1F315, 0x1F315),
+    (0x1F31C, 0x1F31C), (0x1F321, 0x1F321), (0x1F324, 0x1F32C),
+    (0x1F336, 0x1F336), (0x1F378, 0x1F378), (0x1F37D, 0x1F37D),
+    (0x1F393, 0x1F393), (0x1F396, 0x1F397), (0x1F399, 0x1F39B),
+    (0x1F39E, 0x1F39F), (0x1F3A7, 0x1F3A7), (0x1F3AC, 0x1F3AE),
+    (0x1F3C2, 0x1F3C2), (0x1F3C4, 0x1F3C4), (0x1F3C6, 0x1F3C6),
+    (0x1F3CA, 0x1F3CE), (0x1F3D4, 0x1F3E0), (0x1F3ED, 0x1F3ED),
+    (0x1F3F3, 0x1F3F3), (0x1F3F5, 0x1F3F5), (0x1F3F7, 0x1F3F7),
+    (0x1F408, 0x1F408), (0x1F415, 0x1F415), (0x1F41F, 0x1F41F),
+    (0x1F426, 0x1F426), (0x1F43F, 0x1F43F), (0x1F441, 0x1F442),
+    (0x1F446, 0x1F449), (0x1F44D, 0x1F44E), (0x1F453, 0x1F453),
+    (0x1F46A, 0x1F46A), (0x1F47D, 0x1F47D), (0x1F4A3, 0x1F4A3),
+    (0x1F4B0, 0x1F4B0), (0x1F4B3, 0x1F4B3), (0x1F4BB, 0x1F4BB),
+    (0x1F4BF, 0x1F4BF), (0x1F4CB, 0x1F4CB), (0x1F4DA, 0x1F4DA),
+    (0x1F4DF, 0x1F4DF), (0x1F4E4, 0x1F4E6), (0x1F4EA, 0x1F4ED),
+    (0x1F4F7, 0x1F4F7), (0x1F4F9, 0x1F4FB), (0x1F4FD, 0x1F4FD),
+    (0x1F508, 0x1F508), (0x1F50D, 0x1F50D), (0x1F512, 0x1F513),
+    (0x1F549, 0x1F54A), (0x1F550, 0x1F567), (0x1F56F, 0x1F570),
+    (0x1F573, 0x1F579), (0x1F587, 0x1F587), (0x1F58A, 0x1F58D),
+    (0x1F590, 0x1F590), (0x1F5A5, 0x1F5A5), (0x1F5A8, 0x1F5A8),
+    (0x1F5B1, 0x1F5B2), (0x1F5BC, 0x1F5BC), (0x1F5C2, 0x1F5C4),
+    (0x1F5D1, 0x1F5D3), (0x1F5DC, 0x1F5DE), (0x1F5E1, 0x1F5E1),
+    (0x1F5E3, 0x1F5E3), (0x1F5E8, 0x1F5E8), (0x1F5EF, 0x1F5EF),
+    (0x1F5F3, 0x1F5F3), (0x1F5FA, 0x1F5FA), (0x1F610, 0x1F610),
+    (0x1F687, 0x1F687), (0x1F68D, 0x1F68D), (0x1F691, 0x1F691),
+    (0x1F694, 0x1F694), (0x1F698, 0x1F698), (0x1F6AD, 0x1F6AD),
+    (0x1F6B2, 0x1F6B2), (0x1F6B9, 0x1F6BA), (0x1F6BC, 0x1F6BC),
+    (0x1F6CB, 0x1F6CB), (0x1F6CD, 0x1F6CF), (0x1F6E0, 0x1F6E5),
+    (0x1F6E9, 0x1F6E9), (0x1F6F0, 0x1F6F0), (0x1F6F3, 0x1F6F3),
+];
+
 impl TermwizCore {
     pub(super) fn new(columns: usize, lines: usize, history: usize) -> Self {
         Self {
@@ -316,23 +426,11 @@ impl TermwizCore {
     // ---------- 打印 ----------
 
     fn print(&mut self, character: char) {
-        let width = character.width().unwrap_or(0);
-        if width == 0 {
-            // 组合字符挂到前一格；行首没有可挂的格就丢弃
-            if self.cursor.column > 0 {
-                let column = self.cursor.column - 1;
-                let line = self.cursor.line;
-                let cell = &mut self.viewport[line].cells[column];
-                let mut text = cell
-                    .zerowidth
-                    .take()
-                    .map(|zerowidth| zerowidth.to_string())
-                    .unwrap_or_default();
-                text.push(character);
-                cell.zerowidth = Some(Arc::from(text));
-            }
+        // 字形簇续接：VS/修饰符/ZWJ 序列改写光标前已落格的簇，其余落格
+        if self.join_cluster(character) == JoinOutcome::Handled {
             return;
         }
+        let width = character.width().unwrap_or(0);
 
         if self.cursor.pending_wrap {
             if self.autowrap_flag {
@@ -392,6 +490,117 @@ impl TermwizCore {
             self.cursor.column = self.columns - 1;
             self.cursor.pending_wrap = true;
         }
+    }
+
+    /// 字形簇续接（ADR-050 有意分歧，Ghostty 簇宽度口径）：变体选择符改写
+    /// 前簇占格数（`⚠️` 1→2、`⌚︎` 2→1），修饰符与 ZWJ 连接的 emoji 并进
+    /// 前簇（`👍🏽` 2 格、`👨‍👩‍👧‍👦` 2 格），零宽组合符挂前簇尾。
+    ///
+    /// 改写直接作用于已落格的光标前簇，不缓冲：末字符对快照立即可见，字节
+    /// 块劈在簇中间不影响结果。回收已落格内容做不到的事只有一件——行末放
+    /// 不下加宽时（Ghostty 会整簇折行重排）保持 1 格，只挂选择符。
+    fn join_cluster(&mut self, character: char) -> JoinOutcome {
+        let is_vs = character == '\u{fe0f}' || character == '\u{fe0e}';
+        let is_modifier = is_emoji_modifier(character);
+        let width = character.width().unwrap_or(0);
+        // 宽 emoji 只在前簇以 ZWJ 结尾时续接（TR29 GB11 只连 emoji：
+        // `👨‍👩‍👧‍👦` 并簇，`x‍b` 这类普通文本照常断开落格）。
+        if !is_vs && !is_modifier && width == 1 {
+            return JoinOutcome::Fallback;
+        }
+        if !is_vs && !is_modifier && width > 0 && !self.prev_cluster_ends_with_zwj() {
+            return JoinOutcome::Fallback;
+        }
+
+        let Some((line, column)) = self.prev_cluster_cell() else {
+            // 前面没有可续接的格：变体选择符整体丢弃（Ghostty 口径，不留痕
+            // 不改宽），零宽字符在行首本来就无处可挂
+            return if is_vs || width == 0 {
+                JoinOutcome::Handled
+            } else {
+                JoinOutcome::Fallback
+            };
+        };
+        let (base_c, base_width, base_fg, base_bg) = {
+            let base = &self.viewport[line].cells[column];
+            (base.c, base.width, base.fg, base.bg)
+        };
+        if is_vs && !is_variation_base(base_c) {
+            // 非法序列（如 `x️`）：选择符不留痕、不改宽度（Ghostty 同）
+            return JoinOutcome::Handled;
+        }
+        if is_modifier && !is_emoji_base(base_c) {
+            // 修饰符没跟在 emoji 后：按独立宽字符落格
+            return JoinOutcome::Fallback;
+        }
+
+        // 需要加宽的两种续接（VS16、ZWJ 连接的全宽 emoji）：尾格就是光标位，
+        // 还没写东西，放占位格正合适；行末放不下时保持 1 格只挂选择符。
+        let widen = (character == '\u{fe0f}' || width >= 2) && base_width == 1;
+        if widen && column + 1 < self.columns {
+            self.viewport[line].cells[column].width = 2;
+            self.viewport[line].cells[column + 1] = GridCell {
+                c: ' ',
+                zerowidth: None,
+                width: 1,
+                spacer: true,
+                leading_spacer: false,
+                fg: base_fg,
+                bg: base_bg,
+                bold: false,
+                dim: false,
+                italic: false,
+                inverse: false,
+                hidden: false,
+                strikethrough: false,
+                underline: UnderlineKind::None,
+                underline_color: None,
+                link: None,
+            };
+            // 基在倒数第二列时加宽恰好占满一行：光标与落格路径同样钳回行末
+            self.cursor.column = column + 2;
+            if self.cursor.column >= self.columns {
+                self.cursor.column = self.columns - 1;
+                self.cursor.pending_wrap = true;
+            }
+        }
+        // VS15 收窄（`⌚︎` 2→1）：尾格还原空白，光标退回尾格位
+        if character == '\u{fe0e}' && base_width == 2 {
+            let erased = self.cursor.attrs.erased_cell();
+            self.viewport[line].cells[column].width = 1;
+            self.viewport[line].cells[column + 1] = erased;
+            self.cursor.column = column + 1;
+        }
+        push_zerowidth(&mut self.viewport[line].cells[column], character);
+        JoinOutcome::Handled
+    }
+
+    /// 光标左侧的可续接格：宽字符的尾格是占位，基字符在它前面；行末写入
+    /// 后光标停在原格（pending_wrap），前簇就是光标所在格。
+    fn prev_cluster_cell(&self) -> Option<(usize, usize)> {
+        let line = self.cursor.line;
+        let mut column = if self.cursor.pending_wrap {
+            self.cursor.column
+        } else {
+            self.cursor.column.checked_sub(1)?
+        };
+        if self.viewport[line].cells[column].spacer {
+            if column == 0 {
+                return None;
+            }
+            column -= 1;
+        }
+        Some((line, column))
+    }
+
+    /// 光标前簇是否以 ZWJ 结尾（ZWJ 连接序列的续接条件）。
+    fn prev_cluster_ends_with_zwj(&self) -> bool {
+        self.prev_cluster_cell().is_some_and(|(line, column)| {
+            self.viewport[line].cells[column]
+                .zerowidth
+                .as_ref()
+                .is_some_and(|zerowidth| zerowidth.ends_with('\u{200d}'))
+        })
     }
 
     fn map_charset(&self, character: char) -> char {
@@ -1609,6 +1818,17 @@ impl TerminalCore for TermwizCore {
 
 // ---------- 辅助 ----------
 
+/// 把零宽/簇内码点挂到基字符格的 zerowidth 尾部。
+fn push_zerowidth(cell: &mut GridCell, character: char) {
+    let mut text = cell
+        .zerowidth
+        .take()
+        .map(|zerowidth| zerowidth.to_string())
+        .unwrap_or_default();
+    text.push(character);
+    cell.zerowidth = Some(Arc::from(text));
+}
+
 fn default_tabs(columns: usize) -> Vec<bool> {
     (0..columns)
         .map(|column| column.is_multiple_of(TAB_INTERVAL))
@@ -1814,13 +2034,14 @@ mod fuzz {
             for step in 0..1500usize {
                 let arm = rng.below(24);
                 match arm {
-                    // 普通文本（含 CJK 与组合字符）
+                    // 普通文本（含 CJK、组合字符与 emoji 簇序列）
                     0..=9 => {
-                        let pick = rng.below(4);
+                        let pick = rng.below(5);
                         let bytes: &[u8] = match pick {
                             0 => "hello world. ",
                             1 => "中文宽度测试，",
                             2 => "combining e\u{301}\u{308} ",
+                            3 => "⚠️👍🏽 👨‍👩‍👧‍👦1️⃣❤️ ",
                             _ => "tabs\there\tand\x07bell",
                         }
                         .as_bytes();
@@ -1906,5 +2127,172 @@ mod fuzz {
             }
             assert_invariants(&mut core, seed, 1500);
         }
+    }
+}
+
+#[cfg(test)]
+mod cluster_width {
+    //! 字形簇宽度（ADR-050 有意分歧）：变体选择符、修饰符与 ZWJ 序列按簇
+    //! 口径回写已落格的前簇。契约测试对全部后端跑同一批场景，这里只测
+    //! termwiz 的簇语义——alacritty 后端保持逐码点宽度。
+
+    use super::TermwizCore;
+    use crate::terminal::backend::TerminalCore;
+
+    fn core() -> TermwizCore {
+        TermwizCore::new(40, 3, 30)
+    }
+
+    fn feed(core: &mut TermwizCore, bytes: &[u8]) {
+        core.advance(bytes);
+        core.take_requests();
+    }
+
+    /// 第 line 行（0 起）第 column 列的（字符, 占格数, 零宽尾巴）。
+    fn cell(core: &TermwizCore, line: usize, column: usize) -> (char, u8, Option<String>) {
+        let cell = &core.viewport[line].cells[column];
+        (
+            cell.c,
+            cell.width,
+            cell.zerowidth
+                .as_ref()
+                .map(|zerowidth| zerowidth.to_string()),
+        )
+    }
+
+    #[test]
+    fn vs16_widens_the_cluster_and_following_text_lands_after_it() {
+        let mut core = core();
+        feed(&mut core, "⚠️原".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('⚠', 2, Some("\u{fe0f}".into())));
+        assert!(core.viewport[0].cells[1].spacer, "VS16 加宽后尾格是占位");
+        assert_eq!(
+            cell(&core, 0, 2),
+            ('原', 2, None),
+            "正文紧跟在簇的 2 格之后"
+        );
+        assert_eq!(core.cursor.column, 4);
+    }
+
+    #[test]
+    fn table_row_advances_like_other_terminals() {
+        let mut core = core();
+        feed(&mut core, "⚠️ 原：✅ 无关联 → 现：❌ 结果冲突".as_bytes());
+        // 逐码点口径是 33 格（⚠️ 只占 1），应用按簇口径补的空格按 34 格对齐
+        assert_eq!(core.cursor.column, 34);
+    }
+
+    #[test]
+    fn invalid_variation_sequence_is_dropped_without_a_trace() {
+        let mut core = core();
+        feed(&mut core, "x\u{fe0f}".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('x', 1, None), "非法序列不留痕不改宽");
+        assert_eq!(core.cursor.column, 1);
+    }
+
+    #[test]
+    fn vs15_narrows_a_wide_base_back_to_one_cell() {
+        let mut core = core();
+        feed(&mut core, "⌚︎".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('⌚', 1, Some("\u{fe0e}".into())));
+        assert!(
+            !core.viewport[0].cells[1].spacer,
+            "收窄后尾格不再是宽字符占位"
+        );
+        assert_eq!(core.cursor.column, 1);
+    }
+
+    #[test]
+    fn emoji_modifier_stays_inside_one_wide_cell() {
+        let mut core = core();
+        feed(&mut core, "👍🏽".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('👍', 2, Some("\u{1f3fd}".into())));
+        assert_eq!(core.cursor.column, 2, "逐码点口径会占到 4 格");
+    }
+
+    #[test]
+    fn zwj_family_takes_two_cells() {
+        let mut core = core();
+        feed(&mut core, "👨\u{200d}👩\u{200d}👧\u{200d}👦".as_bytes());
+        assert_eq!(
+            cell(&core, 0, 0),
+            ('👨', 2, Some("\u{200d}👩\u{200d}👧\u{200d}👦".into()))
+        );
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn keycap_sequence_takes_two_cells() {
+        let mut core = core();
+        feed(&mut core, "1\u{fe0f}\u{20e3}".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('1', 2, Some("\u{fe0f}\u{20e3}".into())));
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn sequence_split_across_writes_stays_one_cluster() {
+        let mut core = core();
+        feed(&mut core, "⚠".as_bytes());
+        feed(&mut core, "\u{fe0f}原".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('⚠', 2, Some("\u{fe0f}".into())));
+        assert_eq!(cell(&core, 0, 2), ('原', 2, None), "拆块不影响续接");
+        assert_eq!(core.cursor.column, 4);
+    }
+
+    #[test]
+    fn zwj_joins_emoji_but_not_plain_text() {
+        let mut core = core();
+        feed(&mut core, "x\u{200d}b".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('x', 1, Some("\u{200d}".into())));
+        assert_eq!(cell(&core, 0, 1), ('b', 1, None), "GB11 只连 emoji");
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn zwj_emoji_widens_a_narrow_cluster() {
+        let mut core = core();
+        feed(&mut core, "x\u{200d}👍".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('x', 2, Some("\u{200d}👍".into())));
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn modifier_after_non_emoji_falls_back_to_wide_char() {
+        let mut core = core();
+        feed(&mut core, "x\u{1f3fd}".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('x', 1, None));
+        assert_eq!(cell(&core, 0, 1), ('🏽', 2, None), "没跟 emoji 就独立落格");
+        assert_eq!(core.cursor.column, 3);
+    }
+
+    #[test]
+    fn combining_mark_attaches_to_the_wide_base_not_its_tail() {
+        let mut core = core();
+        feed(&mut core, "👍\u{0301}".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('👍', 2, Some("\u{0301}".into())));
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn vs16_overwrites_content_when_widening() {
+        let mut core = core();
+        feed(&mut core, "XY".as_bytes());
+        feed(&mut core, b"\x1b[1;1H");
+        feed(&mut core, "⚠️".as_bytes());
+        assert_eq!(cell(&core, 0, 0), ('⚠', 2, Some("\u{fe0f}".into())));
+        assert!(core.viewport[0].cells[1].spacer, "宽簇按 2 格覆盖原有内容");
+        assert_eq!(core.cursor.column, 2);
+    }
+
+    #[test]
+    fn vs16_at_line_end_keeps_one_cell() {
+        let mut core = TermwizCore::new(10, 3, 30);
+        feed(&mut core, b"\x1b[1;10H");
+        feed(&mut core, "⚠️".as_bytes());
+        // 行末放不下加宽（Ghostty 会整簇折行，回写式不回收已落格内容）：
+        // 保持 1 格只挂选择符，是文档口径的已知差异
+        assert_eq!(cell(&core, 0, 9), ('⚠', 1, Some("\u{fe0f}".into())));
+        assert_eq!(core.cursor.column, 9);
+        assert!(core.cursor.pending_wrap);
     }
 }

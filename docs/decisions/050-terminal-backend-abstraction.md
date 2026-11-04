@@ -69,9 +69,35 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
 | SGR 21 | 当 CancelBold（Linux console 口径） | termwiz 后端当双下划线（xterm/kitty/ECMA-48 口径）；共享 `UnderlineKind` 文档注明归后端决定 |
 | 跨列占位后增宽 | 会丢内容（`LEADING_WIDE_CHAR_SPACER` 的边缘缺陷） | termwiz 后端保证内容完整（有专门断言 `grow_after_straddle_keeps_all_content`） |
 | 制表位 | 上游不外露其制表位表，alacritty 适配层按默认 8 列近似 | termwiz 后端跟踪真实 HTS/TSD 制表位 |
+| emoji 字形簇宽度 | 逐码点定宽：`⚠️` 占 1 格、`👍🏽` 占 4 格，应用按簇口径补的空格对不上（表格边框错位） | termwiz 后端按簇口径回写：VS16 加宽 / VS15 收窄 / 修饰符并入 / ZWJ 序列整簇 2 格（2026-11-04 补，见下） |
 
 上游欠账（跟进上游修复后移除近似）：alacritty_terminal 未暴露制表位表与
-SGR 21 的可选语义。
+SGR 21 的可选语义；`Term::input` 逐码点定宽且无宽度覆盖入口，簇口径无法
+在适配层补救，只能等上游跟进后移除本条分歧。
+
+### 5. emoji 字形簇宽度（termwiz 后端，2026-11-04 补）
+
+程序（claude 一类表格生成方）按**字形簇**算宽：VS16 序列（`⚠️`）、肤色
+修饰符（`👍🏽`）、ZWJ 连接（`👨‍👩‍👧‍👦`）、键帽（`1️⃣`）都占 2 格；
+kitty/Ghostty/WezTerm 同口径。alacritty 的逐码点口径对不上，表格边框错位
+（诊断记录：`⚠️` 网格 1 格 vs 应用 2 格，整行差 1 列）。
+
+termwiz 后端的屏幕模型在本仓，`print` 落格后按簇规则**回写**光标前簇：
+
+- 判定内核（Ghostty `graphemeWidthEffect` 口径）：VS16/VS15 只对
+  emoji-variation-sequences 的合法基字符生效（改宽度），非法基字符整个
+  丢弃不留痕；修饰符只并入 emoji 基；ZWJ 只连 emoji（GB11，`x‍b` 照常
+  断开）；其余零宽字符挂簇尾。基字符表内嵌自
+  emoji-variation-sequences.txt（Unicode 16.0/17.0 内容一致）。
+- **回写不缓冲**：末字符对快照立即可见（纯缓冲方案会让流停在簇中间时
+  末字符不可见，被契约测试否决）；字节块劈在簇中间不影响结果。
+- 已知残留差异：行末放不下加宽时保持 1 格只挂选择符——Ghostty 会整簇
+  折行重排，回收已落格内容需要缓冲，不值得；组合符挂宽字符基格而非尾格
+  占位（顺带修复了旧孤儿路径挂错格的问题）。
+- alacritty 后端维持逐码点宽度；契约测试只跑两后端共同语义，簇宽度的
+  断言在 termwiz 专属测试（`backend::termwiz::cluster_width`）与单后端
+  快照测试（`termwiz_cluster_width_reaches_the_snapshot`），模糊测试样本
+  加入 emoji 序列覆盖回写路径。
 
 ## 后果
 

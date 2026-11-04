@@ -657,3 +657,23 @@ fn grow_after_straddle_keeps_all_content() {
     );
     assert_eq!(snapshot.history_size, 0, "内容完整时不需要历史");
 }
+
+/// termwiz 后端的簇宽度直达快照（ADR-050 有意分歧）：共享层只认 GridCell
+/// 的占格数，回写加宽的簇在画面上占 2 格，总占格与生成方的簇口径一致。
+/// alacritty 后端逐码点定宽（⚠️ 占 1 格），不参与本断言。
+#[test]
+fn termwiz_cluster_width_reaches_the_snapshot() {
+    let mut model = TerminalModel::with_backend(backend::BackendKind::Termwiz, 40, 3, 30);
+    model.advance("⚠️ 原：✅ 无关联 → 现：❌ 结果冲突".as_bytes());
+    // 光标所在列的空白格不算默认尾部空白（is_default_style 对 cursor 返回
+    // false），先移开光标再快照，行尾裁剪才到内容末
+    model.advance(b"\x1b[1;1H");
+    let snapshot = model.snapshot();
+    let row = &snapshot.rows[0];
+    assert_eq!(row[0].text, "⚠️");
+    assert_eq!(row[0].columns, 2, "⚠️ 按簇占 2 格");
+    assert_eq!(row[1].text, " ");
+    assert_eq!(row[2].text, "原", "宽字符独立成段（既有口径）");
+    let total: usize = row.iter().map(|run| run.columns).sum();
+    assert_eq!(total, 34, "整行占格与其他终端一致（逐码点是 33）");
+}
