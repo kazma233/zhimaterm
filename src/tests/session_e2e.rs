@@ -113,6 +113,7 @@ fn output_is_logged_between_markers() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane,
@@ -179,6 +180,7 @@ fn log_write_failure_surfaces_as_an_event_and_stops() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane,
@@ -234,6 +236,7 @@ fn log_failure_before_the_main_loop_is_still_reported() {
             jump: None,
             credential_id: None,
         }),
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane,
@@ -283,6 +286,7 @@ fn configured_shell_and_workdir_take_effect() {
                 cwd: Some(dir.clone()),
             },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane: crate::tests::support::test_pane(),
@@ -314,6 +318,7 @@ fn local_scrollback_is_restored_by_the_next_session() {
             target: SessionTarget::Local {
                 shell: LocalShell::Default { cwd: None },
             },
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: Some(path),
             pane: crate::tests::support::test_pane(),
@@ -446,6 +451,7 @@ fn restored_scrollback_opens_at_the_delivered_size() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: Some(path.clone()),
         pane: crate::tests::support::test_pane(),
@@ -474,6 +480,7 @@ fn restored_scrollback_opens_at_the_delivered_size() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: Some(path),
         pane: crate::tests::support::test_pane(),
@@ -521,6 +528,7 @@ fn restored_scrollback_waits_for_a_late_resize() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: Some(path.clone()),
         pane: crate::tests::support::test_pane(),
@@ -551,6 +559,7 @@ fn restored_scrollback_waits_for_a_late_resize() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: Some(path.clone()),
         pane: crate::tests::support::test_pane(),
@@ -607,6 +616,7 @@ fn local_cwd_changes_are_reported_for_workspace_persistence() {
     let (session, events) = spawn_local(SessionConfig {
         size: StartupSize::Fixed(80, 24),
         target: SessionTarget::Local { shell },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: Some(dir.join("cwd.log")),
         pane: crate::tests::support::test_pane(),
@@ -912,6 +922,7 @@ fn failed_connection_reports_the_reason_instead_of_hanging() {
             jump: None,
             credential_id: None,
         }),
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane: crate::tests::support::test_pane(),
@@ -1633,6 +1644,7 @@ mod ssh {
         let (session, events) = crate::session::spawn(crate::session::SessionConfig {
             size: StartupSize::Fixed(80, 24),
             target: target.clone(),
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: None,
             pane: crate::tests::support::test_pane(),
@@ -1697,6 +1709,7 @@ mod ssh {
                 })),
                 credential_id: None,
             }),
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: None,
             pane: crate::tests::support::test_pane(),
@@ -2215,6 +2228,7 @@ mod ssh {
                 jump: None,
                 credential_id: None,
             }),
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: None,
             pane: crate::tests::support::test_pane(),
@@ -2302,6 +2316,7 @@ mod ssh {
                 jump: None,
                 credential_id: None,
             }),
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: None,
             pane: crate::tests::support::test_pane(),
@@ -2905,6 +2920,7 @@ mod wsl {
                     distro: distro.to_owned(),
                 },
             },
+            backend: crate::terminal::backend::BackendKind::Alacritty,
             history: 10_000,
             scrollback: None,
             pane: crate::tests::support::test_pane(),
@@ -2965,6 +2981,7 @@ fn runtime_switch_pauses_and_resumes_without_backfill() {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane,

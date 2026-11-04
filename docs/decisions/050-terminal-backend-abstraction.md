@@ -1,0 +1,97 @@
+# ADR-050：终端核心后端抽象与 termwiz 后端
+
+状态：已接受（2026-11）
+
+## 背景
+
+终端核心（VT 解析 + 网格 + 滚动历史 + 查询应答）此前由 `alacritty_terminal`
+独家承担，`TerminalModel` 直接持有它的 `Term` 与 `ansi::Processor`，选区与搜索
+也直接用上游的 `Selection`/`RegexSearch`。要支持「按设置切换终端核心后端」，
+需要先回答两个问题：
+
+1. **切换粒度**。已运行会话的终端状态（模式、备用屏、滚区、kitty flags、
+   OSC 改写表、同步输出缓冲、选区）无法无损迁移到另一个核心；重放原始字节
+   也不是等价迁移——会二次触发 OSC 52、铃声、标题等副作用。可切换的只有
+   「新会话」。
+2. **一致性由谁保证**。如果两个后端各自实现快照、选区、搜索，「切换」就
+   等于换了一个行为不同的终端。一致性必须由结构保证：语义只写一份。
+
+## 决策
+
+### 1. 分层：语义在共享层，字节 → 网格在后端
+
+```
+views/ ──── TerminalSnapshot ──── TerminalModel（共享语义层）
+                                        │  TerminalCore (trait)
+                            ┌───────────┴────────────┐
+                     backend/alacritty          backend/termwiz
+                     Term + vte::ansi           Parser + 自研 Screen
+```
+
+- **后端契约**（`terminal/backend/mod.rs`）：`TerminalCore`（advance/resize/
+  滚动/模式/光标/调色板/查询请求/同步输出）与 `GridView`（行读取、折行标记、
+  行长、制表位）。中性类型：`GridCell`、`RowBuffer`、`CellColor`、`ColorPalette`、
+  `TermModes`、`CursorState`、`GridPoint`、`Rgb`、`WindowSize`。上游类型
+  （`Term`、`Cell`、`Flags`、`TermMode`）止步于 `backend/alacritty.rs`。
+- **共享层**（`terminal/mod.rs` + `selection.rs` + `search.rs` + `colors.rs` +
+  `transcript.rs`）：画面快照、选区（Simple/Word/Line/Block 与复制文本）、
+  搜索（逐行正则 + 智能大小写）、颜色解析、输入编码、转录与回滚恢复，只有
+  一份实现。选区与搜索不再用上游的，语义按上游行为移植后固化为本仓口径
+  （ADR-015 的「匹配不跨行」等边界不变）。
+- `TermRequest` 完全中性：颜色查询用 `ColorSlot { Indexed, Foreground,
+  Background, Cursor }`，不携带任何后端的槽位编号。
+
+### 2. 切换粒度：设置项，新会话生效
+
+- `Settings.terminal_backend: Option<String>` 存名字（与主题同一纪律）：
+  名字不存在或当前构建未编译该后端时回落默认，不报错。
+- `SessionConfig.backend` 随会话构造定型；`TerminalView` 记住本格后端，
+  **重连沿用原格后端**，不读当前设置。
+- 运行中的会话不接收后端切换；不提供「重启会话以换后端」（会丢 shell 状态，
+  收益不抵代价）。
+- 默认后端是 alacritty（新会话未配置时）。两个后端都是普通依赖、始终编译
+  进包，不做 feature 门控——「可选但默认全开」的两面性只会留下一条永远不
+  走的路径。
+
+### 3. 一致性：契约测试 + 差分测试
+
+- **契约测试**（`terminal/contract.rs`）：行为场景（打印、属性、宽字符、
+  选区、搜索、备用屏、鼠标、设备查询、kitty、同步输出……）对全部后端各跑
+  一遍，红一个就是语义分叉。现有 26 个场景；新后端接入时加进 `backends()`。
+- **差分测试**：resize 场景在两个后端各跑一遍、逐检查点对比整张
+  `TerminalSnapshot`，以 alacritty 为参照。8 个场景覆盖缩宽/增宽、增/减
+  高度 × 光标位置、宽字符、奇数宽度跨列、光标在正文中间。
+
+### 4. 已知有意分歧（不照抄上游）
+
+| 项 | 上游（alacritty） | 本仓 |
+|---|---|---|
+| SGR 21 | 当 CancelBold（Linux console 口径） | termwiz 后端当双下划线（xterm/kitty/ECMA-48 口径）；共享 `UnderlineKind` 文档注明归后端决定 |
+| 跨列占位后增宽 | 会丢内容（`LEADING_WIDE_CHAR_SPACER` 的边缘缺陷） | termwiz 后端保证内容完整（有专门断言 `grow_after_straddle_keeps_all_content`） |
+| 制表位 | 上游不外露其制表位表，alacritty 适配层按默认 8 列近似 | termwiz 后端跟踪真实 HTS/TSD 制表位 |
+
+上游欠账（跟进上游修复后移除近似）：alacritty_terminal 未暴露制表位表与
+SGR 21 的可选语义。
+
+## 后果
+
+- 视图层与 worker 的接口零变化：`TerminalSnapshot` 契约不变，worker 只在
+  构造模型时多传一个后端参数。
+- 换后端不改变终端对外的行为——由契约测试在结构上保证，而不是靠两份实现
+  人工对齐。
+- 后端专属能力（如图像协议）若要进入画面，必须是 `TerminalSnapshot` 契约的
+  显式扩展，不允许视图层出现后端分支。
+- 默认构建即带双后端，`cargo test` 一次跑完契约与差分场景，不存在「某套
+  构建少测一个后端」的盲区。
+- termwiz 后端的完整性与契约测试等价，但真实环境（多种 TUI、IME、SSH）的
+  长尾兼容性仍以 alacritty 后端的积累为准——这也是默认后端保持 alacritty
+  的原因。
+
+## 验证
+
+- `cargo test`：420 项通过（契约与差分场景双后端跑）。
+- `cargo clippy --workspace --all-targets` 0 warning。
+- resize 差分场景逐帧快照相等（含光标格、颜色、属性、历史与视口分布）。
+- termwiz 后端的确定性模糊测试（64 seeds × 1500 步随机输出 + 随机 resize +
+  备用屏进出 + 同步输出）断言不变量：会话线程上任何 panic 都会带走全部
+  会话，后端不允许越界。

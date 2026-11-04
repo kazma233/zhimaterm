@@ -2,23 +2,21 @@
 //!
 //! 这里只处理终端语义（网格、滚动、选区、粘贴编码），不涉及 GPUI 视图，
 //! 也不持有 PTY；调用方是会话 worker（见 `session::worker`）。
+//!
+//! 终端核心（VT 解析 + 网格 + 滚动历史）在 `core` 里，是可替换的后端；
+//! 语义（画面快照、选区、搜索、转录、输入编码、颜色解析）留在本层，
+//! 两个后端共用同一份实现——换后端不改变终端对外的行为。
 
+pub(crate) mod backend;
 mod colors;
 #[cfg(test)]
+mod contract;
+#[cfg(test)]
 mod replay;
+mod search;
+mod selection;
 mod transcript;
 
-use alacritty_terminal::{
-    event::{Event, EventListener},
-    grid::{Dimensions, Grid, Scroll},
-    index::{Column, Direction, Line, Point, Side},
-    selection::{Selection, SelectionType},
-    term::cell::Cell,
-    term::search::{Match, RegexSearch},
-    term::{Config, Osc52, Term, TermMode, cell::Flags},
-    vte::ansi,
-    vte::ansi::{CursorShape, Rgb},
-};
 use serde::{Deserialize, Serialize};
 
 use crate::input::{CellSide, KeyInput, MouseAction, MouseButton, MouseGesture, WheelDirection};
@@ -30,7 +28,13 @@ use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use self::backend::{ColorSlot, GridCell, GridPoint, Rgb, RowBuffer, TerminalCore};
 use colors::{cursor_color, default_background, default_foreground, dim, query, resolve};
+use search::SearchMatch;
+use selection::{Selection, SelectionType};
+
+/// 窗口尺寸：查询应答（CSI 14t）要用的字符与像素尺寸。
+pub use self::backend::WindowSize;
 
 /// 回滚转录的持久化格式：编解码与逻辑行装配住 `terminal::transcript`
 /// （文件格式与 VT 模型是两条变更轴，ADR-039/040）。
@@ -40,8 +44,7 @@ pub use transcript::{StoredLine, StoredRun, StoredStyle};
 pub type ColorFormatter = std::sync::Arc<dyn Fn(Rgb) -> String + Send + Sync + 'static>;
 
 /// 尺寸应答的格式化闭包：输入是当前窗口的字符与像素尺寸。
-pub type SizeFormatter =
-    std::sync::Arc<dyn Fn(alacritty_terminal::event::WindowSize) -> String + Send + Sync + 'static>;
+pub type SizeFormatter = std::sync::Arc<dyn Fn(WindowSize) -> String + Send + Sync + 'static>;
 
 /// 终端核心提出的请求：核心只管语义，跨到 PTY 或 UI 的动作必须由外面执行。
 pub enum TermRequest {
@@ -53,9 +56,9 @@ pub enum TermRequest {
     Bell,
     /// 前台程序请求把文本写入系统剪贴板（OSC 52）。读取请求由配置直接拒绝。
     ClipboardStore(String),
-    /// 颜色查询（OSC 4/10/11/12）：按索引回有效颜色，再用核心给的方式拼应答。
+    /// 颜色查询（OSC 4/10/11/12）：按槽位回有效颜色，再用后端给的方式拼应答。
     ColorRequest {
-        index: usize,
+        slot: ColorSlot,
         format: ColorFormatter,
     },
     /// 文本区像素尺寸查询（CSI 14t）：需要 UI 提供的格子像素尺寸。
@@ -72,10 +75,9 @@ impl std::fmt::Debug for TermRequest {
             Self::ResetTitle => f.write_str("ResetTitle"),
             Self::Bell => f.write_str("Bell"),
             Self::ClipboardStore(text) => f.debug_tuple("ClipboardStore").field(text).finish(),
-            Self::ColorRequest { index, .. } => f
-                .debug_struct("ColorRequest")
-                .field("index", index)
-                .finish(),
+            Self::ColorRequest { slot, .. } => {
+                f.debug_struct("ColorRequest").field("slot", slot).finish()
+            }
             Self::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
             Self::MouseCursorDirty => f.write_str("MouseCursorDirty"),
         }
@@ -84,55 +86,10 @@ impl std::fmt::Debug for TermRequest {
 
 /// 核心在解析同一线程内同步回调，请求每轮都会被 worker 排空，
 /// 因此队列不需要上界：生产者不可能跑在消费者前面。
-#[derive(Clone)]
-struct TermRequestProxy {
-    requests: smol::channel::Sender<TermRequest>,
-}
-
-impl EventListener for TermRequestProxy {
-    fn send_event(&self, event: Event) {
-        let request = match event {
-            Event::PtyWrite(text) => TermRequest::PtyWrite(text),
-            Event::Title(title) => TermRequest::Title(title),
-            Event::ResetTitle => TermRequest::ResetTitle,
-            Event::Bell => TermRequest::Bell,
-            Event::ClipboardStore(_, text) => TermRequest::ClipboardStore(text),
-            Event::ColorRequest(index, format) => TermRequest::ColorRequest { index, format },
-            Event::TextAreaSizeRequest(format) => TermRequest::TextAreaSizeRequest(format),
-            Event::MouseCursorDirty => TermRequest::MouseCursorDirty,
-            // 剪贴板读取按 ADR-002 的策略在配置层就被拒绝，因此不会到达这里
-            Event::ClipboardLoad(..) => return,
-            // 光标闪烁与唤醒由帧节流覆盖，退出与子进程退出由会话自己判定
-            Event::CursorBlinkingChange | Event::Wakeup | Event::Exit | Event::ChildExit(..) => {
-                return;
-            }
-        };
-        let _ = self.requests.try_send(request);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct TerminalSize {
-    columns: usize,
-    lines: usize,
-}
-
-impl Dimensions for TerminalSize {
-    fn total_lines(&self) -> usize {
-        self.lines
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.lines
-    }
-
-    fn columns(&self) -> usize {
-        self.columns
-    }
-}
-
-/// 下划线样式（SGR 4、4:1–4:5；上游把 SGR 21 当 CancelBold，不产生双线）。
-/// 核心对同一格只保留一种样式。
+/// 下划线样式（SGR 4 与 4:1–4:5 的五种下划线）。核心对同一格只保留一种。
+///
+/// SGR 21 的语义各实现不同（alacritty 后端随上游当 CancelBold，其余主流
+/// 实现当双线），归各后端适配层决定，不进共享语义。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnderlineKind {
@@ -143,22 +100,6 @@ pub enum UnderlineKind {
     Curly,
     Dotted,
     Dashed,
-}
-
-fn underline_kind(flags: Flags) -> UnderlineKind {
-    if flags.contains(Flags::UNDERCURL) {
-        UnderlineKind::Curly
-    } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
-        UnderlineKind::Double
-    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-        UnderlineKind::Dotted
-    } else if flags.contains(Flags::DASHED_UNDERLINE) {
-        UnderlineKind::Dashed
-    } else if flags.contains(Flags::UNDERLINE) {
-        UnderlineKind::Single
-    } else {
-        UnderlineKind::None
-    }
 }
 
 /// 一行内的连续同样式片段。
@@ -294,28 +235,6 @@ pub enum SearchDirection {
     Backward,
 }
 
-impl From<SearchDirection> for Direction {
-    fn from(direction: SearchDirection) -> Self {
-        match direction {
-            SearchDirection::Forward => Self::Right,
-            SearchDirection::Backward => Self::Left,
-        }
-    }
-}
-
-/// 字面模式的正则转义：把模式串里所有正则元字符当普通字符（ADR-015 默认字面）。
-fn escape_regex(pattern: &str) -> String {
-    const META: &str = r"\.+*?()|[]{}^$#&-~";
-    let mut escaped = String::with_capacity(pattern.len());
-    for character in pattern.chars() {
-        if META.contains(character) {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
-}
-
 /// 一次搜索的反馈，供搜索条展示；匹配高亮不走这里（进画面帧）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchOutcome {
@@ -382,10 +301,10 @@ fn modifier_bits(modifiers: crate::input::GestureModifiers) -> u32 {
         + u32::from(modifiers.control) * 16
 }
 
-fn side_to_direction(side: CellSide) -> Direction {
+fn side_to_direction(side: CellSide) -> selection::Side {
     match side {
-        CellSide::Left => Direction::Left,
-        CellSide::Right => Direction::Right,
+        CellSide::Left => selection::Side::Left,
+        CellSide::Right => selection::Side::Right,
     }
 }
 
@@ -510,7 +429,7 @@ pub struct TerminalSnapshot {
     /// 备用屏是否激活（vim/htop 等全屏程序在跑）：关闭确认据此判定。
     pub alt_screen: bool,
     /// 当前搜索匹配的高亮（ADR-015）：视口行号 + 列区间（尾列为排他端）。
-    /// 上游搜索的匹配不跨行，因此至多一段；没有活动匹配时为 None。
+    /// 单次匹配不跨行，因此至多一段；没有活动匹配时为 None。
     pub search_highlight: Option<SearchHighlight>,
     /// 光标块的有效填充色（ADR-022 决策 7）：程序改写（OSC 12）优先，
     /// 否则主题光标色。快照携带它，绘制侧每帧现读。
@@ -572,33 +491,29 @@ pub enum MouseDispatch {
     Local,
 }
 
+/// 终端尺寸（列、行）。
+#[derive(Clone, Copy)]
+struct Size {
+    columns: usize,
+    lines: usize,
+}
+
 pub struct TerminalModel {
-    parser: ansi::Processor,
-    term: Term<TermRequestProxy>,
-    requests: smol::channel::Receiver<TermRequest>,
-    size: TerminalSize,
+    /// 终端核心后端：VT 解析、网格与滚动历史的唯一所有者。
+    core: Box<dyn TerminalCore>,
+    /// 行缓冲：快照与选区按行读网格时复用，避免每帧重新分配。
+    buffer: RowBuffer,
+    /// 当前尺寸：视口坐标的基准，与后端同步。
+    size: Size,
     /// 当前主题的配色方案：网格存的是语义色，每帧快照时才按它解析成 RGB。
     scheme: Arc<ColorScheme>,
     /// 当前搜索匹配（ADR-015）：网格坐标，快照据此生成视口内的高亮区间。
-    search_match: Option<Match>,
+    search_match: Option<SearchMatch>,
+    /// 当前选区：网格坐标的锚点，复制文本与画面高亮都按它算。
+    selection: Option<Selection>,
     /// macOS 上 ⌥ 键的语义（ADR-033）：true = ⌥ 当 Alt，按键报基础键码 +
     /// alt 修饰；false = 系统原生特殊字符。
     option_as_alt: bool,
-    /// 当前滚动历史上限（ADR-035）：构造与 `set_scrolling_history` 的去重依据，
-    /// Term 没有暴露 Config 访问器，以本字段为唯一状态源。
-    history: usize,
-}
-
-/// alacritty `Config` 的唯一构造点（ADR-035）：安全策略（OSC 52 只允许复制）
-/// 与 kitty 键盘协议必须显式取值，依赖 `Config::default()` 的隐式值会让策略
-/// 随依赖升级漂移；构造与 `set_options` 共用此处，防止两处构造走样。
-fn alacritty_config(scrolling_history: usize) -> Config {
-    Config {
-        osc52: Osc52::OnlyCopy,
-        kitty_keyboard: true,
-        scrolling_history,
-        ..Config::default()
-    }
 }
 
 impl TerminalModel {
@@ -612,9 +527,28 @@ impl TerminalModel {
         )
     }
 
-    /// 按显式滚动历史上限构造（ADR-035）。
+    /// 按显式滚动历史上限构造（ADR-035）；生产路径经 `with_backend` 传入，
+    /// 本构造留给测试。
+    #[cfg(test)]
     pub fn with_history(columns: usize, lines: usize, history: usize) -> Self {
         Self::with_scheme_and_history(
+            backend::BackendKind::Alacritty,
+            columns,
+            lines,
+            Arc::new(crate::theme::default_theme().scheme),
+            history,
+        )
+    }
+
+    /// 按指定后端构造（ADR-050）：后端随会话配置选定，之后不变。
+    pub(crate) fn with_backend(
+        backend: backend::BackendKind,
+        columns: usize,
+        lines: usize,
+        history: usize,
+    ) -> Self {
+        Self::with_scheme_and_history(
+            backend,
             columns,
             lines,
             Arc::new(crate::theme::default_theme().scheme),
@@ -624,31 +558,30 @@ impl TerminalModel {
 
     #[cfg(test)]
     pub fn with_scheme(columns: usize, lines: usize, scheme: Arc<ColorScheme>) -> Self {
-        Self::with_scheme_and_history(columns, lines, scheme, DEFAULT_SCROLLING_HISTORY)
+        Self::with_scheme_and_history(
+            backend::BackendKind::Alacritty,
+            columns,
+            lines,
+            scheme,
+            DEFAULT_SCROLLING_HISTORY,
+        )
     }
 
     fn with_scheme_and_history(
+        backend: backend::BackendKind,
         columns: usize,
         lines: usize,
         scheme: Arc<ColorScheme>,
         history: usize,
     ) -> Self {
-        let size = TerminalSize { columns, lines };
-        let (requests, request_rx) = smol::channel::unbounded();
         Self {
-            parser: ansi::Processor::new(),
-            // OSC 52 策略等显式取值见 `alacritty_config` 的说明。
-            term: Term::new(
-                alacritty_config(history),
-                &size,
-                TermRequestProxy { requests },
-            ),
-            requests: request_rx,
-            size,
+            core: backend::create_backend(backend, columns, lines, history),
+            buffer: RowBuffer::default(),
+            size: Size { columns, lines },
             scheme,
             search_match: None,
+            selection: None,
             option_as_alt: false,
-            history,
         }
     }
 
@@ -662,68 +595,59 @@ impl TerminalModel {
         self.option_as_alt = enabled;
     }
 
-    /// 运行时调整滚动历史上限（ADR-035）：`set_options` 按新值截断/扩容历史
+    /// 运行时调整滚动历史上限（ADR-035）：后端按新值截断/扩容历史
     /// 缓冲并全量置脏；调小截掉超出部分是既定语义，不做额外确认。
     pub fn set_scrolling_history(&mut self, lines: usize) {
-        if lines == self.history {
-            return;
-        }
-        self.term.set_options(alacritty_config(lines));
-        self.history = lines;
+        self.core.set_scrolling_history(lines);
     }
 
     /// 取出上次解析产生的全部请求。worker 每轮排空一次，先应答查询再写回，
     /// 顺序与前台程序的输出顺序一致。
     pub fn take_requests(&mut self) -> Vec<TermRequest> {
-        let mut requests = Vec::new();
-        while let Ok(request) = self.requests.try_recv() {
-            requests.push(request);
-        }
-        requests
+        self.core.take_requests()
     }
 
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        self.core.advance(bytes);
     }
 
-    /// 同步输出（私有模式 2026）的超时时刻。BSU 之后 vte 把输出全部缓冲，等 ESU
-    /// 再一次性回放；程序崩溃或断流导致 ESU 永不到达时，宿主必须在这个时刻之后调
-    /// `stop_sync`，否则画面冻结到缓冲攒满 2 MiB——vte 只记录时刻，不自己比较时间。
+    /// 同步输出（私有模式 2026）的超时时刻。BSU 之后核心把输出全部缓冲，
+    /// 等 ESU 再一次性回放；程序崩溃或断流导致 ESU 永不到达时，宿主必须
+    /// 在这个时刻之后调 `stop_sync`，否则画面冻结到缓冲攒满 2 MiB——
+    /// 核心只记录时刻，不自己比较时间。
     pub fn sync_deadline(&self) -> Option<Instant> {
-        self.parser.sync_timeout().sync_timeout()
+        self.core.sync_deadline()
     }
 
-    /// 强制结束同步输出，把缓冲的输出回放进网格。超时兜底专用；正常的 ESU 由 vte 自己处理。
+    /// 强制结束同步输出，把缓冲的输出回放进网格。超时兜底专用；正常的 ESU 由核心自己处理。
     pub fn stop_sync(&mut self) {
-        self.parser.stop_sync(&mut self.term);
+        self.core.stop_sync();
     }
 
     pub fn resize(&mut self, columns: usize, lines: usize) {
-        let size = TerminalSize {
+        let size = Size {
             columns: columns.max(2),
             lines: lines.max(1),
         };
-        self.term.resize(size);
+        self.core.resize(size.columns, size.lines);
         self.size = size;
     }
 
     /// 按行滚动视口。正值表示回看更早的历史，负值回到更近的输出。
     pub fn scroll(&mut self, lines: i32) {
-        if lines != 0 {
-            self.term.scroll_display(Scroll::Delta(lines));
-        }
+        self.core.scroll(lines);
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.term.scroll_display(Scroll::Bottom);
+        self.core.scroll_to_bottom();
     }
 
     pub fn display_offset(&self) -> usize {
-        self.term.grid().display_offset()
+        self.core.display_offset()
     }
 
     /// 执行一次搜索（ADR-015）：正则开关关时模式串按字面匹配（转义元字符），
-    /// 开时原样编译；大小写智能沿用上游 RegexSearch（模式全小写不区分）。
+    /// 开时原样编译；大小写智能：模式全小写不区分大小写。
     ///
     /// 命中即更新当前匹配（快照据此生成高亮）并把匹配行滚进视口；
     /// 无匹配/无效/空模式清掉旧高亮。
@@ -737,30 +661,19 @@ impl TerminalModel {
             self.search_match = None;
             return SearchOutcome::NoMatch;
         }
-        let compiled = if regex_enabled {
-            pattern.to_owned()
-        } else {
-            escape_regex(pattern)
-        };
-        let Ok(mut regex) = RegexSearch::new(&compiled) else {
+        let Ok(regex) = search::compile(pattern, regex_enabled) else {
             self.search_match = None;
             return SearchOutcome::InvalidPattern;
         };
         let origin = self.search_origin(direction);
-        let side = match direction {
-            SearchDirection::Forward => Side::Left,
-            SearchDirection::Backward => Side::Right,
-        };
-        let Some(found) = self
-            .term
-            .search_next(&mut regex, origin, direction.into(), side, None)
-        else {
+        let forward = direction == SearchDirection::Forward;
+        let Some(found) = search::next_match(self.core.as_ref(), &regex, origin, forward) else {
             self.search_match = None;
             return SearchOutcome::NoMatch;
         };
         self.scroll_match_into_view(&found);
-        self.search_match = Some(found.clone());
-        SearchOutcome::Matched(found.start().line.0)
+        self.search_match = Some(found);
+        SearchOutcome::Matched(found.line)
     }
 
     /// 清掉当前匹配与高亮（关闭搜索条时）。
@@ -769,52 +682,49 @@ impl TerminalModel {
     }
 
     /// 本次搜索的起点：有当前匹配就从它的边界继续，没有则从视口边缘起。
-    /// 匹配贴到行尾/行首时要越到相邻行：原点停在原格的相邻格上会被上游
-    /// 判成"同一处匹配"而原地打转（回车看起来没反应）。
-    fn search_origin(&self, direction: SearchDirection) -> Point {
-        let display_offset = self.term.grid().display_offset() as i32;
+    /// 匹配贴到行尾/行首时要越到相邻行：原点停在原格的相邻格上会被判成
+    /// 「同一处匹配」而原地打转（回车看起来没反应）。
+    fn search_origin(&self, direction: SearchDirection) -> GridPoint {
+        let display_offset = self.core.display_offset() as i32;
         let last_column = self.size.columns.saturating_sub(1);
         match (&self.search_match, direction) {
             // 向前：从当前匹配末尾的下一格起，命中的才是「下一个」
             (Some(current), SearchDirection::Forward) => {
-                let end = current.end();
-                if end.column.0 >= last_column {
-                    Point::new(Line(end.line.0 + 1), Column(0))
+                if current.end_column >= last_column {
+                    GridPoint::new(current.line + 1, 0)
                 } else {
-                    Point::new(end.line, Column(end.column.0 + 1))
+                    GridPoint::new(current.line, current.end_column + 1)
                 }
             }
             // 向后：从当前匹配起点的上一格起
             (Some(current), SearchDirection::Backward) => {
-                let start = current.start();
-                if start.column.0 == 0 {
-                    Point::new(Line(start.line.0 - 1), Column(last_column))
+                if current.start_column == 0 {
+                    GridPoint::new(current.line - 1, last_column)
                 } else {
-                    Point::new(start.line, Column(start.column.0 - 1))
+                    GridPoint::new(current.line, current.start_column - 1)
                 }
             }
             // 无当前匹配：视口上/下缘
-            (None, SearchDirection::Forward) => Point::new(Line(-display_offset), Column(0)),
-            (None, SearchDirection::Backward) => Point::new(
-                Line(self.size.lines as i32 - 1 - display_offset),
-                Column(last_column),
-            ),
+            (None, SearchDirection::Forward) => GridPoint::new(-display_offset, 0),
+            (None, SearchDirection::Backward) => {
+                GridPoint::new(self.size.lines as i32 - 1 - display_offset, last_column)
+            }
         }
     }
 
     /// 把匹配行滚进视口：在屏内则不动（避免逐字输入时每次都跳），
     /// 在历史深处则对齐到视口中部。
-    fn scroll_match_into_view(&mut self, found: &Match) {
-        let line = found.start().line.0;
-        let display_offset = self.term.grid().display_offset() as i32;
+    fn scroll_match_into_view(&mut self, found: &SearchMatch) {
+        let line = found.line;
+        let display_offset = self.core.display_offset() as i32;
         if (0..self.size.lines as i32).contains(&(line + display_offset)) {
             return;
         }
         let target = (self.size.lines as i32 / 2) - line;
-        let clamped = target.clamp(0, self.term.grid().history_size() as i32);
+        let clamped = target.clamp(0, self.core.history_size() as i32);
         let delta = clamped - display_offset;
         if delta != 0 {
-            self.term.scroll_display(Scroll::Delta(delta));
+            self.core.scroll(delta);
         }
     }
 
@@ -827,7 +737,7 @@ impl TerminalModel {
         kind: SelectionKind,
     ) {
         let point = self.viewport_point(column, row);
-        self.term.selection = Some(Selection::new(
+        self.selection = Some(Selection::new(
             kind.to_selection_type(),
             point,
             side_to_direction(side),
@@ -837,7 +747,7 @@ impl TerminalModel {
     /// 拖拽中：把选区终点移到新的格。
     pub fn extend_selection(&mut self, column: usize, row: usize, side: CellSide) {
         let point = self.viewport_point(column, row);
-        if let Some(selection) = self.term.selection.as_mut() {
+        if let Some(selection) = self.selection.as_mut() {
             selection.update(point, side_to_direction(side));
         }
     }
@@ -846,7 +756,7 @@ impl TerminalModel {
     /// 松开鼠标：拖出范围时保留选区；只有单击留下的空选区会被清掉。
     /// 返回是否真的清除了选区，调用方据此决定要不要重画。
     pub fn finish_selection(&mut self) -> bool {
-        if !self.selection_is_empty() || self.term.selection.is_none() {
+        if !self.selection_is_empty() || self.selection.is_none() {
             return false;
         }
         self.clear_selection();
@@ -854,41 +764,49 @@ impl TerminalModel {
     }
 
     pub fn clear_selection(&mut self) {
-        self.term.selection = None;
+        self.selection = None;
     }
 
     pub fn selection_is_empty(&self) -> bool {
-        self.term.selection.as_ref().is_none_or(Selection::is_empty)
+        self.selection.as_ref().is_none_or(Selection::is_empty)
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        self.term
-            .selection_to_string()
-            .filter(|text| !text.is_empty())
+        let selection = self.selection.as_ref()?;
+        selection::to_string(self.core.as_ref(), selection).filter(|text| !text.is_empty())
     }
 
     /// 视口格坐标 -> 网格绝对坐标。宽字符的尾格归到它的前导格，
     /// 否则复制/选中会从字符中间切开。
-    fn viewport_point(&self, column: usize, row: usize) -> Point {
-        let display_offset = self.term.grid().display_offset();
-        let line = Line(row.min(self.size.lines.saturating_sub(1)) as i32 - display_offset as i32);
+    fn viewport_point(&mut self, column: usize, row: usize) -> GridPoint {
+        let display_offset = self.core.display_offset();
+        let line = row.min(self.size.lines.saturating_sub(1)) as i32 - display_offset as i32;
         let column = column.min(self.size.columns.saturating_sub(1));
-        let column = if self.term.grid()[line][Column(column)]
-            .flags
-            .contains(Flags::WIDE_CHAR_SPACER)
-        {
+        let column = if self.is_wide_char_spacer(line, column) {
             column.saturating_sub(1)
         } else {
             column
         };
-        Point::new(line, Column(column))
+        GridPoint::new(line, column)
+    }
+
+    /// 该格是不是宽字符的尾格。
+    fn is_wide_char_spacer(&mut self, line: i32, column: usize) -> bool {
+        if !self.core.line_in_range(line) {
+            return false;
+        }
+        self.core.read_row(line, &mut self.buffer);
+        self.buffer
+            .cells
+            .get(column)
+            .is_some_and(|cell| cell.spacer)
     }
 
     /// 把剪贴板文本编码为终端输入。bracketed paste 由前台程序通过私有模式
     /// 2004 开关，开启时用 CSI 200~ / 201~ 包裹，并剔除 ESC，
     /// 避免粘贴内容伪造控制序列影响程序状态。
     pub fn encode_paste(&self, text: &str) -> Vec<u8> {
-        if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+        if self.core.modes().bracketed_paste {
             let sanitized = text.replace('\x1b', "");
             let mut bytes = Vec::with_capacity(sanitized.len() + 12);
             bytes.extend_from_slice(b"\x1b[200~");
@@ -908,16 +826,16 @@ impl TerminalModel {
     /// `\x1b[99;5u`），否则 Esc 与转义序列开头、ctrl+enter 与 enter 都无法区分。
     /// 返回 None 表示这个按键不产生终端输入。
     pub fn encode_key(&self, key: &KeyInput) -> Option<Vec<u8>> {
-        let mode = self.term.mode();
-        let application_cursor = mode.contains(TermMode::APP_CURSOR);
+        let mode = self.core.modes();
+        let application_cursor = mode.app_cursor;
 
         // kitty disambiguate 模式：legacy 编码与别的字节撞车的按键改报 CSI u——
         // Esc（孤立的 `\x1b` 与转义序列开头无法区分，带不带修饰都报）、带 ctrl/alt
         // 的文本键（控制字节与 ESC 前缀都丢信息）、带修饰的 enter/tab/backspace。
         // 无修饰的 enter/tab/backspace 是协议唯一豁免，仍发 legacy 字节：程序崩溃
         // 没来得及 pop 时 shell 里还能敲 reset；shift-only 的文本键本身就是文本，
-        // 也走 legacy。口径与 Alacritty 的 should_build_sequence 一致。
-        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+        // 也走 legacy。这是本仓固化的编码口径（与 kitty 协议规格一致）。
+        if mode.disambiguate_esc_codes {
             let modified = key.control || key.alt || key.shift;
             let ctrl_or_alt = key.control || key.alt;
             let codepoint = match key.key.as_str() {
@@ -1021,8 +939,8 @@ impl TerminalModel {
     }
 
     /// 颜色查询的有效颜色：程序改写过的优先，否则用当前主题。
-    pub fn query_color(&self, index: usize) -> Rgb {
-        query(index, self.term.colors(), &self.scheme)
+    pub fn query_color(&self, slot: ColorSlot) -> Rgb {
+        query(slot, self.core.palette(), &self.scheme)
     }
 
     /// 当前终端尺寸（列、行），尺寸应答需要。
@@ -1032,7 +950,7 @@ impl TerminalModel {
 
     /// 焦点进入/离开。只有前台程序打开 FOCUS_IN_OUT（私有模式 1004）时才上报。
     pub fn encode_focus(&self, focused: bool) -> Option<Vec<u8>> {
-        self.term.mode().contains(TermMode::FOCUS_IN_OUT).then(|| {
+        self.core.modes().focus_in_out.then(|| {
             if focused {
                 b"\x1b[I".to_vec()
             } else {
@@ -1045,8 +963,8 @@ impl TerminalModel {
     /// 调用方应把这种情况的手势当作本地手势（选区或滚动）处理。
     fn encode_mouse(&self, gesture: &MouseGesture) -> Option<Vec<u8>> {
         let protocol = self.mouse_protocol()?;
-        let mode = self.term.mode();
-        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        let mode = self.core.modes();
+        let sgr = mode.sgr_mouse;
 
         let code = match gesture.action {
             MouseAction::Press { button, .. } => button_code(button),
@@ -1097,13 +1015,13 @@ impl TerminalModel {
         release: bool,
         count: usize,
     ) -> Vec<u8> {
-        let mode = self.term.mode();
+        let mode = self.core.modes();
         let column = gesture.column as u32 + 1;
         let row = gesture.row as u32 + 1;
         let mut bytes = Vec::with_capacity(16 * count);
 
         for _ in 0..count {
-            if mode.contains(TermMode::SGR_MOUSE) {
+            if mode.sgr_mouse {
                 let terminator = if release { 'm' } else { 'M' };
                 bytes.extend_from_slice(
                     format!("\x1b[<{code};{column};{row}{terminator}").as_bytes(),
@@ -1112,7 +1030,7 @@ impl TerminalModel {
                 // xterm 的按键编号与坐标都要加 32 偏移，否则程序会解析成按键 0
                 bytes.extend_from_slice(b"\x1b[M");
                 bytes.push((code + 32) as u8);
-                if mode.contains(TermMode::UTF8_MOUSE) {
+                if mode.utf8_mouse {
                     // 1005：三个字段都是 Unicode 码点，超过 127 时要按 UTF-8 多字节发送
                     push_codepoint(&mut bytes, column + 32);
                     push_codepoint(&mut bytes, row + 32);
@@ -1129,12 +1047,12 @@ impl TerminalModel {
 
     /// 程序要求的鼠标上报协议；None 表示手势由本地处理（选区或滚动）。
     fn mouse_protocol(&self) -> Option<MouseProtocol> {
-        let mode = self.term.mode();
-        if mode.contains(TermMode::MOUSE_MOTION) {
+        let mode = self.core.modes();
+        if mode.mouse_motion {
             Some(MouseProtocol::Motion)
-        } else if mode.contains(TermMode::MOUSE_DRAG) {
+        } else if mode.mouse_drag {
             Some(MouseProtocol::Drag)
-        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+        } else if mode.mouse_report_click {
             Some(MouseProtocol::ClickOnly)
         } else {
             None
@@ -1169,8 +1087,8 @@ impl TerminalModel {
         let MouseAction::Wheel(direction, count) = gesture.action else {
             return None;
         };
-        let mode = self.term.mode();
-        if !mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+        let mode = self.core.modes();
+        if !mode.alt_screen || !mode.alternate_scroll {
             return None;
         }
         let final_byte = match direction {
@@ -1178,73 +1096,69 @@ impl TerminalModel {
             WheelDirection::Down => b'B',
             WheelDirection::Left | WheelDirection::Right => return None,
         };
-        let key = navigation(final_byte, mode.contains(TermMode::APP_CURSOR), None);
+        let key = navigation(final_byte, mode.app_cursor, None);
         Some(key.repeat(count.max(1) as usize))
     }
 
     pub fn snapshot(&mut self) -> TerminalSnapshot {
-        let grid = self.term.grid();
-        let display_offset = grid.display_offset();
-        let history_size = grid.history_size();
-        let renderable = self.term.renderable_content();
-        let cursor = renderable.cursor.point;
-        let selection = renderable.selection;
-        let cursor_visible = !matches!(renderable.cursor.shape, CursorShape::Hidden);
-        let cursor_shape = match renderable.cursor.shape {
-            CursorShape::Beam => CursorKind::Beam,
-            CursorShape::Underline => CursorKind::Underline,
-            CursorShape::Block | CursorShape::HollowBlock | CursorShape::Hidden => {
-                CursorKind::Block
-            }
-        };
-        let cursor_blinking = self.term.cursor_style().blinking;
-        let viewport_cursor_line = cursor.line.0 + display_offset as i32;
+        let display_offset = self.core.display_offset();
+        let history_size = self.core.history_size();
+        let palette = self.core.palette();
+        let cursor_state = self.core.cursor();
+        let selection = self
+            .selection
+            .as_ref()
+            .and_then(|s| s.to_range(self.core.as_ref()));
+        let cursor_visible = cursor_state.visible;
+        let cursor_shape = cursor_state.shape;
+        let cursor_blinking = cursor_state.blinking;
+        let viewport_cursor_line = cursor_state.line + display_offset as i32;
         let mut rows = Vec::with_capacity(self.size.lines);
         let mut cursor_cell = None;
 
         for row in 0..self.size.lines {
             // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史。
-            let grid_line = Line(row as i32 - display_offset as i32);
-            let plain_links = self.plain_url_links(grid, grid_line);
+            let grid_line = row as i32 - display_offset as i32;
+            self.core.read_row(grid_line, &mut self.buffer);
+            let plain_links = self.plain_url_links(&self.buffer.cells);
             let mut runs: Vec<TerminalRun> = Vec::new();
             let mut current: Option<RunStyle> = None;
             let mut current_link: Option<Arc<str>> = None;
             let mut previous_wide = false;
 
-            for column in 0..self.size.columns {
-                let cell = &grid[grid_line][Column(column)];
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER) {
+            for (column, cell) in self.buffer.cells.iter().enumerate() {
+                if cell.spacer {
                     continue;
                 }
 
-                let mut foreground = resolve(cell.fg, renderable.colors, &self.scheme);
-                let mut background = resolve(cell.bg, renderable.colors, &self.scheme);
-                if cell.flags.contains(Flags::INVERSE) {
+                let mut foreground = resolve(cell.fg, palette, &self.scheme);
+                let mut background = resolve(cell.bg, palette, &self.scheme);
+                if cell.inverse {
                     std::mem::swap(&mut foreground, &mut background);
                 }
-                if cell.flags.contains(Flags::DIM) {
+                if cell.dim {
                     foreground = dim(foreground);
                 }
 
                 // 下划线颜色只在真有下划线时记录：孤立的 SGR 58 不该把段切开
-                let underline = underline_kind(cell.flags);
+                let underline = cell.underline;
                 let underline_color = (underline != UnderlineKind::None)
-                    .then(|| cell.underline_color())
+                    .then_some(cell.underline_color)
                     .flatten()
-                    .map(|color| resolve(color, renderable.colors, &self.scheme));
-                let at_cursor = viewport_cursor_line == row as i32 && cursor.column.0 == column;
+                    .map(|color| resolve(color, palette, &self.scheme));
+                let at_cursor = viewport_cursor_line == row as i32 && cursor_state.column == column;
                 let style = RunStyle {
                     foreground,
                     background,
                     // BOLD_ITALIC 同时含 BOLD 与 ITALIC 位，两边各自判自己的位
-                    bold: cell.flags.intersects(Flags::BOLD),
-                    italic: cell.flags.intersects(Flags::ITALIC),
-                    strikethrough: cell.flags.contains(Flags::STRIKEOUT),
-                    hidden: cell.flags.contains(Flags::HIDDEN),
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    strikethrough: cell.strikethrough,
+                    hidden: cell.hidden,
                     underline,
                     underline_color,
                     selected: selection
-                        .is_some_and(|range| range.contains(Point::new(grid_line, Column(column)))),
+                        .is_some_and(|range| range.contains(GridPoint::new(grid_line, column))),
                     cursor: cursor_visible && at_cursor,
                     block: is_block_element(cell.c),
                 };
@@ -1256,19 +1170,19 @@ impl TerminalModel {
                     });
                 }
                 // 宽字符占两格，尾格已被跳过，这里按格数累计而不是按字符数
-                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+                let wide = cell.width == 2;
                 let columns = if wide { 2 } else { 1 };
 
                 let mut text = String::with_capacity(4);
                 text.push(cell.c);
-                if let Some(zerowidth) = cell.zerowidth() {
-                    text.extend(zerowidth);
+                if let Some(zerowidth) = &cell.zerowidth {
+                    text.push_str(zerowidth);
                 }
 
                 // 链接也是段的一部分：鼠标悬停与点击都按段判定，跨链接不能合并。
                 // 显式 OSC 8 优先，纯文本识别兜底，两者都以 uri 参与段切分。
-                let link = match cell.hyperlink() {
-                    Some(hyperlink) => Some(Arc::from(hyperlink.uri())),
+                let link = match &cell.link {
+                    Some(hyperlink) => Some(hyperlink.clone()),
                     None => plain_links[column].clone(),
                 };
 
@@ -1309,18 +1223,16 @@ impl TerminalModel {
             rows.push(runs);
         }
 
-        // 光标有效色要在 reset_damage 前取：renderable 的借用到不了那之后
-        let cursor = cursor_color(renderable.colors, &self.scheme);
-        let foreground = default_foreground(renderable.colors, &self.scheme);
-        let background = default_background(renderable.colors, &self.scheme);
-        self.term.reset_damage();
+        let cursor = cursor_color(palette, &self.scheme);
+        let foreground = default_foreground(palette, &self.scheme);
+        let background = default_background(palette, &self.scheme);
         TerminalSnapshot {
             columns: self.size.columns,
             rows,
             display_offset,
             history_size,
             cursor_cell,
-            alt_screen: self.term.mode().contains(TermMode::ALT_SCREEN),
+            alt_screen: self.core.modes().alt_screen,
             search_highlight: self.search_highlight(display_offset),
             cursor_color: cursor,
             default_foreground: foreground,
@@ -1332,21 +1244,20 @@ impl TerminalModel {
 
     /// 行内纯文本 URL → 按列的链接表（与 OSC 8 无关的 hints 识别）。
     /// 只在单行内识别，折行的长 URL 各行各自成链。
-    fn plain_url_links(&self, grid: &Grid<Cell>, grid_line: Line) -> Vec<Option<Arc<str>>> {
+    fn plain_url_links(&self, cells: &[GridCell]) -> Vec<Option<Arc<str>>> {
         let mut links = vec![None::<Arc<str>>; self.size.columns];
         // 行文本与每个格的字节起点/列号/占格数（跳过宽字符尾格，与快照切分一致）
         let mut text = String::with_capacity(self.size.columns * 4);
-        let mut cells: Vec<(usize, usize, usize)> = Vec::with_capacity(self.size.columns);
-        for column in 0..self.size.columns {
-            let cell = &grid[grid_line][Column(column)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER) {
+        let mut offsets: Vec<(usize, usize, usize)> = Vec::with_capacity(self.size.columns);
+        for (column, cell) in cells.iter().enumerate() {
+            if cell.spacer {
                 continue;
             }
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-            cells.push((text.len(), column, if wide { 2 } else { 1 }));
+            let wide = cell.width == 2;
+            offsets.push((text.len(), column, if wide { 2 } else { 1 }));
             text.push(cell.c);
-            if let Some(zerowidth) = cell.zerowidth() {
-                text.extend(zerowidth);
+            if let Some(zerowidth) = &cell.zerowidth {
+                text.push_str(zerowidth);
             }
         }
 
@@ -1366,10 +1277,10 @@ impl TerminalModel {
                 continue;
             }
             let end = start + url.len();
-            let first = cells.partition_point(|(byte, _, _)| *byte <= start) - 1;
-            let last = cells.partition_point(|(byte, _, _)| *byte < end) - 1;
-            let (_, start_col, _) = cells[first];
-            let (_, end_col, end_width) = cells[last];
+            let first = offsets.partition_point(|(byte, _, _)| *byte <= start) - 1;
+            let last = offsets.partition_point(|(byte, _, _)| *byte < end) - 1;
+            let (_, start_col, _) = offsets[first];
+            let (_, end_col, end_width) = offsets[last];
             let shared: Arc<str> = Arc::from(url);
             for slot in &mut links[start_col..end_col + end_width] {
                 *slot = Some(shared.clone());
@@ -1379,17 +1290,16 @@ impl TerminalModel {
     }
 
     /// 当前搜索匹配映射到视口坐标：匹配不在视口内时为 None。
-    /// 单行内的一段（上游匹配不跨行），行号与列区间一起给出。
+    /// 单行内的一段（匹配不跨行），行号与列区间一起给出。
     fn search_highlight(&self, display_offset: usize) -> Option<SearchHighlight> {
         let found = self.search_match.as_ref()?;
-        let line = found.start().line.0;
-        let row = line + display_offset as i32;
+        let row = found.line + display_offset as i32;
         if !(0..self.size.lines as i32).contains(&row) {
             return None;
         }
         Some(SearchHighlight {
             row: row as usize,
-            columns: found.start().column.0..found.end().column.0 + 1,
+            columns: found.start_column..found.end_column + 1,
         })
     }
 }
@@ -2808,6 +2718,91 @@ mod tests {
         model.extend_selection(2, 0, CellSide::Right);
 
         assert_eq!(model.selection_text().as_deref(), Some("one"));
+    }
+
+    /// 双击括号取配对的一段（上游语义）：从 `(` 起找到对应的 `)`，
+    /// 中间的内容整段选中。
+    #[test]
+    fn bracket_selection_takes_the_matching_pair() {
+        let mut model = TerminalModel::new(30, 3);
+        model.advance(b"fn call(a, b) end");
+
+        model.begin_selection(7, 0, CellSide::Left, SelectionKind::Word);
+        assert_eq!(model.selection_text().as_deref(), Some("(a, b)"));
+    }
+
+    /// 行选跨软折行：逻辑行是一条，复制出来不应在折行处断开。
+    #[test]
+    fn line_selection_follows_a_soft_wrap() {
+        let mut model = TerminalModel::new(6, 4);
+        model.advance(b"abcdefghij");
+
+        model.begin_selection(0, 0, CellSide::Left, SelectionKind::Line);
+        assert_eq!(model.selection_text().as_deref(), Some("abcdefghij\n"));
+    }
+
+    /// 隐藏文本（SGR 8）仍可选中复制：画面上不画字形，剪贴板里是真实文本。
+    #[test]
+    fn copied_hidden_text_is_not_dropped() {
+        let mut model = TerminalModel::new(20, 3);
+        model.advance(b"\x1b[8msecret\x1b[0m");
+
+        model.begin_selection(0, 0, CellSide::Left, SelectionKind::Word);
+        assert_eq!(model.selection_text().as_deref(), Some("secret"));
+    }
+
+    /// 制表符按制表位展开成空格存放在网格里，复制时只留一个 `\t`，
+    /// 不能把补位的空格也带出去。
+    #[test]
+    fn copied_line_keeps_tabs_compact() {
+        let mut model = TerminalModel::new(20, 3);
+        model.advance(b"a\tb");
+
+        model.begin_selection(0, 0, CellSide::Left, SelectionKind::Line);
+        assert_eq!(model.selection_text().as_deref(), Some("a\tb\n"));
+    }
+
+    /// 匹配逐物理行进行：跨软折行的模式不会命中。高亮的表示只有
+    /// 「一行 + 列区间」（ADR-015），跨行的匹配无法被正确高亮。
+    #[test]
+    fn search_does_not_match_across_a_soft_wrap() {
+        let mut model = TerminalModel::new(6, 3);
+        // 6 列写 7 个字符：第 7 个字符折到下一行，两行是同一条逻辑行
+        model.advance(b"abcdefg");
+
+        assert_eq!(
+            model.search("fg", false, SearchDirection::Forward).kind(),
+            "miss",
+            "跨折行的匹配不命中"
+        );
+        assert_eq!(
+            model.search("abc", false, SearchDirection::Forward).kind(),
+            "hit"
+        );
+        assert_eq!(
+            model.search("g", false, SearchDirection::Forward).kind(),
+            "hit"
+        );
+    }
+
+    /// 搜索范围是一整圈：视口里扫完会绕回历史，不会因为停在底部就漏掉更早的输出。
+    #[test]
+    fn search_wraps_from_the_viewport_into_history() {
+        let mut model = TerminalModel::new(20, 2);
+        model.advance(b"needle-one\r\nx\r\nneedle-two\r\n");
+
+        let first = model.search("needle", false, SearchDirection::Forward);
+        let second = model.search("needle", false, SearchDirection::Forward);
+        let SearchOutcome::Matched(first_line) = first else {
+            panic!("第一处应命中");
+        };
+        let SearchOutcome::Matched(second_line) = second else {
+            panic!("第二处应命中");
+        };
+        assert!(
+            second_line < first_line,
+            "扫完视口应绕回更早的历史：{second_line} < {first_line}"
+        );
     }
 
     /// 搜索语义（ADR-015）：默认字面匹配、大小写智能、正则开关。

@@ -28,6 +28,7 @@ pub fn spawn(columns: usize, lines: usize) -> (Session, SessionEvents) {
         target: SessionTarget::Local {
             shell: LocalShell::Default { cwd: None },
         },
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane: test_pane(),
@@ -139,6 +140,7 @@ pub fn ssh_session_with(
             jump: None,
             credential_id: None,
         }),
+        backend: crate::terminal::backend::BackendKind::Alacritty,
         history: 10_000,
         scrollback: None,
         pane: test_pane(),

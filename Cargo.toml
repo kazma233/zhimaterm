@@ -23,6 +23,8 @@ smol = "2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 ssh2 = { version = "=0.9.6", features = ["vendored-openssl", "openssl-on-win32"] }
+# termwiz 后端（ADR-050）：VT 流式解析器；屏幕模型在本仓实现（src/terminal/backend/termwiz.rs）。
+termwiz = "0.23"
 unicode-segmentation = "1"
 # 保存连接的条目 id（ADR-018 修订）：凭据按条目 id 挂钥匙串，条目身份不再
 # 参与；需要不受存档内容影响的唯一键

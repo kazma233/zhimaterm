@@ -293,6 +293,9 @@ pub struct SessionConfig {
     /// 初始行列的来源与兜底值。
     pub size: StartupSize,
     pub target: SessionTarget,
+    /// 终端核心后端（ADR-050）：构造终端模型时选定，会话存活期内不变，
+    /// 重连沿用同一后端。
+    pub backend: crate::terminal::backend::BackendKind,
     /// 滚动历史上限（ADR-035）：构造终端模型的初始值；运行中调整走
     /// `Session::set_scrolling_history`。
     pub history: usize,

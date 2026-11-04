@@ -128,6 +128,7 @@ OpenSSL 采用 Apache-2.0，与本项目的 MIT 许可兼容。
 | serde | =1.0.229 | MIT OR Apache-2.0 | 配置与存档序列化 |
 | serde_json | =1.0.151 | MIT OR Apache-2.0 | JSON |
 | ssh2 | =0.9.6 | MIT OR Apache-2.0 | libssh2 的安全封装 |
+| termwiz | 0.23 | MIT OR Apache-2.0 | termwiz 后端的 VT 流式解析器 |
 | unicode-segmentation | 1 | MIT OR Apache-2.0 | 字素簇切分 |
 | unicode-width | 0.2 | MIT OR Apache-2.0 | 组合文本按 wcwidth 折算占格 |
 | uuid | 1 | Apache-2.0 OR MIT | 保存连接条目的唯一 id |

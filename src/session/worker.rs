@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use super::scrollback;
 use super::transport::{self, Transport};
-use alacritty_terminal::event::WindowSize;
 use anyhow::{Context, Result};
 use smol::channel::{Receiver, Sender, TrySendError};
 
@@ -21,6 +20,7 @@ use super::{
     SessionCommand, SessionConfig, SessionExit, StartupSize,
 };
 use crate::input::{MouseAction, MouseButton, MouseGesture, WheelDirection};
+use crate::terminal::WindowSize;
 use crate::terminal::{
     MouseDispatch, SelectionKind, StoredLine, TermRequest, TerminalModel, TerminalSnapshot,
 };
@@ -220,6 +220,7 @@ pub(super) fn run(
     let SessionConfig {
         size,
         target,
+        backend,
         history,
         scrollback,
         pane: _,
@@ -274,7 +275,7 @@ pub(super) fn run(
     let mut writer = Some(transport.take_writer());
     // 一次性信号：收到后置 None，通道关闭的 recv 立即就绪，不能再参与等待组合
     let mut child_exit = transport.take_exit_signal();
-    let mut terminal = TerminalModel::with_history(columns, lines, history);
+    let mut terminal = TerminalModel::with_backend(backend, columns, lines, history);
     let shell_pid = extras.shell_pid;
     // 回滚灌入门控（ADR-049）：可信尺寸开工即灌；超时兜底的尺寸只够 PTY
     // 开工，内容留在手里等首个 Resize——否则列数不对（满宽背景行被折行
@@ -455,15 +456,15 @@ pub(super) fn run(
                 TermRequest::ClipboardStore(text) => {
                     emit_control(&control, ControlEvent::ClipboardStore(text));
                 }
-                TermRequest::ColorRequest { index, format } => {
-                    let answer = format(terminal.query_color(index));
+                TermRequest::ColorRequest { slot, format } => {
+                    let answer = format(terminal.query_color(slot));
                     write_bytes(&mut writer, answer.as_bytes())?;
                 }
                 TermRequest::TextAreaSizeRequest(format) => {
                     let (columns, lines) = terminal.size();
                     let answer = format(WindowSize {
-                        num_lines: lines.min(u16::MAX as usize) as u16,
-                        num_cols: columns.min(u16::MAX as usize) as u16,
+                        lines,
+                        columns,
                         cell_width: state.cell_size.0,
                         cell_height: state.cell_size.1,
                     });

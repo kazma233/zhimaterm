@@ -70,6 +70,7 @@
 - [ADR-047：侧栏会话行手动重命名](decisions/047-sidebar-session-rename.md)：名字挂标签不挂格、右键菜单入口与 Esc 捕获、通用 Dialog prompt 首个消费方、随工作区落盘。
 - [ADR-048：连接弹窗列表优先、编辑与连接分离、连接名称](decisions/048-connect-modal-list-first-and-names.md)：列表行上「连接」「编辑」「删除」显式按钮、「编辑」才进表单、主按钮不再随改动跳文案、仅密码条目叠密码框、校验错误随编辑即时消长（单字段贴输入框、组合结论与钥匙串失败进底栏）、连接名随条目落盘并成为标签初始名。
 - [ADR-049：回滚恢复的尺寸信任与不变式守护](decisions/049-scrollback-restore-size-gate.md)：修订 ADR-046 的恢复口径，超时兜底尺寸此后只用于首次 PTY 建立、不再用于回滚重建，恢复格按落盘尺寸回放。
+- [ADR-050：终端核心后端抽象与 termwiz 后端](decisions/050-terminal-backend-abstraction.md)：语义收共享层（快照/选区/搜索/转录只有一份）、字节→网格收后端（TerminalCore trait）；设置项选新会话后端、重连沿用原格；契约 + resize 差分测试保证换后端行为一致，已知有意分歧入表。
 
 ## 背景与调研（`context/`）
 

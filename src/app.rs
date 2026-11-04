@@ -667,16 +667,26 @@ impl ZhimaTermApp {
             .flatten();
         let metrics = self.metrics;
         let font = self.font.clone();
-        let option_as_alt = self
-            .settings
-            .as_ref()
-            .map(|store| store.option_as_alt)
-            .unwrap_or(false);
-        let history = self
-            .settings
-            .as_ref()
-            .map(|store| store.scrolling_history_or_default())
-            .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY);
+        // 会话固有参数从设置取一次：后端随格定型（ADR-050），运行中改设置
+        // 只影响新格
+        let params = crate::views::terminal_view::SessionParams {
+            option_as_alt: self
+                .settings
+                .as_ref()
+                .map(|store| store.option_as_alt)
+                .unwrap_or(false),
+            history: self
+                .settings
+                .as_ref()
+                .map(|store| store.scrolling_history_or_default())
+                .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY),
+            backend: self
+                .settings
+                .as_ref()
+                .map(|store| store.terminal_backend_or_default())
+                .unwrap_or_default(),
+        };
+
         // 运行中转发增删的回调（ADR-038）：视图不持有保存的连接与 id 分配，
         // 一律回到应用层处理
         let saved_connection = match &target {
@@ -720,8 +730,7 @@ impl ZhimaTermApp {
                 number,
                 display_number,
                 target,
-                option_as_alt,
-                history,
+                params,
                 scrollback,
                 hooks,
             )
@@ -1265,6 +1274,9 @@ impl ZhimaTermApp {
             local_shell: store.and_then(|store| store.local_shell.clone()),
             local_workdir: store.and_then(|store| store.local_workdir.clone()),
             option_as_alt: store.map(|store| store.option_as_alt).unwrap_or(false),
+            terminal_backend: store
+                .map(|store| store.terminal_backend_or_default())
+                .unwrap_or_default(),
         };
         // 候选只在打开时取一次：系统字体列表与注册表不会在表单打开期间变化
         let lists = CandidateLists {
@@ -1387,6 +1399,7 @@ impl ZhimaTermApp {
                 store.scrolling_history = Some(edited.scrolling_history);
                 store.local_shell = edited.local_shell;
                 store.local_workdir = edited.local_workdir;
+                store.terminal_backend = Some(edited.terminal_backend.name().to_owned());
                 if let Err(error) = store.save() {
                     return self.fail_settings(
                         format!("已应用，但保存失败：{error:#}；重启后将恢复为上次保存的设置"),

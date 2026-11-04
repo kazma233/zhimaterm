@@ -56,9 +56,20 @@ pub struct Settings {
     pub local_shell: Option<String>,
     /// None = 工作目录落在 home。存绝对路径，新建本地会话时校验。
     pub local_workdir: Option<String>,
+    /// 终端核心后端（ADR-050）。存名字，与主题的回落纪律一致：名字不存在
+    /// 时回落默认。只影响新会话。
+    pub terminal_backend: Option<String>,
 }
 
 impl Settings {
+    /// 生效终端后端：未配置或名字不存在都回落默认。
+    pub fn terminal_backend_or_default(&self) -> crate::terminal::backend::BackendKind {
+        self.terminal_backend
+            .as_deref()
+            .map(crate::terminal::backend::BackendKind::parse)
+            .unwrap_or_default()
+    }
+
     /// 生效字号：未配置用默认；文件被手改出范围时夹回来，不让坏值把网格量歪。
     pub fn font_size_or_default(&self) -> f32 {
         self.font_size
@@ -318,6 +329,7 @@ mod tests {
             scrolling_history: Some(50_000),
             local_shell: Some("/bin/zsh".into()),
             local_workdir: Some("/tmp".into()),
+            terminal_backend: None,
         };
         settings.save_at(path.clone()).expect("保存应成功");
 

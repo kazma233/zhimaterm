@@ -21,6 +21,7 @@ use crate::settings::{
     validate_font_size, validate_local_shell, validate_local_workdir, validate_scrolling_history,
     validate_ui_font_size,
 };
+use crate::terminal::backend::BackendKind;
 use crate::ui::card;
 use crate::ui::input::{self, TextInput};
 use crate::ui::overlay::{KeyHandling, ModalView, Species};
@@ -45,6 +46,8 @@ pub enum DropdownField {
     Terminal,
     Interface,
     Shell,
+    /// 终端核心后端（ADR-050）：只影响新会话。
+    Backend,
 }
 
 /// 选择框 bounds 槽位：渲染帧写入，展开的浮层按它定位。
@@ -62,6 +65,8 @@ pub struct EffectiveSettings {
     pub local_shell: Option<String>,
     pub local_workdir: Option<String>,
     pub option_as_alt: bool,
+    /// 新会话用的终端核心后端（ADR-050）。
+    pub terminal_backend: BackendKind,
 }
 
 /// 打开表单时的候选快照：字体与 Shell 候选由外壳取一次传入（connect 表单
@@ -87,6 +92,8 @@ pub struct EditedSettings {
     pub local_shell: Option<String>,
     pub local_workdir: Option<String>,
     pub option_as_alt: bool,
+    /// 新会话用的终端核心后端（ADR-050）。
+    pub terminal_backend: BackendKind,
 }
 
 /// 自定义 Shell 输入的占位路径：只作格式提示，不代表任何平台的默认。
@@ -113,6 +120,13 @@ pub struct SettingsForm {
     workdir: Entity<TextInput>,
     /// macOS 上 ⌥ 键当 Alt（ADR-033）。默认关：保持系统原生特殊字符输入。
     option_as_alt: bool,
+    /// 选中的终端核心后端（ADR-050）在候选表里的下标；候选 = 当前构建可用
+    /// 的全部后端。
+    backend_index: usize,
+    /// 终端核心下拉是否展开
+    backend_open: bool,
+    /// 终端核心选择框 bounds（渲染帧写入）
+    backend_bounds: BoundsSlot,
     /// 可选的等宽字体：打开表单时取一次（系统字体列表不会在运行中变化）
     candidates: Vec<String>,
     /// 可选的界面字体：全部系统字体，第一项是系统默认
@@ -178,6 +192,12 @@ impl SettingsForm {
                 gpui::size(px(0.), px(0.)),
             )))
         };
+        // 后端候选 = 全部后端；当前值不在候选里（手改了设置文件）时选默认
+        let backends = BackendKind::available();
+        let backend_index = backends
+            .iter()
+            .position(|backend| *backend == current.terminal_backend)
+            .unwrap_or(0);
         Self {
             font_index,
             font_open: false,
@@ -191,6 +211,9 @@ impl SettingsForm {
             custom_shell,
             workdir,
             option_as_alt: current.option_as_alt,
+            backend_index,
+            backend_open: false,
+            backend_bounds: empty_bounds(),
             candidates,
             ui_candidates,
             shell_open: false,
@@ -223,6 +246,10 @@ impl SettingsForm {
         };
         let local_shell = validate_local_shell(&shell_text)?;
         let local_workdir = validate_local_workdir(self.workdir.read(cx).text())?;
+        let terminal_backend = BackendKind::available()
+            .get(self.backend_index)
+            .copied()
+            .unwrap_or_default();
         Ok(EditedSettings {
             font_family,
             font_size,
@@ -232,6 +259,7 @@ impl SettingsForm {
             local_shell,
             local_workdir,
             option_as_alt: self.option_as_alt,
+            terminal_backend,
         })
     }
 
@@ -268,6 +296,7 @@ impl SettingsForm {
             DropdownField::Terminal => self.font_open = !self.font_open,
             DropdownField::Interface => self.ui_font_open = !self.ui_font_open,
             DropdownField::Shell => self.shell_open = !self.shell_open,
+            DropdownField::Backend => self.backend_open = !self.backend_open,
         }
         if field != DropdownField::Terminal {
             self.font_open = false;
@@ -278,6 +307,9 @@ impl SettingsForm {
         if field != DropdownField::Shell {
             self.shell_open = false;
         }
+        if field != DropdownField::Backend {
+            self.backend_open = false;
+        }
         cx.notify();
     }
 
@@ -287,6 +319,7 @@ impl SettingsForm {
             DropdownField::Terminal => self.font_index = index,
             DropdownField::Interface => self.ui_font_index = index,
             DropdownField::Shell => self.shell_index = index,
+            DropdownField::Backend => self.backend_index = index,
         }
         self.close_dropdowns(cx);
     }
@@ -296,12 +329,21 @@ impl SettingsForm {
         self.font_open = false;
         self.ui_font_open = false;
         self.shell_open = false;
+        self.backend_open = false;
         cx.notify();
     }
 
     /// 是否有下拉展开着：Esc 要先收下拉再关表单。
     pub fn dropdown_open(&self) -> bool {
-        self.font_open || self.ui_font_open || self.shell_open
+        self.font_open || self.ui_font_open || self.shell_open || self.backend_open
+    }
+
+    /// 终端核心下拉的候选显示名。
+    pub fn backend_labels(&self) -> Vec<String> {
+        BackendKind::available()
+            .iter()
+            .map(|backend| backend.display_name().to_owned())
+            .collect()
     }
 
     /// 当前选中的是「自定义…」项（候选表之后的末位）。
@@ -346,6 +388,8 @@ impl SettingsForm {
         self.ui_font_open = false;
         self.shell_index = 0;
         self.shell_open = false;
+        self.backend_index = 0;
+        self.backend_open = false;
         self.custom_shell
             .update(cx, |input, cx| input.set_text("", cx));
         self.workdir.update(cx, |input, cx| input.set_text("", cx));
@@ -620,6 +664,30 @@ impl ModalView for SettingsModal {
                 ),
                 &form.history,
             ));
+        content = content.child(pair_row(
+            field_column(
+                tokens,
+                "终端核心（应用于新会话）",
+                plain_select_row(
+                    tokens,
+                    "select-terminal-backend",
+                    &form.backend_labels()[form.backend_index],
+                    form.backend_open,
+                    &form.backend_bounds,
+                    {
+                        let form = self.form.clone();
+                        move |_, _, cx| {
+                            form.update(cx, |form, cx| {
+                                form.toggle_dropdown(DropdownField::Backend, cx)
+                            });
+                        }
+                    },
+                ),
+            ),
+            field_column(tokens, "已运行会话保持原后端", {
+                card::label(tokens, "切换只影响之后新建的会话与标签").into_any_element()
+            }),
+        ));
         // ⌥ 键当 Alt 只在 macOS 有语义：其余平台的 Alt 键本就是 Alt，开关渲染
         // 出来是死设置（ADR-033）。配置字段不因平台分叉，照常持久化
         #[cfg(target_os = "macos")]
@@ -785,6 +853,29 @@ impl ModalView for SettingsModal {
                 .into_any_element(),
             ];
         }
+        if form.backend_open {
+            let pick_form = self.form.clone();
+            let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
+                pick_form.update(cx, |form, cx| form.pick(DropdownField::Backend, index, cx));
+            });
+            let close_form = self.form.clone();
+            return vec![
+                select_backdrop(move |_, cx| {
+                    close_form.update(cx, |form, cx| form.close_dropdowns(cx));
+                })
+                .into_any_element(),
+                plain_select_popover(
+                    tokens,
+                    "backend-select-popover",
+                    &form.backend_labels(),
+                    form.backend_index,
+                    &form.backend_bounds,
+                    viewport_height,
+                    pick,
+                )
+                .into_any_element(),
+            ];
+        }
         Vec::new()
     }
 
@@ -854,6 +945,7 @@ mod tests {
             scrolling_history: 5_000,
             local_shell: Some(test_paths::alt_shell()),
             local_workdir: None,
+            terminal_backend: BackendKind::Alacritty,
             option_as_alt: true,
         }
     }

@@ -28,6 +28,7 @@ use crate::session::{
     MonitorEvent, MonitorSample, PointerShape, ReconnectPlanner, ScheduleOutcome, Session,
     SessionConfig, SessionEvent, SessionTarget, SshTarget, StartupSize, TickOutcome, TrustRequest,
 };
+use crate::terminal::backend::BackendKind;
 use crate::terminal::{SearchDirection, SearchOutcome, TerminalSnapshot};
 use crate::ui::input::{ImeComposition, TextInput};
 use crate::ui::menu;
@@ -112,6 +113,8 @@ pub struct TerminalView {
     option_as_alt: bool,
     /// 本格的滚动历史上限（ADR-035）：重连会重建 worker 与终端模型，用它带回。
     history: usize,
+    /// 本格的终端核心后端（ADR-050）：随会话构造定型，重连沿用，不读当前设置。
+    backend: BackendKind,
     last_size: Rc<Cell<(usize, usize)>>,
     /// 触摸板以像素为单位连续滚动，累积不足一格的小增量，避免被四舍五入丢弃
     scroll_remainder: f32,
@@ -239,6 +242,16 @@ pub struct TerminalView {
     scrollback: Option<std::path::PathBuf>,
 }
 
+/// 会话固有的、由设置决定的参数：随格构造定型，重连沿用同一份。
+pub struct SessionParams {
+    /// macOS 上 ⌥ 键的语义（ADR-033）。
+    pub option_as_alt: bool,
+    /// 滚动历史上限（ADR-035）。
+    pub history: usize,
+    /// 终端核心后端（ADR-050）。
+    pub backend: BackendKind,
+}
+
 impl TerminalView {
     // 构造参数是会话的固有属性，逐项列清比打包成结构体更好读；
     // 参数位超过 clippy 默认阈值，按本仓库既有取舍放行。
@@ -250,8 +263,7 @@ impl TerminalView {
         number: usize,
         display_number: usize,
         target: SessionTarget,
-        option_as_alt: bool,
-        history: usize,
+        params: SessionParams,
         scrollback: Option<std::path::PathBuf>,
         forward_hooks: ForwardHooks,
     ) -> Self {
@@ -306,7 +318,8 @@ impl TerminalView {
             // 真实行列首帧 layout 才知道：worker 等首个 Resize 再开工（ADR-046）
             size: StartupSize::AwaitLayout { fallback: (96, 30) },
             target,
-            history,
+            backend: params.backend,
+            history: params.history,
             scrollback: scrollback.clone(),
             pane,
         });
@@ -315,7 +328,7 @@ impl TerminalView {
         session.set_theme(Arc::new(crate::theme::current(cx).scheme));
         // ⌥ 键语义同样经命令下发（ADR-033）：模型自己持有一份状态，
         // 编码时才知道 option 修饰的键该报基础键码还是系统特殊字符
-        session.set_option_as_alt(option_as_alt);
+        session.set_option_as_alt(params.option_as_alt);
         let focus = cx.focus_handle();
 
         Self::watch_events(events, 0, cx);
@@ -332,8 +345,9 @@ impl TerminalView {
             title: None,
             pointer: PointerShape::Text,
             ime_composition: ImeComposition::default(),
-            option_as_alt,
-            history,
+            option_as_alt: params.option_as_alt,
+            history: params.history,
+            backend: params.backend,
             cwd: None,
             scrollback,
             last_size: Rc::new(Cell::new((0, 0))),
@@ -813,6 +827,8 @@ impl TerminalView {
             // 真实行列首帧 layout 才知道：worker 等首个 Resize 再开工（ADR-046）
             size: StartupSize::AwaitLayout { fallback: (96, 30) },
             target: SessionTarget::Ssh(target),
+            // 重连沿用本格原后端，不读当前设置：同一格换终端内核不可行
+            backend: self.backend,
             history: self.history,
             scrollback: self.scrollback.clone(),
             // 重连复用同一格的记录注册（ADR-045）：worker 绑定同一个日志

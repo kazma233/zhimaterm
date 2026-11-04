@@ -56,6 +56,10 @@ src/ui/canvas.rs               组件底座：鼠标监听、输入法处理器�
 
 ── 模型层 ──
 src/terminal/                  终端模型：VT 状态、滚动、选区、输入编码、run 快照
+src/terminal/backend/          终端核心后端：中性契约（TerminalCore trait）与各实现（ADR-050）
+src/terminal/selection.rs      选区语义：词/行/块选与复制文本（共享层，后端无关）
+src/terminal/search.rs         搜索语义：逐行正则、智能大小写、方向导航（共享层，后端无关）
+src/terminal/contract.rs       后端契约测试：同一行为场景跑全部后端（含 resize 差分）
 src/terminal/transcript.rs     行转录的格式编解码与逻辑行装配（输出日志与回滚共用，ADR-007 修订）
 src/terminal/colors.rs         VT 颜色 → RGB 与颜色查询
 src/terminal/replay.rs         录制流回归

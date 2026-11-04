@@ -8,20 +8,12 @@
 
 use std::ops::Range;
 
-use alacritty_terminal::{
-    grid::Dimensions,
-    index::{Column, Line},
-    term::cell::Cell,
-    term::color::Colors,
-    term::{TermMode, cell::Flags},
-    vte::ansi::{Color, NamedColor},
-};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::TerminalModel;
 use super::UnderlineKind;
-use super::colors::{dim, rgb_to_u32};
-use super::underline_kind;
+use super::backend::{CellColor, GridCell, NamedSlot, RowBuffer};
+use super::colors::dim;
 
 /// 回滚转录里的颜色（ADR-040）。
 ///
@@ -154,6 +146,8 @@ fn plain_text(line: &StoredLine) -> String {
 /// 物理行接续成完整逻辑行；耗尽时装配中的半行留在 `current` 里。
 struct LogicalLines<'a> {
     model: &'a TerminalModel,
+    /// 行缓冲：逐行读网格时复用，避免每行重新分配。
+    buffer: &'a mut RowBuffer,
     next: i32,
     end: i32,
     current: StoredLine,
@@ -177,9 +171,10 @@ impl Iterator for LogicalLines<'_> {
 
     fn next(&mut self) -> Option<StoredLine> {
         while self.next < self.end {
-            let line = Line(self.next);
+            let line = self.next;
             self.next += 1;
-            self.model.append_row_runs(&mut self.current, line);
+            self.model
+                .append_row_runs(&mut self.current, line, self.buffer);
             if !self.model.row_wrapped(line) {
                 return Some(std::mem::take(&mut self.current));
             }
@@ -252,19 +247,20 @@ impl TerminalModel {
         logged_history: &mut usize,
         pending: &mut String,
     ) -> Vec<String> {
-        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+        if self.core.modes().alt_screen {
             return Vec::new();
         }
-        let history = self.term.grid().history_size();
+        let history = self.core.history_size();
         if history < *logged_history {
             *logged_history = history;
             pending.clear();
             return Vec::new();
         }
-        // Line(-k)：k 越大越早滚入；从最早的新行向最新行接续。半行跨轮次携带
+        // 负行号：k 越大越早滚入；从最早的新行向最新行接续。半行跨轮次携带
         let new_rows = (history - *logged_history) as i32;
+        let mut buffer = RowBuffer::default();
         let mut rows = self
-            .logical_lines(-new_rows..0)
+            .logical_lines(-new_rows..0, &mut buffer)
             .seed(plain_line(std::mem::take(pending)));
         let lines: Vec<String> = rows
             .by_ref()
@@ -278,11 +274,12 @@ impl TerminalModel {
     /// 会话收尾冲刷：把仍留在屏幕上的行接在挂起的半行后写出，尾部空行裁掉。
     /// 备用屏激活时不冲刷——全屏界面按决策不进日志。
     pub fn screen_transcript(&self, pending: String) -> Vec<String> {
-        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+        if self.core.modes().alt_screen {
             return Vec::new();
         }
+        let mut buffer = RowBuffer::default();
         let mut rows = self
-            .logical_lines(0..self.size.lines as i32)
+            .logical_lines(0..self.size.lines as i32, &mut buffer)
             .seed(plain_line(pending));
         let mut lines: Vec<String> = rows
             .by_ref()
@@ -303,12 +300,13 @@ impl TerminalModel {
     /// 历史一起换色；程序改写过的槽位按 RGB 固化。裁空白、去尾部空行、封顶
     /// 都是本口径的事，装配见 [`TerminalModel::logical_lines`]。
     pub fn tail_transcript_styled(&self, max_lines: usize) -> Vec<StoredLine> {
-        if max_lines == 0 || self.term.mode().contains(TermMode::ALT_SCREEN) {
+        if max_lines == 0 || self.core.modes().alt_screen {
             return Vec::new();
         }
-        let history = self.term.grid().history_size();
+        let history = self.core.history_size();
         let oldest = history.min(max_lines);
-        let mut rows = self.logical_lines(-(oldest as i32)..self.size.lines as i32);
+        let mut buffer = RowBuffer::default();
+        let mut rows = self.logical_lines(-(oldest as i32)..self.size.lines as i32, &mut buffer);
         let mut lines: Vec<StoredLine> = rows
             .by_ref()
             .map(|mut line| {
@@ -332,71 +330,54 @@ impl TerminalModel {
 
     /// 单元格 → 持久化样式。反相与变暗保留为标志，让恢复后的内容仍按当前
     /// 主题解析；只有无法用语义色表达的程序改写才固化成 RGB。
-    fn stored_style(&self, cell: &Cell, colors: &Colors) -> StoredStyle {
-        let underline = underline_kind(cell.flags);
+    fn stored_style(&self, cell: &GridCell) -> StoredStyle {
+        let underline = cell.underline;
         StoredStyle {
-            foreground: self.stored_color(cell.fg, colors),
-            background: self.stored_color(cell.bg, colors),
-            bold: cell.flags.intersects(Flags::BOLD),
-            dim: cell.flags.contains(Flags::DIM),
-            italic: cell.flags.intersects(Flags::ITALIC),
-            inverse: cell.flags.contains(Flags::INVERSE),
-            hidden: cell.flags.contains(Flags::HIDDEN),
-            strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+            foreground: self.stored_color(cell.fg),
+            background: self.stored_color(cell.bg),
+            bold: cell.bold,
+            dim: cell.dim,
+            italic: cell.italic,
+            inverse: cell.inverse,
+            hidden: cell.hidden,
+            strikethrough: cell.strikethrough,
             underline,
             underline_color: (underline != UnderlineKind::None)
-                .then(|| cell.underline_color())
+                .then_some(cell.underline_color)
                 .flatten()
-                .map(|color| self.stored_color(color, colors)),
+                .map(|color| self.stored_color(color)),
         }
     }
 
-    fn stored_color(&self, color: Color, colors: &Colors) -> StoredColor {
+    fn stored_color(&self, color: CellColor) -> StoredColor {
+        let palette = self.core.palette();
         match color {
-            Color::Spec(rgb) => StoredColor::Rgb(rgb_to_u32(rgb)),
-            Color::Indexed(index) => match colors[index as usize] {
-                Some(rgb) => StoredColor::Rgb(rgb_to_u32(rgb)),
+            CellColor::Rgb(rgb) => StoredColor::Rgb(rgb),
+            CellColor::Indexed(index) => match palette.indexed[index as usize] {
+                Some(rgb) => StoredColor::Rgb(rgb),
                 None => StoredColor::Indexed(index),
             },
-            Color::Named(named) => {
+            CellColor::Named(slot) => {
                 // OSC 4/10/11 改写过这个槽位：固化改写后的颜色，不让新主题覆盖
-                if let Some(rgb) = colors[named] {
-                    return StoredColor::Rgb(rgb_to_u32(rgb));
-                }
-                match named {
-                    NamedColor::Foreground
-                    | NamedColor::BrightForeground
-                    | NamedColor::Background => StoredColor::Default,
-                    NamedColor::Black
-                    | NamedColor::Red
-                    | NamedColor::Green
-                    | NamedColor::Yellow
-                    | NamedColor::Blue
-                    | NamedColor::Magenta
-                    | NamedColor::Cyan
-                    | NamedColor::White
-                    | NamedColor::BrightBlack
-                    | NamedColor::BrightRed
-                    | NamedColor::BrightGreen
-                    | NamedColor::BrightYellow
-                    | NamedColor::BrightBlue
-                    | NamedColor::BrightMagenta
-                    | NamedColor::BrightCyan
-                    | NamedColor::BrightWhite => StoredColor::Indexed(named as u8),
-                    // 这些变体只可能来自配置模板，解析器不会写进网格；用主题色
-                    // 固化，避免猜一串 SGR 组合
-                    NamedColor::Cursor => StoredColor::Rgb(self.scheme.cursor),
-                    NamedColor::DimForeground => StoredColor::Rgb(dim(self.scheme.foreground)),
-                    NamedColor::DimBlack
-                    | NamedColor::DimRed
-                    | NamedColor::DimGreen
-                    | NamedColor::DimYellow
-                    | NamedColor::DimBlue
-                    | NamedColor::DimMagenta
-                    | NamedColor::DimCyan
-                    | NamedColor::DimWhite => {
-                        let index = named as usize - NamedColor::DimBlack as usize;
-                        StoredColor::Rgb(dim(self.scheme.ansi[index]))
+                match slot {
+                    NamedSlot::Foreground => match palette.foreground {
+                        Some(rgb) => StoredColor::Rgb(rgb),
+                        None => StoredColor::Default,
+                    },
+                    NamedSlot::Background => match palette.background {
+                        Some(rgb) => StoredColor::Rgb(rgb),
+                        None => StoredColor::Default,
+                    },
+                    NamedSlot::Cursor => match palette.cursor {
+                        Some(rgb) => StoredColor::Rgb(rgb),
+                        // 这些变体只可能来自配置模板，解析器不会写进网格；用主题色
+                        // 固化，避免猜一串 SGR 组合
+                        None => StoredColor::Rgb(self.scheme.cursor),
+                    },
+                    NamedSlot::BrightForeground => StoredColor::Default,
+                    NamedSlot::DimForeground => StoredColor::Rgb(dim(self.scheme.foreground)),
+                    NamedSlot::DimAnsi(index) => {
+                        StoredColor::Rgb(dim(self.scheme.ansi[index as usize]))
                     }
                 }
             }
@@ -406,7 +387,7 @@ impl TerminalModel {
     /// 是否处于备用屏（全屏程序）：回滚持久化在此时跳过，避免把主屏历史
     /// 用一张空屏幕覆盖掉。
     pub fn is_alt_screen(&self) -> bool {
-        self.term.mode().contains(TermMode::ALT_SCREEN)
+        self.core.modes().alt_screen
     }
 
     /// 清空视口与滚动历史并把光标归位（ADR-049 重灌前整备）：恢复门控在
@@ -451,19 +432,17 @@ impl TerminalModel {
 
     /// 一行网格的可见内容接到装配中的逻辑行上：跳过宽字符尾格，收集组合
     /// 字符，同样式的相邻格合并成一个 run。
-    fn append_row_runs(&self, current: &mut StoredLine, line: Line) {
-        let colors = self.term.colors();
-        let row = &self.term.grid()[line];
-        for column in 0..self.size.columns {
-            let cell = &row[Column(column)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER) {
+    fn append_row_runs(&self, current: &mut StoredLine, line: i32, buffer: &mut RowBuffer) {
+        self.core.read_row(line, buffer);
+        for cell in &buffer.cells {
+            if cell.spacer {
                 continue;
             }
-            let style = self.stored_style(cell, colors);
+            let style = self.stored_style(cell);
             let mut text = String::with_capacity(4);
             text.push(cell.c);
-            if let Some(zerowidth) = cell.zerowidth() {
-                text.extend(zerowidth);
+            if let Some(zerowidth) = &cell.zerowidth {
+                text.push_str(zerowidth);
             }
             match current.last_mut() {
                 Some(run) if run.style == style => run.text.push_str(&text),
@@ -476,9 +455,14 @@ impl TerminalModel {
     /// 这一份行走。产出的是完整逻辑行（run 序列）；裁空白、去尾部空行、
     /// 封顶是各消费方的口径，不在这里做。半行留在迭代器里，由
     /// [`LogicalLines::seed`] / [`LogicalLines::take_pending`] 跨轮次携带。
-    fn logical_lines(&self, physical: Range<i32>) -> LogicalLines<'_> {
+    fn logical_lines<'a>(
+        &'a self,
+        physical: Range<i32>,
+        buffer: &'a mut RowBuffer,
+    ) -> LogicalLines<'a> {
         LogicalLines {
             model: self,
+            buffer,
             next: physical.start,
             end: physical.end,
             current: Vec::new(),
@@ -486,10 +470,8 @@ impl TerminalModel {
     }
 
     /// 行尾折行标记：该行是某逻辑行的前半，转录时不换行。
-    fn row_wrapped(&self, line: Line) -> bool {
-        self.term.grid()[line][Column(self.size.columns - 1)]
-            .flags
-            .contains(Flags::WRAPLINE)
+    fn row_wrapped(&self, line: i32) -> bool {
+        self.core.row_wrapped(line)
     }
 }
 
@@ -927,7 +909,7 @@ mod transcript_tests {
 
         let mut model = TerminalModel::with_history(96, 30, 10_000);
         model.restore_scrollback_styled(&lines, "-- d --");
-        // 增行 resize：alacritty 会把灌入的内容吸回视口（这就是要整备的现象）
+        // 增行 resize 的重排会把灌入的内容吸回视口（这就是要整备的现象）
         model.resize(120, 40);
 
         model.clear_viewport_and_history();
