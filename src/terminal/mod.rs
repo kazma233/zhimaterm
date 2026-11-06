@@ -486,8 +486,10 @@ struct Size {
 pub struct TerminalModel {
     /// 终端核心后端：VT 解析、网格与滚动历史的唯一所有者。
     core: Box<dyn TerminalCore>,
-    /// 行缓冲：快照与选区按行读网格时复用，避免每帧重新分配。
+    /// 行缓冲：选区按行读网格时复用，避免每帧重新分配。
     buffer: RowBuffer,
+    /// 视口帧：快照的一次性物化结果，跨帧复用容量（ADR-051 §2.2）。
+    viewport: backend::ViewportFrame,
     /// 当前尺寸：视口坐标的基准，与后端同步。
     size: Size,
     /// 当前主题的配色方案：网格存的是语义色，每帧快照时才按它解析成 RGB。
@@ -562,6 +564,7 @@ impl TerminalModel {
         let mut model = Self {
             core: backend::create_backend(backend, columns, lines, history),
             buffer: RowBuffer::default(),
+            viewport: backend::ViewportFrame::new(),
             size: Size { columns, lines },
             scheme,
             search_match: None,
@@ -1111,10 +1114,13 @@ impl TerminalModel {
     }
 
     pub fn snapshot(&mut self) -> TerminalSnapshot {
-        let display_offset = self.core.display_offset();
-        let history_size = self.core.history_size();
+        // 一次物化整屏：批量核心（ghostty）在这里做唯一一次渲染态更新，
+        // 行式后端走默认实现逐行读（ADR-051 §2.2）
+        self.core.read_viewport(&mut self.viewport);
+        let display_offset = self.viewport.offset;
+        let history_size = self.viewport.history;
+        let cursor_state = self.viewport.cursor;
         let palette = self.core.palette();
-        let cursor_state = self.core.cursor();
         let selection = self
             .selection
             .as_ref()
@@ -1127,16 +1133,21 @@ impl TerminalModel {
         let mut cursor_cell = None;
 
         for row in 0..self.size.lines {
-            // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史。
+            // 视口帧的第 row 行就是画面第 row 行（回看偏移已反映在帧内）
+            let cells: &[GridCell] = self
+                .viewport
+                .rows
+                .get(row)
+                .map_or(&[], |buffer| buffer.cells.as_slice());
+            // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史
             let grid_line = row as i32 - display_offset as i32;
-            self.core.read_row(grid_line, &mut self.buffer);
-            let plain_links = self.plain_url_links(&self.buffer.cells);
+            let plain_links = self.plain_url_links(cells);
             let mut runs: Vec<TerminalRun> = Vec::new();
             let mut current: Option<RunStyle> = None;
             let mut current_link: Option<Arc<str>> = None;
             let mut previous_wide = false;
 
-            for (column, cell) in backend::display_cells(&self.buffer.cells) {
+            for (column, cell) in backend::display_cells(cells) {
                 let mut foreground = resolve(cell.fg, palette, &self.scheme);
                 let mut background = resolve(cell.bg, palette, &self.scheme);
                 if cell.inverse {

@@ -286,6 +286,46 @@ impl RowBuffer {
     }
 }
 
+/// 视口帧：一次物化的整屏数据，快照的唯一数据来源（GLOSSARY「视口帧」）。
+///
+/// 批量读是给「批量快照 + `&mut`」形状的核心留的入口：它们不必再为
+/// `&self` 逐行读自建缓存、脏标记与失效协议（ADR-051 §2.2）。
+pub(super) struct ViewportFrame {
+    /// 视口每一行的格（跨帧复用容量）。
+    pub(super) rows: Vec<RowBuffer>,
+    /// 回看偏移：0 = 停在最新输出。
+    pub(super) offset: usize,
+    /// 滚动历史行数。
+    pub(super) history: usize,
+    /// 光标状态。
+    pub(super) cursor: CursorState,
+}
+
+impl ViewportFrame {
+    pub(super) fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            offset: 0,
+            history: 0,
+            cursor: CursorState {
+                line: 0,
+                column: 0,
+                shape: CursorKind::Block,
+                visible: true,
+                blinking: false,
+            },
+        }
+    }
+
+    /// 对齐到给定尺寸并复位为空白行（保留已分配容量）。
+    pub(super) fn reset(&mut self, columns: usize, rows: usize) {
+        self.rows.resize_with(rows, RowBuffer::default);
+        for row in &mut self.rows {
+            row.reset(columns);
+        }
+    }
+}
+
 /// 窗口尺寸：字符与像素两套。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowSize {
@@ -490,6 +530,21 @@ pub(super) trait TerminalCore: GridView {
 
     /// 取走解析产生的请求：查询应答、标题、铃声、剪贴板写入等。
     fn take_requests(&mut self) -> Vec<TermRequest>;
+
+    /// 一次物化整个视口：整屏行 + 回看偏移 + 历史行数 + 光标。
+    ///
+    /// 默认实现逐行 `read_row` 拼装，行式后端无需覆盖；批量快照形状的
+    /// 核心一次遍历写满，省掉逐行读背后的缓存与失效协议（ADR-051 §2.2）。
+    fn read_viewport(&mut self, out: &mut ViewportFrame) {
+        out.reset(self.columns(), self.screen_lines());
+        out.offset = self.display_offset();
+        out.history = self.history_size();
+        out.cursor = self.cursor();
+        for (row, buffer) in out.rows.iter_mut().enumerate() {
+            let line = row as i32 - out.offset as i32;
+            self.read_row(line, buffer);
+        }
+    }
 
     /// 同步输出（私有模式 2026）的超时时刻。没有同步输出时为 None。
     fn sync_deadline(&self) -> Option<Instant>;

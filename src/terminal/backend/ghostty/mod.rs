@@ -5,15 +5,16 @@
 //!
 //! 与另外两个后端的两点结构差异：
 //!
-//! - **视口行走渲染缓存**。libghostty 的 `RenderState` 是批量视口快照
-//!   （一次 update 覆盖全部视口行），但 `read_row` 契约是 `&self` 且逐行
-//!   调用——所以每次网格/视口变更后懒刷新一次缓存（行×列物化成
-//!   [`GridCell`]），读路径查缓存；越出视口的行（回看时的选择/搜索/转录）
-//!   才走 `grid_ref` 逐格慢路径。同步输出（2026）期间缓存冻结：BSU 时抓
-//!   一帧、ESU 前不刷新，对 alacritty 的「缓冲到 ESU」行为等价。
+//! - **批量视口物化**。libghostty 的 `RenderState` 是一次 update 覆盖全部
+//!   视口行的批量快照，与 `&self` 逐行读的接口形状相反；共享层的批量入口
+//!   （[`TerminalCore::read_viewport`]）直接消费这个形状，本后端一次遍历
+//!   写满调用方缓冲，不再自建逐行缓存与失效协议（ADR-051 §2.2）。
+//!   `read_row` 只剩 `grid_ref` 逐格慢路径，供选区/搜索/转录等非快照读者
+//!   使用。同步输出（2026）期间画面定格：BSU 后不再更新渲染态，ESU 后
+//!   恢复，对 alacritty 的「缓冲到 ESU」行为等价。
 //! - **回看偏移映射进视口**。`scroll` 直接移动 libghostty 的视口，
-//!   `display_offset` 从它的滚动状态推导——这样「视口行」恰好就是当前
-//!   正在看的行，缓存才有意义。
+//!   `display_offset` 从它的滚动状态推导——「视口行」恰好就是当前正在
+//!   看的行，批量物化才是整屏一致的。
 //!
 //! 已知有意分歧记录在 ADR-051（制表位近似、OSC 应答色、标题 reset 无事件）。
 
@@ -30,75 +31,26 @@ use vt::{
     CellIterator, Mode, RenderState, RowIterator, ScrollViewport, StyleColorRepr, Terminal, VtEvent,
 };
 
-use super::{CellColor, ColorPalette, CursorState, GridCell, GridView, NamedSlot, RowBuffer};
+use super::{
+    CellColor, ColorPalette, CursorState, GridCell, GridView, NamedSlot, RowBuffer, ViewportFrame,
+};
 use super::{TermModes, TerminalCore};
 use crate::terminal::{CursorKind, TermRequest, UnderlineKind};
 
 /// 同步输出的超时兜底（ADR-032）：与上游 vte 的值一致。
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// 视口行的物化缓存：`RenderState` 一次 update 覆盖全部视口行，逐行物化成
-/// 中性格子后，`read_row` 的视口行就是查表。
-struct RenderCache {
-    /// 刷新时的回看偏移：缓存行号 ↔ 以最新输出为锚的行号的换算基准。
-    offset: usize,
-    /// 刷新时的滚动历史行数（钳制到配置上限）：仅 `history_size` 上报用；
-    /// grid_ref 寻址走 `terminal.scrollback_rows()` 的实际值（页粒度修剪
-    /// 可高于上限）。
-    history: usize,
-    /// 视口行（外层下标 = 视口行号）。
-    rows: Vec<Vec<GridCell>>,
-    /// 各视口行是否折行（`Row::is_wrapped`）。
-    wrapped: Vec<bool>,
-    /// 光标样式元数据（形状/可见/闪烁）：只有 RenderState 携带。
-    cursor_meta: Option<(CursorKind, bool, bool)>,
-}
-
-impl RenderCache {
-    fn new(columns: usize, rows: usize) -> Self {
-        Self {
-            offset: 0,
-            history: 0,
-            rows: vec![vec![GridCell::blank(); columns]; rows],
-            wrapped: vec![false; rows],
-            cursor_meta: None,
-        }
-    }
-
-    /// 行数/行宽对齐当前网格尺寸（保留已分配缓冲，新增行列落空白）：
-    /// resize 后行数与行宽都可能变，滞后的缓存形状会把快照读越界。不做
-    /// 逐格清空——刷新成功时每格都会被覆盖，旧内容只在失败路径由
-    /// [`Self::blank`] 兜底。
-    fn resize(&mut self, columns: usize, rows: usize) {
-        self.rows
-            .resize_with(rows, || vec![GridCell::blank(); columns]);
-        for row in &mut self.rows {
-            row.resize_with(columns, GridCell::blank);
-        }
-        self.wrapped.resize_with(rows, || false);
-    }
-
-    /// 失败兜底：核心给不出数据的格子落空白（对齐上游「读取失败时内容
-    /// 未定义」的口径）。offset/history 保留旧值，dirty 由调用方保留下次重试。
-    fn blank(&mut self) {
-        self.cursor_meta = None;
-        for row in &mut self.rows {
-            row.fill(GridCell::blank());
-        }
-        self.wrapped.fill(false);
-    }
-}
-
 /// ghostty 后端。
 pub(super) struct GhosttyCore {
     terminal: Terminal,
-    /// 视口渲染缓存：`RenderState` 可变而 `read_row` 是 `&self`，用 RefCell。
+    /// 渲染态：`cursor()` 是 `&self` 单查路径，用 RefCell；批量物化在
+    /// `&mut self` 上直接取可变引用，不经过内部可变性。
     render: RefCell<RenderState>,
-    row_iter: RefCell<RowIterator>,
-    cell_iter: RefCell<CellIterator>,
-    cache: RefCell<RenderCache>,
-    /// 缓存过期标记：任何网格/视口/历史变更置位，读路径懒刷新。
-    dirty: Cell<bool>,
+    row_iter: RowIterator,
+    cell_iter: CellIterator,
+    /// 上次成功物化的尺寸：同步输出冻结期间尺寸不变才沿用渲染态（旧尺寸
+    /// 的帧放不进新视口）。
+    rendered_size: Cell<(usize, usize)>,
     /// 同步输出激活时刻（BSU）；None = 没有同步输出。
     sync_begin: Cell<Option<Instant>>,
     columns: usize,
@@ -142,10 +94,9 @@ impl GhosttyCore {
         Self {
             terminal,
             render: RefCell::new(render),
-            row_iter: RefCell::new(row_iter),
-            cell_iter: RefCell::new(cell_iter),
-            cache: RefCell::new(RenderCache::new(columns, lines)),
-            dirty: Cell::new(true),
+            row_iter,
+            cell_iter,
+            rendered_size: Cell::new((0, 0)),
             sync_begin: Cell::new(None),
             columns,
             rows: lines,
@@ -156,92 +107,7 @@ impl GhosttyCore {
         }
     }
 
-    // ---------- 缓存 ----------
-
-    fn refresh_if_dirty(&self) {
-        // 刷新失败保留 dirty：下一次读重试，瞬时 FFI 失败不固化为空白画面
-        if self.dirty.get() && self.refresh() {
-            self.dirty.set(false);
-        }
-    }
-
-    /// 重建视口渲染缓存，返回是否完整刷新。成功路径不做预清空（每格都会
-    /// 被覆盖）；任一 FFI 失败或迭代提前终止时整体落空白并返回 false。
-    /// 不 panic：会话线程上任何 panic 都会带走全部会话。
-    fn refresh(&self) -> bool {
-        let offset = self.offset_value();
-        let history = self.history_value();
-        let mut cache = self.cache.borrow_mut();
-        cache.resize(self.columns, self.rows);
-
-        let mut render = self.render.borrow_mut();
-        if render.update(&self.terminal).is_err() {
-            cache.blank();
-            return false;
-        }
-        let mut cursor_meta = None;
-        if let Ok(cursor) = render.cursor() {
-            cursor_meta = Some((
-                map_cursor_shape(cursor.visual_style),
-                cursor.visible,
-                cursor.blinking,
-            ));
-        }
-        let mut row_iter = self.row_iter.borrow_mut();
-        if row_iter.attach(&render).is_err() {
-            cache.blank();
-            return false;
-        }
-        let mut complete = true;
-        let mut index = 0usize;
-        let mut scratch = String::new();
-        while index < self.rows {
-            if !row_iter.next() {
-                complete = false;
-                break;
-            }
-            cache.wrapped[index] = row_iter
-                .raw_row()
-                .and_then(vt::row_is_wrapped)
-                .unwrap_or(false);
-            let mut cell_iter = self.cell_iter.borrow_mut();
-            if row_iter.attach_cells(&mut cell_iter).is_err() {
-                complete = false;
-                break;
-            }
-            for column in 0..self.columns {
-                if cell_iter
-                    .select(column.min(u16::MAX as usize) as u16)
-                    .is_err()
-                {
-                    complete = false;
-                    break;
-                }
-                cache.rows[index][column] = self.convert_render_cell(
-                    &cell_iter,
-                    column,
-                    index.min(u16::MAX as usize) as u16,
-                    &mut scratch,
-                );
-            }
-            if !complete {
-                break;
-            }
-            index += 1;
-        }
-        // offset/history/cursor 只在完整刷新后提交：半新半旧的帧配上新
-        // 换算基准，读路径会按错位的行号取内容
-        if complete {
-            cache.offset = offset;
-            cache.history = history;
-            cache.cursor_meta = cursor_meta;
-        } else {
-            cache.blank();
-        }
-        complete
-    }
-
-    // ---------- 行读取的慢路径（越出视口） ----------
+    // ---------- 行读取的慢路径（非快照读者） ----------
 
     /// grid_ref 寻址的一格：越出视口的行（选择/搜索/转录的低频路径）逐格读。
     fn grid_ref_cell(&self, point: ffi::Point) -> GridCell {
@@ -379,54 +245,105 @@ impl GhosttyCore {
                 }
                 // BSU：抓一帧定格（清掉脏标记，冻结期任何读都不再刷新），
                 // ESU：解冻回实时
+                // BSU：在这一刻抓一帧（此时后续内容还没进核心），此后
+                // read_viewport 不再更新渲染态——画面定格；ESU：恢复更新，
+                // 下一次物化放出缓冲的内容
                 VtEvent::RenderHold(true) => {
                     self.sync_begin.set(Some(Instant::now()));
-                    self.refresh();
-                    self.dirty.set(false);
+                    if self.render.get_mut().update(&self.terminal).is_ok() {
+                        self.rendered_size.set((self.columns, self.rows));
+                    }
                 }
-                VtEvent::RenderHold(false) => {
-                    self.sync_begin.set(None);
-                    self.dirty.set(true);
-                }
+                VtEvent::RenderHold(false) => self.sync_begin.set(None),
             }
         }
     }
+}
 
-    /// 渲染态一格 → 中性格子。超链接 URI 只有 grid_ref 携带：带链接的格
-    /// （少数）按视口坐标补一次寻址。`scratch` 是调用方循环持有的字形簇
-    /// 缓冲（清空复用容量）：整视口物化每帧上万格，逐格新起 String 的
-    /// 分配在最热路径上。
-    fn convert_render_cell(
-        &self,
-        cells_iter: &CellIterator,
-        column: usize,
-        viewport_row: u16,
-        scratch: &mut String,
-    ) -> GridCell {
-        let Ok(cell) = cells_iter.raw_cell() else {
-            return GridCell::blank();
-        };
-        let Ok(style) = cells_iter.style() else {
-            return GridCell::blank();
-        };
+/// 渲染态一格 → 中性格子。超链接 URI 只有 grid_ref 携带：带链接的格
+/// （少数）按视口坐标补一次寻址。`scratch` 是调用方循环持有的字形簇
+/// 缓冲（清空复用容量）：整视口物化每帧上万格，逐格新起 String 的
+/// 分配在最热路径上。
+fn convert_render_cell(
+    terminal: &Terminal,
+    cells_iter: &CellIterator,
+    column: usize,
+    viewport_row: u16,
+    scratch: &mut String,
+) -> GridCell {
+    let Ok(cell) = cells_iter.raw_cell() else {
+        return GridCell::blank();
+    };
+    let Ok(style) = cells_iter.style() else {
+        return GridCell::blank();
+    };
+    scratch.clear();
+    if vt::cell_has_text(cell).unwrap_or(false) && cells_iter.graphemes_utf8(scratch).is_err() {
         scratch.clear();
-        if vt::cell_has_text(cell).unwrap_or(false) && cells_iter.graphemes_utf8(scratch).is_err() {
-            scratch.clear();
-        }
-        let link = (vt::cell_has_hyperlink(cell).unwrap_or(false))
-            .then(|| {
-                let point = vt::point_viewport(
-                    column.min(u16::MAX as usize) as u16,
-                    u32::from(viewport_row),
-                );
-                self.terminal
-                    .grid_ref(point)
-                    .ok()
-                    .and_then(|grid_ref| hyperlink_of(&grid_ref))
-            })
-            .flatten();
-        convert_cell_parts(cell, &style, scratch, link)
     }
+    let link = (vt::cell_has_hyperlink(cell).unwrap_or(false))
+        .then(|| {
+            let point = vt::point_viewport(
+                column.min(u16::MAX as usize) as u16,
+                u32::from(viewport_row),
+            );
+            terminal
+                .grid_ref(point)
+                .ok()
+                .and_then(|grid_ref| hyperlink_of(&grid_ref))
+        })
+        .flatten();
+    convert_cell_parts(cell, &style, scratch, link)
+}
+
+/// 一次物化整个视口到调用方缓冲：渲染态更新一次、行/格迭代一遍，每格
+/// 直接写进目标行。返回光标元数据（形状/可见/闪烁，只有渲染态携带）。
+/// 任一 FFI 失败或迭代提前终止时停止写入——剩余行保持调用方复位后的
+/// 空白，下一帧重试（不固化失败）。
+fn materialize_viewport(
+    terminal: &Terminal,
+    render: &mut RenderState,
+    row_iter: &mut RowIterator,
+    cell_iter: &mut CellIterator,
+    rows: &mut [RowBuffer],
+    columns: usize,
+    lines: usize,
+) -> Option<(CursorKind, bool, bool)> {
+    let cursor = render.cursor().ok().map(|cursor| {
+        (
+            map_cursor_shape(cursor.visual_style),
+            cursor.visible,
+            cursor.blinking,
+        )
+    });
+    if row_iter.attach(render).is_err() {
+        return cursor;
+    }
+    let mut scratch = String::new();
+    for (index, buffer) in rows.iter_mut().take(lines).enumerate() {
+        if !row_iter.next() {
+            break;
+        }
+        if row_iter.attach_cells(cell_iter).is_err() {
+            break;
+        }
+        for column in 0..columns {
+            if cell_iter
+                .select(column.min(u16::MAX as usize) as u16)
+                .is_err()
+            {
+                break;
+            }
+            buffer.cells[column] = convert_render_cell(
+                terminal,
+                cell_iter,
+                column,
+                index.min(u16::MAX as usize) as u16,
+                &mut scratch,
+            );
+        }
+    }
+    cursor
 }
 
 /// 格子的超链接 URI：两条读路径（grid_ref 慢路径、渲染态格补链接）共用。
@@ -646,23 +563,17 @@ impl GridView for GhosttyCore {
     }
 
     fn history_size(&self) -> usize {
-        self.refresh_if_dirty();
-        self.cache.borrow().history
+        self.history_value()
     }
 
+    /// 单行读取是 `grid_ref` 逐格慢路径：快照走 [`TerminalCore::read_viewport`]
+    /// 批量物化，这里服务选区/搜索/转录等按行取格的读者（ADR-051 §2.2）。
     fn read_row(&self, line: i32, out: &mut RowBuffer) {
         out.reset(self.columns);
         if !self.line_in_range(line) {
             return;
         }
-        self.refresh_if_dirty();
-        let cache = self.cache.borrow();
-        // 视口行 r 显示的是锚定行号 r - offset；反过来锚定行号落在
-        // [-offset, rows-1-offset] 的都在缓存里
-        let viewport_row = line as isize + cache.offset as isize;
-        if viewport_row >= 0 && (viewport_row as usize) < self.rows {
-            out.cells.clone_from(&cache.rows[viewport_row as usize]);
-        } else if line < 0 {
+        if line < 0 {
             // 视口上方的历史行：HISTORY 坐标以滚动区顶部为原点，锚定行 -1 =
             // 紧邻视口上方那行，寻址基是核心实际保留行数（页粒度修剪可高于
             // 配置上限），钳制值只用于 history_size 上报，不能拿来寻址
@@ -673,7 +584,7 @@ impl GridView for GhosttyCore {
                     self.grid_ref_cell(vt::point_history(column.min(u16::MAX as usize) as u16, y));
             }
         } else {
-            // 视口下方（回看时的新输出）：活动区寻址与回看偏移无关
+            // 活动区行：寻址与回看偏移无关（回看只移动视口，不移动内容）
             for column in 0..self.columns {
                 out.cells[column] = self.grid_ref_cell(vt::point_active(
                     column.min(u16::MAX as usize) as u16,
@@ -686,12 +597,6 @@ impl GridView for GhosttyCore {
     fn row_wrapped(&self, line: i32) -> bool {
         if !self.line_in_range(line) {
             return false;
-        }
-        self.refresh_if_dirty();
-        let cache = self.cache.borrow();
-        let viewport_row = line as isize + cache.offset as isize;
-        if viewport_row >= 0 && (viewport_row as usize) < self.rows {
-            return cache.wrapped[viewport_row as usize];
         }
         let point = if line < 0 {
             // 寻址基同 read_row：实际保留行数，不是钳制后的上报值
@@ -732,7 +637,7 @@ impl GridView for GhosttyCore {
 impl TerminalCore for GhosttyCore {
     fn advance(&mut self, bytes: &[u8]) {
         // 同步输出（2026）的 BSU/ESU 与后续内容同块到达时，按序列切块：
-        // 定格抓帧必须发生在 BSU 生效之后、后续内容生效之前，行为才与
+        // 定格的字节边界必须落在 BSU 生效之后、后续内容生效之前，行为才与
         // vte 的「缓冲到 ESU」等价（ADR-051）
         for chunk in split_sync_chunks(bytes) {
             self.terminal.vt_write(chunk);
@@ -742,17 +647,13 @@ impl TerminalCore for GhosttyCore {
             if chunk.contains(&0x1b) {
                 self.refresh_palette();
             }
-            // 同步输出期间网格在变但画面定格（BSU 已抓帧），不置脏
-            if self.sync_begin.get().is_none() {
-                self.dirty.set(true);
-            }
         }
     }
 
     fn resize(&mut self, columns: usize, lines: usize) {
         let (cell_w, cell_h) = self.cell_px;
-        // 失败时核心保持旧尺寸，本地尺寸与缓存不跟进（与下方
-        // set_scrolling_history 同款 is_ok 守卫），否则读路径按新尺寸寻旧网格
+        // 失败时核心保持旧尺寸，本地尺寸不跟进（与下方 set_scrolling_history
+        // 同款 is_ok 守卫），否则读路径按新尺寸寻旧网格
         if self
             .terminal
             .resize(
@@ -765,8 +666,43 @@ impl TerminalCore for GhosttyCore {
         {
             self.columns = columns;
             self.rows = lines;
-            self.dirty.set(true);
         }
+    }
+
+    /// 一次物化整屏：渲染态每帧只更新一次，行/格直接写进调用方缓冲。
+    /// 同步输出期间沿用上一次渲染态（画面定格），尺寸变了才被迫更新
+    /// ——旧尺寸的帧放不进新视口。
+    fn read_viewport(&mut self, out: &mut ViewportFrame) {
+        out.reset(self.columns, self.rows);
+        out.offset = self.offset_value();
+        out.history = self.history_value();
+        let size = (self.columns, self.rows);
+        let frozen = self.sync_begin.get().is_some() && self.rendered_size.get() == size;
+        if !frozen {
+            if self.render.get_mut().update(&self.terminal).is_err() {
+                // 行保持复位后的空白，下一帧重试；失败不固化
+                return;
+            }
+            self.rendered_size.set(size);
+        }
+        let cursor = materialize_viewport(
+            &self.terminal,
+            self.render.get_mut(),
+            &mut self.row_iter,
+            &mut self.cell_iter,
+            &mut out.rows,
+            self.columns,
+            self.rows,
+        );
+        let (shape, visible, blinking) = cursor.unwrap_or((CursorKind::Block, true, false));
+        out.cursor = CursorState {
+            // 活动区坐标就是「以最新输出为锚」的行号，与回看偏移无关
+            line: i32::from(self.terminal.cursor_y().unwrap_or(0)),
+            column: self.terminal.cursor_x().unwrap_or(0) as usize,
+            shape,
+            visible,
+            blinking,
+        };
     }
 
     fn scroll(&mut self, lines: i32) {
@@ -777,17 +713,14 @@ impl TerminalCore for GhosttyCore {
         self.terminal
             .scroll_viewport(ScrollViewport::Delta(-i64::from(lines) as isize));
         self.clamp_offset();
-        self.dirty.set(true);
     }
 
     fn scroll_to_bottom(&mut self) {
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
-        self.dirty.set(true);
     }
 
     fn display_offset(&self) -> usize {
-        self.refresh_if_dirty();
-        self.cache.borrow().offset
+        self.offset_value()
     }
 
     fn set_scrolling_history(&mut self, lines: usize) {
@@ -797,7 +730,6 @@ impl TerminalCore for GhosttyCore {
         if self.terminal.set_scrollback_max_lines(Some(lines)).is_ok() {
             self.history = lines;
             self.clamp_offset();
-            self.dirty.set(true);
         }
     }
 
@@ -821,13 +753,20 @@ impl TerminalCore for GhosttyCore {
         }
     }
 
+    /// 光标单查路径：形状/可见/闪烁只有渲染态携带，这里读一次渲染态。
+    /// 每帧快照走 [`TerminalCore::read_viewport`]，不经过本方法。
     fn cursor(&self) -> CursorState {
-        self.refresh_if_dirty();
-        let cache = self.cache.borrow();
-        let (shape, visible, blinking) =
-            cache
-                .cursor_meta
-                .unwrap_or((CursorKind::Block, true, false));
+        let mut render = self.render.borrow_mut();
+        let _ = render.update(&self.terminal);
+        let meta = render.cursor().ok().map(|cursor| {
+            (
+                map_cursor_shape(cursor.visual_style),
+                cursor.visible,
+                cursor.blinking,
+            )
+        });
+        drop(render);
+        let (shape, visible, blinking) = meta.unwrap_or((CursorKind::Block, true, false));
         CursorState {
             // 活动区坐标就是「以最新输出为锚」的行号，与回看偏移无关
             line: i32::from(self.terminal.cursor_y().unwrap_or(0)),
@@ -857,7 +796,6 @@ impl TerminalCore for GhosttyCore {
         // 官方的强制结束方式：直接复位模式，缓冲的内容已即时生效
         let _ = self.terminal.set_mode(Mode::SYNC_OUTPUT, false);
         self.sync_begin.set(None);
-        self.dirty.set(true);
     }
 
     /// 同步单元格像素：核心自答 CSI 14/16/18t 时要用（共享层从 worker 传入）。
@@ -906,6 +844,37 @@ mod tests {
         core.read_row(0, &mut buffer);
         let text: String = buffer.cells[..6].iter().map(|cell| cell.c).collect();
         assert_eq!(text, "stable");
+    }
+
+    /// 批量物化与逐行慢路径是两条独立实现，必须给出同一张视口：未滚动
+    /// 与回看偏移下逐格相等，offset/history/cursor 与单查一致（ADR-050 §3
+    /// 差分精神的内部版）。
+    #[test]
+    fn batch_viewport_matches_the_slow_path() {
+        let mut core = GhosttyCore::new(40, 5, 100);
+        for index in 0..12 {
+            core.advance(format!("line {index}\r\n").as_bytes());
+        }
+        core.advance("中文 wide".as_bytes());
+
+        for scrolled in [false, true] {
+            if scrolled {
+                core.scroll(3);
+            }
+            let mut frame = ViewportFrame::new();
+            core.read_viewport(&mut frame);
+            assert_eq!(frame.offset, core.display_offset(), "滚动 {scrolled}");
+            assert_eq!(frame.history, core.history_size(), "滚动 {scrolled}");
+            let mut row = RowBuffer::default();
+            for index in 0..core.screen_lines() {
+                let line = index as i32 - frame.offset as i32;
+                core.read_row(line, &mut row);
+                assert_eq!(
+                    frame.rows[index].cells, row.cells,
+                    "滚动 {scrolled}：视口第 {index} 行（锚定行 {line}）"
+                );
+            }
+        }
     }
 
     /// 慢路径（grid_ref 逐格读）上的超长字形簇：11 码点的组合 emoji 超过

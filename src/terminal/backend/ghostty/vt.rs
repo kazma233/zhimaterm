@@ -488,20 +488,6 @@ impl RowIterator {
         unsafe { ffi::ghostty_render_state_row_iterator_next(self.inner.as_ptr()) }
     }
 
-    pub(super) fn raw_row(&self) -> VtResult<ffi::Row> {
-        // SAFETY: 句柄独占；出参为纯值。
-        let mut value = MaybeUninit::<ffi::Row>::zeroed();
-        let result = unsafe {
-            ffi::ghostty_render_state_row_get(
-                self.inner.as_ptr(),
-                ffi::RenderStateRowData::RAW,
-                value.as_mut_ptr().cast(),
-            )
-        };
-        check(result)?;
-        Ok(unsafe { value.assume_init() }) // SAFETY: 成功后已写入
-    }
-
     /// 把格迭代器装到当前行（CELLS 的出参就是格迭代器句柄）。
     pub(super) fn attach_cells(&mut self, cells: &mut CellIterator) -> VtResult<()> {
         let result = unsafe {

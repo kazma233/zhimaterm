@@ -29,10 +29,11 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
 ```
 
 - **后端契约**（`terminal/backend/mod.rs`）：`TerminalCore`（advance/resize/
-  滚动/模式/光标/调色板/查询请求/同步输出）与 `GridView`（行读取、折行标记、
-  行长、制表位）。中性类型：`GridCell`、`RowBuffer`、`CellColor`、`ColorPalette`、
-  `TermModes`、`CursorState`、`GridPoint`、`Rgb`、`WindowSize`。上游类型
-  （`Term`、`Cell`、`Flags`、`TermMode`）止步于 `backend/alacritty.rs`。
+  滚动/模式/光标/调色板/查询请求/同步输出/视口批量物化 `read_viewport`）与
+  `GridView`（行读取、折行标记、行长、制表位）。中性类型：`GridCell`、
+  `RowBuffer`、`ViewportFrame`、`CellColor`、`ColorPalette`、`TermModes`、
+  `CursorState`、`GridPoint`、`Rgb`、`WindowSize`。上游类型（`Term`、`Cell`、
+  `Flags`、`TermMode`）止步于 `backend/alacritty.rs`。
 - **共享层**（`terminal/mod.rs` + `selection.rs` + `search.rs` + `colors.rs` +
   `transcript.rs`）：画面快照、选区（Simple/Word/Line/Block 与复制文本）、
   搜索（逐行正则 + 智能大小写）、颜色解析、输入编码、转录与回滚恢复，只有
@@ -72,6 +73,9 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
   （打印落宽字符尾格占位未让位、插删字符按裸格平移劈开占位配对），均已
   修复并以回归测试锁定。termwiz 自家的 core 级 fuzz 保留（内部网格状态
   断言是其专属深度）。
+- **批量物化差分**（2026-11-06 补）：ghostty 的 `read_viewport`（批量）与
+  `read_row` 慢路径逐格比对（未滚动/回看偏移两种状态），保证删掉内部缓存
+  后两条独立实现不分叉。
 
 ### 4. 已知有意分歧（不照抄上游）
 
