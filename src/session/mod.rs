@@ -26,6 +26,10 @@ pub use reconnect::{ConnectFacts, ReconnectPlanner, ScheduleOutcome, TickOutcome
 /// transport 内部共用这一个约束载体。
 /// 回滚文件的命名契约（构造与解析两侧，`session::scrollback` 单点）。
 pub(crate) use scrollback::{file_for, session_number_of};
+/// 连接期密码询问的身份（ADR-048 修订）：`ControlEvent` 载荷，视图与测试
+/// 按它比对目标、取已存凭据。
+#[allow(unused_imports)]
+pub use transport::PasswordAccount;
 pub(crate) use transport::WakingSender;
 /// SSH pump 的唤醒句柄：SFTP 协议层用它把命令送到 pump 的 poll。
 pub(crate) use transport::poll::WakeupHandle;
