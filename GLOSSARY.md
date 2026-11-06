@@ -56,6 +56,10 @@ _Avoid_: 输入法缓冲区、preedit 状态、组合区状态机（指散落在
 终端查询（OSC 4/10/11/12 颜色、CSI 14t 尺寸）的应答字节归共享层单点格式化（`terminal/colors.rs` 的 `reply`：双写十六进制、固定 ST 结尾——kitty/ghostty 口径）；`TermRequest` 只携带语义载荷（槽位/尺寸查询意图），不携带格式。核心自答的后端（ghostty）把应答字节拦截翻译成同一语义载荷，不得自带格式器。
 _Avoid_: ColorFormatter/SizeFormatter 闭包、逐后端应答格式器、上游格式器包装、镜像查询结尾符
 
+**会话视图归约（SessionViewState）**:
+每个终端格的事件状态机：`ControlEvent` × 视图状态（结束态、状态文案、标题、指针、密码询问、LANG、日志警告、工作目录、重连计划……）经 `views::session_state::reduce` 折进状态，产出 `SessionEffect`（写剪贴板、建密码框、答复会话、启动时钟、通知落盘）由视图执行。钥匙串查找以闭包传入；面板句柄与状态流等资源事件留在视图适配。无头可测：事件 × 状态 → 状态 + 效果。按键裁决同族：`views::terminal_keys` 的 keydown 守卫链与死会话裸键只有一份纯决策（视图 keydown / IME 文本管道 / 应用层根节点共用）。
+_Avoid_: 视图 reducer、事件处理器、事件消费循环
+
 **视口帧（ViewportFrame）**:
 终端核心一次物化的整屏数据：视口每行的格、回看偏移、历史行数与光标状态，是画面快照的唯一数据来源。`TerminalCore::read_viewport` 的默认实现逐行 `read_row` 拼装（行式后端零改动）；批量快照形状的核心（ghostty 的 `RenderState`）一次遍历写满，不为 `&self` 逐行读自建缓存（ADR-051 §2.2）。
 _Avoid_: 渲染缓存、屏幕缓存、帧缓冲（指把「核心内部缓存」与「一次物化的输出」混为一谈）

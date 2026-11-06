@@ -1134,72 +1134,53 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 右键菜单开着：Esc 只收菜单，其余按键照常进终端
-        if self.context_menu.is_some() && event.keystroke.key.as_str() == "escape" {
-            self.context_menu = None;
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-
-        // 搜索条展开时先接搜索键：Esc 关闭（含清高亮）、回车/⇧回车前进/后退。
-        // 输入框不消费这三个键，事件冒泡到这里（与连接表单同一模式）。
-        if self.search_open {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    self.close_search(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "enter" => {
-                    let direction = if event.keystroke.modifiers.shift {
-                        SearchDirection::Backward
-                    } else {
-                        SearchDirection::Forward
-                    };
-                    self.navigate_search(direction, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
+        use crate::views::terminal_keys::{KeyRoute, route_key};
+        // 守卫顺序（菜单 → 搜索 → 死会话 → 焦点 → 连接中）在纯函数里，见
+        // `terminal_keys::route_key`；这里只执行动作
+        let route = route_key(
+            &self.state,
+            self.context_menu.is_some(),
+            self.search_open,
+            self.focus.is_focused(window),
+            self.snapshot.is_none(),
+            &event.keystroke,
+        );
+        match route {
+            KeyRoute::CloseContextMenu => {
+                self.context_menu = None;
+                cx.stop_propagation();
+                cx.notify();
             }
-        }
-
-        // 会话已结束：普通键不再写进死会话。R 在本视图直接接住（比应用层根
-        // 节点的拦截更早，双保险——按键可能从 keydown 或平台文本管道任一条
-        // 到达，见 replace_text_in_range 的同款处理）；Enter 关闭在应用层
-        if self.state.exited {
-            if self.can_reconnect() && event.keystroke.key.to_lowercase() == "r" {
+            KeyRoute::CloseSearch => {
+                self.close_search(window, cx);
+                cx.stop_propagation();
+            }
+            KeyRoute::NavigateSearch(direction) => {
+                self.navigate_search(direction, cx);
+                cx.stop_propagation();
+            }
+            // 视图比应用层根节点更早接住 R（双保险：IME 管道可能先吃掉按键）
+            KeyRoute::Reconnect => {
                 self.reconnect(cx);
                 cx.stop_propagation();
             }
-            return;
-        }
-
-        // 终端未聚焦时按键不属于 PTY：焦点在弹层输入框或搜索条上，字符要走各自
-        // 的输入通道；这里放行不消费，Windows 平台才会继续 TranslateMessage 产生
-        // WM_CHAR 送进聚焦的输入框（与上面 key_context 的聚焦口径一致）
-        if !self.focus.is_focused(window) {
-            return;
-        }
-
-        // 连接中：普通键没有可写入的对象（worker 还在建立连接，写入只会报错）；
-        // Ctrl+C 是明确的取消意图——立即进入结束态，后台连接按自身预算自然收尾
-        if self.snapshot.is_none() {
-            if event.keystroke.modifiers.control && event.keystroke.key.to_lowercase() == "c" {
+            // 死会话/连接中的其余键不消费：留给应用层根节点（Esc/Enter 动作）
+            KeyRoute::Consumed | KeyRoute::NotFocused => {}
+            // 连接中 Ctrl+C：立即进入结束态，后台连接按自身预算自然收尾
+            KeyRoute::CancelConnecting => {
                 self.state.exited = true;
                 self.generation += 1;
                 self.state.status = "已取消连接".to_owned();
                 cx.notify();
             }
-            return;
+            KeyRoute::Terminal => {
+                let Some(key) = key_input(event) else {
+                    return;
+                };
+                self.wake_cursor(cx);
+                self.write_or_report(self.session.key(key), cx);
+            }
         }
-
-        let Some(key) = key_input(event) else {
-            return;
-        };
-        self.wake_cursor(cx);
-        self.write_or_report(self.session.key(key), cx);
     }
 
     /// 打开搜索条（⌘F / ctrl-shift-f，ADR-015）：新建输入框并聚焦，增量搜索随输入触发。
@@ -1570,10 +1551,12 @@ impl EntityInputHandler for TerminalView {
     ) {
         // IME 提交与 keydown 是两条并行的写入入口：mac 侧输入处理器在会话结束
         // 后仍可能残留（帧末只增不清），平台会把按键继续路由到这里——守卫必须
-        // 有，且不能只是吞掉：把死会话的动作从文本管道里捞回来（与 keydown
-        // 路径的根拦截同一语义），否则按键两边都不处理，R 重连对用户彻底失灵
+        // 有，且不能只是吞掉：死会话判定与 keydown 同源（terminal_keys），
+        // 否则按键两边都不处理，R 重连对用户彻底失灵
         if self.state.exited {
-            if text == "r" && self.can_reconnect() {
+            if crate::views::terminal_keys::dead_session_text(self.can_reconnect(), text)
+                == crate::views::terminal_keys::DeadSessionKey::Reconnect
+            {
                 self.reconnect(cx);
             }
             return;

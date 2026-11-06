@@ -12,4 +12,5 @@ pub mod probe_panel;
 pub mod session_state;
 pub mod sftp_panel;
 pub mod shell;
+pub mod terminal_keys;
 pub mod terminal_view;

@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, FocusHandle, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, Size, Window, div, px,
+    Context, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    Size, Window, div, px,
 };
 
 use crate::connect::{self, ConnectForm, ConnectModal, ConnectView};
@@ -35,6 +35,7 @@ use crate::ui::overlay::{KeyHandling, ModalView, OverlayHost};
 use crate::ui::{ACTION_ENTRY_HEIGHT, panel, ui_rems, vertical_divider};
 use crate::views::panes::{self, PaneId, PaneTree, SplitAxis};
 use crate::views::shell;
+use crate::views::terminal_keys::{DeadSessionKey, dead_session_key};
 use crate::views::terminal_view::TerminalView;
 use crate::workspace;
 use gpui::App;
@@ -168,30 +169,6 @@ pub struct ZhimaTermApp {
     layout_save_scheduled: bool,
     /// 工作区读写失败的原因：显示在侧栏顶部，不弹窗
     workspace_error: Option<String>,
-}
-
-/// 已结束会话在前台时的裸键裁决（无浮层时才接管）：R 重连（需资格）、
-/// Esc 取消自动重连、Enter 关格。带修饰键的组合不属于这里（应用快捷键或
-/// 终端控制字符），shift 放行（R 与 r 同动作）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeadSessionKey {
-    Reconnect,
-    CancelAutoReconnect,
-    CloseFocusedPane,
-    None,
-}
-
-fn dead_session_key(can_reconnect: bool, keystroke: &Keystroke) -> DeadSessionKey {
-    if !crate::ui::overlay::bare_key(keystroke) {
-        return DeadSessionKey::None;
-    }
-    let key = keystroke.key.to_lowercase();
-    match (can_reconnect, key.as_str()) {
-        (true, "r") => DeadSessionKey::Reconnect,
-        (_, "escape") => DeadSessionKey::CancelAutoReconnect,
-        (_, "enter") => DeadSessionKey::CloseFocusedPane,
-        _ => DeadSessionKey::None,
-    }
 }
 
 /// 待确认的关闭目标：一个格（分屏里的 ⌘W / 格内 ✕）或整个标签（侧栏 ✕）。
@@ -2573,24 +2550,10 @@ impl Render for ZhimaTermApp {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Keystroke, Modifiers};
-
     use super::{
-        DeadSessionKey, LocalShell, active_after_close, active_after_move, dead_session_key,
-        move_item, next_focus_index, normalize_session_name, restored_numbers, restored_shell,
+        LocalShell, active_after_close, active_after_move, move_item, next_focus_index,
+        normalize_session_name, restored_numbers, restored_shell,
     };
-
-    fn keystroke(key: &str, modifiers: Modifiers) -> Keystroke {
-        Keystroke {
-            key: key.into(),
-            key_char: Some(key.into()),
-            modifiers,
-        }
-    }
-
-    fn plain(key: &str) -> Keystroke {
-        keystroke(key, Modifiers::default())
-    }
 
     /// 侧栏起名的归一（ADR-047）：去首尾空白；空与全空白等于「不起名」，
     /// 回到自动标题，不会把空字符串固化成名字。
@@ -2709,75 +2672,6 @@ mod tests {
             ),
             "非 Windows 回落普通本地 Shell，忽略 WSL 记录"
         );
-    }
-
-    /// 死会话的裸键（无浮层时接管）：R 重连（需资格）、Esc 取消自动重连、
-    /// Enter 关格；不满足重连资格时 R 不路由（走正常路径）。
-    #[test]
-    fn dead_session_keys_follow_reconnect_eligibility() {
-        use DeadSessionKey as K;
-        assert_eq!(dead_session_key(true, &plain("r")), K::Reconnect);
-        assert_eq!(
-            dead_session_key(true, &plain("escape")),
-            K::CancelAutoReconnect
-        );
-        assert_eq!(dead_session_key(true, &plain("enter")), K::CloseFocusedPane);
-        assert_eq!(dead_session_key(false, &plain("r")), K::None);
-        assert_eq!(
-            dead_session_key(false, &plain("escape")),
-            K::CancelAutoReconnect
-        );
-    }
-
-    /// 裸键动作不与 platform/function/control/alt 修饰组合；shift 放行。
-    #[test]
-    fn dead_session_keys_with_modifiers_do_not_route() {
-        use DeadSessionKey as K;
-        for key in ["enter", "escape", "r"] {
-            for modifiers in [
-                Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    alt: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    function: true,
-                    ..Default::default()
-                },
-            ] {
-                assert_eq!(
-                    dead_session_key(true, &keystroke(key, modifiers)),
-                    K::None,
-                    "{key} 带修饰键不得触发裸键动作"
-                );
-            }
-        }
-        assert_eq!(
-            dead_session_key(
-                true,
-                &keystroke(
-                    "R",
-                    Modifiers {
-                        shift: true,
-                        ..Default::default()
-                    },
-                ),
-            ),
-            DeadSessionKey::Reconnect
-        );
-    }
-
-    /// 与死会话无关的裸键不接管，仍走正常路径。
-    #[test]
-    fn ordinary_keys_do_not_route_on_dead_sessions() {
-        assert_eq!(dead_session_key(true, &plain("a")), DeadSessionKey::None);
     }
 
     #[test]

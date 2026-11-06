@@ -14,7 +14,7 @@ use crate::session::{
 use crate::terminal::SearchOutcome;
 
 /// 事件可写、渲染只读的纯数据子集。实体句柄、画面帧与时钟留在视图。
-pub(super) struct SessionViewState {
+pub(crate) struct SessionViewState {
     /// 底栏状态文案（本地格不显示，回执由视图按 `local` 决定去留）。
     pub status: String,
     /// 前台程序设置的标题；None = 用默认标题。
