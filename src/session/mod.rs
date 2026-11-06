@@ -301,7 +301,7 @@ pub struct SessionConfig {
     /// 重连沿用同一后端。
     pub backend: crate::terminal::backend::BackendKind,
     /// 滚动历史上限（ADR-035）：构造终端模型的初始值；运行中调整走
-    /// `Session::set_scrolling_history`。
+    /// `Session::set_params`。
     pub history: usize,
     /// 本地格的回滚持久化文件（ADR-039）：worker 启动时读回、空闲时写回；
     /// SSH 格为 None（不持久化远端输出）。
@@ -335,6 +335,16 @@ impl Drop for HandleInner {
     fn drop(&mut self) {
         let _ = self.commands.try_send(SessionCommand::Close);
     }
+}
+
+/// 运行中可变的终端参数：构造期与运行期共用一份值类型，运行中调整经
+/// [`Session::set_params`] 推给 worker。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeParams {
+    /// macOS 上 ⌥ 键的语义（ADR-033）：⌥ 当 Alt 时按键改报基础键码 + alt 修饰。
+    pub option_as_alt: bool,
+    /// 滚动历史上限（ADR-035）：调小会截掉超出部分的历史，语义如实。
+    pub scrolling_history: usize,
 }
 
 /// UI -> worker。全部可克隆、可跨线程传递，不携带任何终端状态。
@@ -376,10 +386,8 @@ enum SessionCommand {
     ClearSearch,
     /// 切换配色方案：网格存语义色，换引用下一帧生效。
     SetTheme(std::sync::Arc<crate::theme::ColorScheme>),
-    /// 切换 ⌥ 键语义（ADR-033）：⌥ 当 Alt 时按键改报基础键码 + alt 修饰。
-    SetOptionAsAlt(bool),
-    /// 调整滚动历史上限（ADR-035）：调小会截掉超出部分的历史，语义如实。
-    SetScrollingHistory(usize),
+    /// 运行中调整终端参数：一个值类型一条命令，新增参数只扩展载荷。
+    SetParams(RuntimeParams),
     /// 运行中新增一条转发规则（ADR-038）：监听立即建立，失败只上报不改配置。
     AddForward(ForwardRule),
     /// 运行中移除一条转发规则（ADR-038）：关闭监听与它在途连接。
@@ -680,22 +688,13 @@ impl Session {
             .try_send(SessionCommand::SetTheme(scheme));
     }
 
-    /// 切换 ⌥ 键语义（ADR-033）。队列满时丢弃：这是输入偏好，
-    /// 下一次切换自然会覆盖。
-    pub fn set_option_as_alt(&self, enabled: bool) {
+    /// 运行中调整终端参数（⌥ 语义、滚动历史上限）。队列满时丢弃：两者都是
+    /// 幂等偏好，下一次调整自然会覆盖，不值得为它阻塞。
+    pub fn set_params(&self, params: RuntimeParams) {
         let _ = self
             .inner
             .commands
-            .try_send(SessionCommand::SetOptionAsAlt(enabled));
-    }
-
-    /// 调整滚动历史上限（ADR-035）。队列满时丢弃：调小截断历史是既定语义，
-    /// 丢一次命令只会让本次调整晚到，不值得为它阻塞。
-    pub fn set_scrolling_history(&self, lines: usize) {
-        let _ = self
-            .inner
-            .commands
-            .try_send(SessionCommand::SetScrollingHistory(lines));
+            .try_send(SessionCommand::SetParams(params));
     }
 
     /// 运行中新增转发规则（ADR-038）。与设置类命令不同，这里不丢命令：

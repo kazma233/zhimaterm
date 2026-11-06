@@ -25,8 +25,8 @@ use crate::input::{
 };
 use crate::session::{
     self, CommandError, ConnectFacts, ControlEvent, ForwardEvent, LocalShell, MonitorEvent,
-    MonitorSample, PointerShape, Session, SessionConfig, SessionEvent, SessionTarget, StartupSize,
-    TickOutcome,
+    MonitorSample, PointerShape, RuntimeParams, Session, SessionConfig, SessionEvent,
+    SessionTarget, StartupSize, TickOutcome,
 };
 use crate::terminal::backend::BackendKind;
 use crate::terminal::{SearchDirection, TerminalSnapshot};
@@ -111,10 +111,9 @@ pub struct TerminalView {
     /// 输入法组合区（组合串 + 选区，UTF-16 协议）：状态机在
     /// `ui::input::ImeComposition`，这里只是适配层与渲染快照
     ime_composition: ImeComposition,
-    /// macOS 上 ⌥ 键的语义（ADR-033）：true = ⌥ 当 Alt。
-    option_as_alt: bool,
-    /// 本格的滚动历史上限（ADR-035）：重连会重建 worker 与终端模型，用它带回。
-    history: usize,
+    /// 运行中可变的终端参数（⌥ 语义、滚动历史上限）：重连会重建 worker
+    /// 与终端模型，用同一份值带回。
+    runtime: RuntimeParams,
     /// 本格的终端核心后端（ADR-050）：随会话构造定型，重连沿用，不读当前设置。
     backend: BackendKind,
     /// 内核闪现截止时刻：None = 不展示。展示条件同时校验未过期，定时器
@@ -122,7 +121,8 @@ pub struct TerminalView {
     backend_badge_until: Option<Instant>,
     /// 一次性 gate：只在格子生命周期的首个 Frame 闪现，重连不重闪。
     backend_badge_done: bool,
-    last_size: Rc<Cell<(usize, usize)>>,
+    /// resize 判重键：完整几何（行列 + 格像素），与命令载荷同形。
+    last_size: Rc<Cell<grid::GridGeometry>>,
     /// 触摸板以像素为单位连续滚动，累积不足一格的小增量，避免被四舍五入丢弃
     scroll_remainder: f32,
     /// 横向滚动同理，按格宽换算
@@ -213,10 +213,8 @@ pub struct TerminalView {
 
 /// 会话固有的、由设置决定的参数：随格构造定型，重连沿用同一份。
 pub struct SessionParams {
-    /// macOS 上 ⌥ 键的语义（ADR-033）。
-    pub option_as_alt: bool,
-    /// 滚动历史上限（ADR-035）。
-    pub history: usize,
+    /// 运行中可变的终端参数（⌥ 语义、滚动历史上限）。
+    pub runtime: RuntimeParams,
     /// 终端核心后端（ADR-050）。
     pub backend: BackendKind,
 }
@@ -283,16 +281,16 @@ impl TerminalView {
             size: StartupSize::AwaitLayout { fallback: (96, 30) },
             target,
             backend: params.backend,
-            history: params.history,
+            history: params.runtime.scrolling_history,
             scrollback: scrollback.clone(),
             pane,
         });
         // 主题经命令下发而不是构造参数：模型默认以 Default 方案起跑，
         // 首帧之前命令必然已处理，用户看到的永远是当前主题
         session.set_theme(Arc::new(crate::theme::current(cx).scheme));
-        // ⌥ 键语义同样经命令下发（ADR-033）：模型自己持有一份状态，
-        // 编码时才知道 option 修饰的键该报基础键码还是系统特殊字符
-        session.set_option_as_alt(params.option_as_alt);
+        // 运行参数同样经命令下发（与运行中调整同一条路径）：⌥ 语义由模型
+        // 持有，编码时才知道修饰键语义；历史值重复设置是幂等的
+        session.set_params(params.runtime);
         let focus = cx.focus_handle();
 
         Self::watch_events(events, 0, cx);
@@ -310,13 +308,12 @@ impl TerminalView {
                 closes_on_shell_exit,
             ),
             ime_composition: ImeComposition::default(),
-            option_as_alt: params.option_as_alt,
-            history: params.history,
+            runtime: params.runtime,
             backend: params.backend,
             backend_badge_until: None,
             backend_badge_done: false,
             scrollback,
-            last_size: Rc::new(Cell::new((0, 0))),
+            last_size: Rc::new(Cell::new(grid::GridGeometry::default())),
             scroll_remainder: 0.0,
             scroll_remainder_x: 0.0,
             window_active: true,
@@ -757,7 +754,7 @@ impl TerminalView {
             target: SessionTarget::Ssh(target),
             // 重连沿用本格原后端，不读当前设置：同一格换终端内核不可行
             backend: self.backend,
-            history: self.history,
+            history: self.runtime.scrolling_history,
             scrollback: self.scrollback.clone(),
             // 重连复用同一格的记录注册（ADR-045）：worker 绑定同一个日志
             // sink，追加一对新的首尾标记（ADR-017）
@@ -813,21 +810,11 @@ impl TerminalView {
         self.session.set_theme(scheme);
     }
 
-    /// 应用层换字体（设置里改了字体/字号）：更新配置与格尺寸，所有渲染、
-    /// 命中测试与滚轮换算下一帧起用新值。
-    ///
-    /// `last_size` 必须重置：PTY resize 靠"行列数变了"触发，网格恰好不变时
-    /// 字宽像素的变化会被一起吞掉，前台程序拿不到新的单元格像素尺寸。
-    /// 切换 ⌥ 键语义（ADR-033）。编码侧在 worker 的模型里，这里把设置推下去。
-    pub fn set_option_as_alt(&mut self, enabled: bool) {
-        self.option_as_alt = enabled;
-        self.session.set_option_as_alt(enabled);
-    }
-
-    /// 调整滚动历史上限（ADR-035）：转发 worker，并记下当前值供重连带回。
-    pub fn set_scrolling_history(&mut self, lines: usize) {
-        self.history = lines;
-        self.session.set_scrolling_history(lines);
+    /// 运行中调整终端参数（⌥ 语义、滚动历史上限）：记下供重连带回，
+    /// 并推给 worker 的终端模型（ADR-033/035）。
+    pub fn set_runtime_params(&mut self, runtime: RuntimeParams) {
+        self.runtime = runtime;
+        self.session.set_params(runtime);
     }
 
     /// 当前转发规则（含运行中增删）。本地格没有转发，返回空表。
@@ -887,11 +874,12 @@ impl TerminalView {
         changed(cx.entity(), cx);
     }
 
-    /// 工作目录变化（ADR-039）：记下来并让外壳落盘工作区。
+    /// 应用层换字体（设置里改了字体/字号）：更新配置与格尺寸，所有渲染、
+    /// 命中测试与滚轮换算下一帧起用新值。resize 判重键是完整几何（含格
+    /// 像素），下一帧 canvas 会因此重发 Resize，不需要在这里动判重状态。
     pub fn set_font(&mut self, font: FontConfig, metrics: CellMetrics, cx: &mut Context<Self>) {
         self.font = font.clone();
         self.metrics = metrics;
-        self.last_size.set((0, 0));
         // SFTP 面板存着字体给之后创建的输入框（重命名、新建目录）用，跟着换
         if let Some(panel) = self.sftp_panel.as_ref() {
             let panel_font = font::terminal_font(&font.family);
@@ -2306,14 +2294,16 @@ impl Render for TerminalView {
                                 canvas(
                                     move |bounds, _, _| {
                                         bounds_state.set(bounds);
-                                        let columns_lines = grid::grid_size(bounds, metrics);
-                                        if resize_state.get() != columns_lines {
-                                            resize_state.set(columns_lines);
+                                        // 判重键 = 命令载荷：纯像素变化（换字体）也算
+                                        let geometry =
+                                            grid::GridGeometry::from_bounds(bounds, metrics);
+                                        if resize_state.get() != geometry {
+                                            resize_state.set(geometry);
                                             resize_session.resize(
-                                                columns_lines.0,
-                                                columns_lines.1,
-                                                metrics.width.round().max(1.) as u16,
-                                                metrics.height.round().max(1.) as u16,
+                                                geometry.columns,
+                                                geometry.lines,
+                                                geometry.cell_width,
+                                                geometry.cell_height,
                                             );
                                         }
                                         bounds

@@ -31,6 +31,31 @@ pub fn grid_size(bounds: Bounds<Pixels>, metrics: CellMetrics) -> (usize, usize)
     (columns, lines)
 }
 
+/// 终端网格的完整几何：行列数与单元格像素。
+///
+/// 它就是 UI 侧 resize 判重的键——只比行列会吞掉纯像素变化（换字体后
+/// 行列恰好不变），前台程序拿不到新的单元格像素尺寸。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GridGeometry {
+    pub columns: usize,
+    pub lines: usize,
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
+impl GridGeometry {
+    pub fn from_bounds(bounds: Bounds<Pixels>, metrics: CellMetrics) -> Self {
+        let (columns, lines) = grid_size(bounds, metrics);
+        Self {
+            columns,
+            lines,
+            // 与 PTY/Core 的像素口径一致：至少 1 像素，避免 0 宽格
+            cell_width: metrics.width.round().max(1.) as u16,
+            cell_height: metrics.height.round().max(1.) as u16,
+        }
+    }
+}
+
 /// 窗口坐标 -> 终端格坐标。拖出终端区域时钳制到最近的行列，
 /// 这样按住拖到窗口边缘仍能继续扩展选区；左右半边决定选区锚点贴哪一侧。
 pub fn cell_at(
@@ -1019,11 +1044,34 @@ mod tests {
     use gpui::{Bounds, size};
 
     use super::{
-        BlockGeometry, CellMetrics, CellSide, UnderlineKind, block_geometry, cell_at,
+        BlockGeometry, CellMetrics, CellSide, GridGeometry, UnderlineKind, block_geometry, cell_at,
         cell_start_bytes, grid_size, preedit_clusters, preedit_columns, underline_segments,
     };
 
     const METRICS: CellMetrics = CellMetrics::for_tests(8.6, 19.0);
+
+    /// resize 判重键 = 完整几何：行列相同但格像素变了（换字体）也必须
+    /// 判为不同，否则纯像素变化会被吞掉，前台程序拿不到新的格尺寸。
+    #[test]
+    fn grid_geometry_changes_when_only_cell_pixels_change() {
+        // 固定像素面积，两种格宽落在同一行列数桶里（10 列 5 行），只有
+        // 格像素不同——正是「换字体但网格恰好不变」的场景
+        let area = Bounds::new(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            size(gpui::px(100.), gpui::px(95.)),
+        );
+        let narrow = CellMetrics::for_tests(9.4, 19.0);
+        let wide = CellMetrics::for_tests(9.6, 19.0);
+        let before = GridGeometry::from_bounds(area, narrow);
+        let after = GridGeometry::from_bounds(area, wide);
+        assert_eq!((before.columns, before.lines), (after.columns, after.lines));
+        assert_ne!(before.cell_width, after.cell_width);
+        assert_ne!(before, after, "纯像素变化必须触发 resize");
+
+        // 完全相同的输入相等：每帧 canvas 不会因此反复发命令
+        assert_eq!(before, GridGeometry::from_bounds(area, narrow));
+        assert_eq!((before.columns, before.lines), grid_size(area, narrow));
+    }
 
     fn bounds(width_cells: f32, height_cells: f32) -> Bounds<gpui::Pixels> {
         Bounds::new(

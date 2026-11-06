@@ -646,16 +646,18 @@ impl ZhimaTermApp {
         // 会话固有参数从设置取一次：后端随格定型（ADR-050），运行中改设置
         // 只影响新格
         let params = crate::views::terminal_view::SessionParams {
-            option_as_alt: self
-                .settings
-                .as_ref()
-                .map(|store| store.option_as_alt)
-                .unwrap_or(false),
-            history: self
-                .settings
-                .as_ref()
-                .map(|store| store.scrolling_history_or_default())
-                .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY),
+            runtime: crate::session::RuntimeParams {
+                option_as_alt: self
+                    .settings
+                    .as_ref()
+                    .map(|store| store.option_as_alt)
+                    .unwrap_or(false),
+                scrolling_history: self
+                    .settings
+                    .as_ref()
+                    .map(|store| store.scrolling_history_or_default())
+                    .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY),
+            },
             backend: self
                 .settings
                 .as_ref()
@@ -1348,12 +1350,13 @@ impl ZhimaTermApp {
         let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
         self.font = font.clone();
         self.metrics = metrics;
+        let runtime = crate::session::RuntimeParams {
+            option_as_alt: edited.option_as_alt,
+            scrolling_history: edited.scrolling_history,
+        };
         for view in self.views() {
             view.update(cx, |view, cx| view.set_font(font.clone(), metrics, cx));
-            view.update(cx, |view, _| view.set_option_as_alt(edited.option_as_alt));
-            view.update(cx, |view, _| {
-                view.set_scrolling_history(edited.scrolling_history)
-            });
+            view.update(cx, |view, _| view.set_runtime_params(runtime));
         }
         // 界面字号 = rem 根：改一处，所有用 rem 标定的界面文字一起缩放
         self.ui_font_size = edited.ui_font_size;

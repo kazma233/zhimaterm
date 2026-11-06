@@ -853,16 +853,10 @@ fn apply_command(
                 dirty: true,
             })
         }
-        SessionCommand::SetOptionAsAlt(enabled) => {
-            terminal.set_option_as_alt(enabled);
-            Ok(CommandOutcome {
-                closing: false,
-                dirty: false,
-            })
-        }
-        SessionCommand::SetScrollingHistory(lines) => {
-            // set_options 全量置脏，下一帧快照随之更新
-            terminal.set_scrolling_history(lines);
+        SessionCommand::SetParams(params) => {
+            terminal.set_option_as_alt(params.option_as_alt);
+            // 历史调整会改网格（截断）也改底栏数值：全量置脏，下一帧快照随之更新
+            terminal.set_scrolling_history(params.scrolling_history);
             Ok(CommandOutcome {
                 closing: false,
                 dirty: true,
