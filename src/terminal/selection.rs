@@ -8,7 +8,10 @@
 
 use std::ops::Range;
 
-use super::backend::{GridPoint, GridReader, GridView, line_search_left, line_search_right};
+use super::backend::{
+    GridPoint, GridReader, GridView, line_search_left, line_search_right, owner_column,
+    wrapped_wide_char,
+};
 
 /// 取词边界字符：双击选词的边界。沿用 Alacritty 的默认集，保持手感。
 const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
@@ -528,10 +531,8 @@ fn line_to_string(
     reader.load(line);
 
     let line_length = grid.row_length(line).min(columns.end + 1);
-    // 起点落在宽字符的尾格：把宽字符本身带上
-    if columns.start > 0 && reader.cell(columns.start).is_some_and(|cell| cell.spacer) {
-        columns.start -= 1;
-    }
+    // 起点落在宽字符的尾格：归到本格，把宽字符本身带上
+    columns.start = owner_column(reader.cells(), columns.start);
 
     let mut tab_mode = false;
     for column in columns.start..line_length {
@@ -564,19 +565,12 @@ fn line_to_string(
         text.push('\n');
     }
 
-    // 行末是折行宽字符的占位格：把宽字符本身带上
-    if line_length == grid.columns()
-        && line_length >= 2
-        && reader
-            .cell(line_length - 1)
-            .is_some_and(|cell| cell.leading_spacer)
-        && include_wrapped_wide
-        && line > grid.topmost_line()
-    {
-        let mut previous = GridReader::new(grid);
-        previous.load(line - 1);
-        if let Some(cell) = previous.cell(0) {
-            text.push(cell.c);
+    // 行末是折行宽字符的让位格：宽字符折在下一行首列，把它本身（含组合
+    // 字符）带上。上游 alacritty 此处取上一行首字（错行缺陷），不照抄。
+    if include_wrapped_wide && let Some(cell) = wrapped_wide_char(grid, line) {
+        text.push(cell.c);
+        if let Some(zerowidth) = &cell.zerowidth {
+            text.push_str(zerowidth);
         }
     }
 

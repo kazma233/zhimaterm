@@ -199,6 +199,43 @@ contract!(
     }
 );
 
+/// 选区止于行末让位格：宽字符折在**下一行首列**，复制必须带出它，而不是
+/// 上一行首字（上游 alacritty 的错行缺陷，ADR-050 §4）。
+#[test]
+fn copy_ending_at_a_wrapped_wide_char_keeps_the_glyph() {
+    use super::{CellSide, SelectionKind};
+    for (label, backend) in backends() {
+        let mut model = TerminalModel::with_backend(backend, 10, 4, 30);
+        // 先造历史：让位格行不再是「无历史」的边界
+        for index in 0..12 {
+            model.advance(format!("hist{index}\r\n").as_bytes());
+        }
+        // 9 个字符占满前 9 列，宽字符放不进末列：让位格留在该行末列，
+        // 宽字符折到下一行首列
+        model.advance("123456789中".as_bytes());
+        let snapshot = model.snapshot();
+        let row = snapshot
+            .rows
+            .iter()
+            .position(|runs| {
+                runs.iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "123456789"
+            })
+            .unwrap_or_else(|| panic!("{label}: 没找到让位格所在行"));
+
+        model.begin_selection(0, row, CellSide::Left, SelectionKind::Simple);
+        model.extend_selection(9, row, CellSide::Right);
+        assert_eq!(
+            model.selection_text().as_deref(),
+            Some("123456789中"),
+            "{label}: 选区止于让位格应带出下一行首列的宽字符"
+        );
+    }
+}
+
 contract!(search_matches_and_navigates, |model, label| {
     use super::SearchDirection;
     model.advance(b"ERROR boom\r\nplain line\r\nneedle two\r\n");

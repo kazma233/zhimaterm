@@ -6,7 +6,9 @@
 
 use regex::{Regex, RegexBuilder};
 
-use super::backend::{GridPoint, GridReader, GridView, line_search_left, line_search_right};
+use super::backend::{
+    GridPoint, GridReader, GridView, content_cells, line_search_left, line_search_right,
+};
 
 /// 一处匹配：行号 + 起止列。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,10 +127,7 @@ fn line_matches(grid: &dyn GridView, regex: &Regex, line: i32) -> Vec<SearchMatc
     let mut text = String::new();
     let mut starts = Vec::new();
     let mut columns = Vec::new();
-    for (column, cell) in reader.cells().iter().enumerate() {
-        if cell.is_placeholder() {
-            continue;
-        }
+    for (column, cell) in content_cells(reader.cells()) {
         starts.push(text.len());
         columns.push(column);
         text.push(cell.c);

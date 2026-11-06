@@ -337,6 +337,55 @@ impl<'a> GridReader<'a> {
     }
 }
 
+// ---------- 行语义：可见格遍历与占位格归属（GLOSSARY「占位格」） ----------
+//
+// 这两类判定只有这一份实现：后端保证配对不变量（尾格随本格原子移动/删除），
+// 共享层的遍历与归属都从这里取，调用方不再各自写 `if cell.spacer`。
+
+/// 渲染口径的可见格遍历：跳过宽字符尾格；行末让位格**保留**——它占一列
+/// 空白，且承载行末光标格（快照按列号命中光标，跳掉光标会消失）。
+/// 列号是网格列号，不是可见格序号。
+pub(super) fn display_cells(cells: &[GridCell]) -> impl Iterator<Item = (usize, &GridCell)> {
+    cells.iter().enumerate().filter(|(_, cell)| !cell.spacer)
+}
+
+/// 内容口径的可见格遍历：两类占位格都跳过——它们不产生字符（复制、搜索、
+/// 转录）。与 [`display_cells`] 的唯一差别是行末让位格。
+pub(super) fn content_cells(cells: &[GridCell]) -> impl Iterator<Item = (usize, &GridCell)> {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| !cell.is_placeholder())
+}
+
+/// 落点归属：宽字符尾格归到它的本格（前一列），否则按原列。
+/// 配对由后端保证；行首的无主尾格按原列返回，不越界。
+pub(super) fn owner_column(cells: &[GridCell], column: usize) -> usize {
+    if cells.get(column).is_some_and(|cell| cell.spacer) {
+        column.saturating_sub(1)
+    } else {
+        column
+    }
+}
+
+/// 行末让位格归属的宽字符：宽字符放不下本行末列时，让位格留在行末，
+/// 宽字符本身折到**下一行首列**。返回它的内容（含组合字符），供复制把
+/// 选区末尾的半个宽字符补回文本。`line` 行末不是让位格时返回 None。
+pub(super) fn wrapped_wide_char(grid: &dyn GridView, line: i32) -> Option<GridCell> {
+    let next = line.checked_add(1)?;
+    if next > grid.bottommost_line() {
+        return None;
+    }
+    let mut row = RowBuffer::default();
+    grid.read_row(line, &mut row);
+    row.cells.last().filter(|cell| cell.leading_spacer)?;
+    grid.read_row(next, &mut row);
+    row.cells
+        .first()
+        .filter(|cell| cell.width == 2 && !cell.is_placeholder())
+        .cloned()
+}
+
 /// 网格坐标：行号（以最新输出为锚）+ 列号。
 ///
 /// 行在前、列在后的比较顺序就是网格的自然顺序：先比行，同行再比列。
@@ -482,5 +531,36 @@ mod cell_layout {
             "GridCell 超过 72 字节：{}，克隆热点路径（reflow/快照）会整体变慢",
             std::mem::size_of::<GridCell>()
         );
+    }
+}
+
+#[cfg(test)]
+mod row_semantics {
+    use super::*;
+
+    /// 两种遍历口径的差别只在行末让位格：渲染口径保留它（一列空白 +
+    /// 行末光标格），内容口径跳过它（不产生字符）。
+    #[test]
+    fn display_and_content_walks_differ_only_on_the_leading_spacer() {
+        let mut cells = vec![GridCell::blank(); 4];
+        cells[1].width = 2;
+        cells[2].spacer = true;
+        cells[3].leading_spacer = true;
+
+        let display: Vec<usize> = display_cells(&cells).map(|(column, _)| column).collect();
+        let content: Vec<usize> = content_cells(&cells).map(|(column, _)| column).collect();
+        assert_eq!(display, vec![0, 1, 3]);
+        assert_eq!(content, vec![0, 1]);
+    }
+
+    /// 尾格归属前一列；行首无主尾格按原列返回，不越界。
+    #[test]
+    fn owner_column_snaps_tail_spacers_to_the_wide_cell() {
+        let mut cells = vec![GridCell::blank(); 3];
+        cells[0].width = 2;
+        cells[1].spacer = true;
+        assert_eq!(owner_column(&cells, 0), 0);
+        assert_eq!(owner_column(&cells, 1), 0);
+        assert_eq!(owner_column(&cells, 2), 2);
     }
 }

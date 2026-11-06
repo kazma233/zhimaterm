@@ -1136,11 +1136,7 @@ impl TerminalModel {
             let mut current_link: Option<Arc<str>> = None;
             let mut previous_wide = false;
 
-            for (column, cell) in self.buffer.cells.iter().enumerate() {
-                if cell.spacer {
-                    continue;
-                }
-
+            for (column, cell) in backend::display_cells(&self.buffer.cells) {
                 let mut foreground = resolve(cell.fg, palette, &self.scheme);
                 let mut background = resolve(cell.bg, palette, &self.scheme);
                 if cell.inverse {
@@ -1259,10 +1255,7 @@ impl TerminalModel {
         // 行文本与每个格的字节起点/列号/占格数（跳过宽字符尾格，与快照切分一致）
         let mut text = String::with_capacity(self.size.columns * 4);
         let mut offsets: Vec<(usize, usize, usize)> = Vec::with_capacity(self.size.columns);
-        for (column, cell) in cells.iter().enumerate() {
-            if cell.spacer {
-                continue;
-            }
+        for (column, cell) in backend::display_cells(cells) {
             let wide = cell.width == 2;
             offsets.push((text.len(), column, if wide { 2 } else { 1 }));
             text.push(cell.c);

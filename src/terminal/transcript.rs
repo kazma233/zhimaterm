@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::TerminalModel;
 use super::UnderlineKind;
-use super::backend::{CellColor, GridCell, NamedSlot, RowBuffer};
+use super::backend::{CellColor, GridCell, NamedSlot, RowBuffer, content_cells};
 use super::colors::dim;
 
 /// 回滚转录里的颜色（ADR-040）。
@@ -434,10 +434,7 @@ impl TerminalModel {
     /// 字符，同样式的相邻格合并成一个 run。
     fn append_row_runs(&self, current: &mut StoredLine, line: i32, buffer: &mut RowBuffer) {
         self.core.read_row(line, buffer);
-        for cell in &buffer.cells {
-            if cell.spacer {
-                continue;
-            }
+        for (_, cell) in content_cells(&buffer.cells) {
             let style = self.stored_style(cell);
             let mut text = String::with_capacity(4);
             text.push(cell.c);
@@ -507,6 +504,20 @@ mod transcript_tests {
         assert_eq!(
             model.transcript_lines(&mut logged, &mut pending),
             vec!["0123456789ABCDEF".to_owned()]
+        );
+    }
+
+    /// 折行宽字符的让位格不产生字符：内容口径跳过两类占位格，拼回逻辑行
+    /// 时不多出一个空格（渲染口径才保留让位格承载行末光标格）。
+    #[test]
+    fn transcript_omits_the_wrapped_wide_char_placeholder() {
+        let mut model = TerminalModel::new(10, 3);
+        model.advance("123456789中\r\nx\r\ny\r\n".as_bytes());
+        let mut logged = 0;
+        let mut pending = String::new();
+        assert_eq!(
+            model.transcript_lines(&mut logged, &mut pending),
+            vec!["123456789中".to_owned()]
         );
     }
 
