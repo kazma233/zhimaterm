@@ -13,7 +13,11 @@ use crate::ui::ui_rems;
 /// 卡片宽度按界面字号缩放：字号调大时内容等比变宽，固定像素会把内容挤爆。
 /// 默认根字号下等于 420px，与原固定宽度一致。
 const WIDTH: f32 = 420.0;
-const PADDING_X: f32 = 16.0;
+/// 内容区左右内边距。full_content 模式下卡片不套内边距，自排版的分区
+/// （内部滚动容器）复用同一值，保证两种模式观感一致。
+pub(crate) const PADDING_X: f32 = 16.0;
+/// 内容区上下内边距，与 [`PADDING_X`] 同源同理。
+pub(crate) const PADDING_Y: f32 = 14.0;
 
 /// 卡片皮肤（ADR-044）：默认灰面板；警示/危险确认换边框与底色，内容布局不变。
 pub enum Tone {
@@ -151,7 +155,7 @@ impl Card {
             } else {
                 div()
                     .px(px(PADDING_X))
-                    .py(px(14.))
+                    .py(px(PADDING_Y))
                     .flex()
                     .flex_col()
                     .gap(px(10.))

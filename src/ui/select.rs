@@ -364,4 +364,80 @@ mod tests {
             "上方比下方更窄时不向上"
         );
     }
+
+    /// 单行控件等高契约（CONTROL_HEIGHT）：收起下拉与文本输入框同排并立时
+    /// 渲染高度必须一致，否则同一行/相邻行的控件底缘错位。按设置表单的
+    /// 「标签 + 控件」列同构摆放，量的是最终布局不是组件声明。
+    #[gpui::test]
+    fn select_and_single_line_input_render_equal_heights(cx: &mut gpui::TestAppContext) {
+        use crate::ui::input::TextInput;
+        use gpui::prelude::*;
+
+        struct Harness {
+            input: gpui::Entity<TextInput>,
+        }
+
+        impl gpui::Render for Harness {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                let tokens = crate::theme::tokens(cx);
+                let slot = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+                let column = |label: &str, control: gpui::AnyElement| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(div().text_size(ui_rems(10.)).child(label.to_owned()))
+                        .child(control)
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(420.))
+                    .child(
+                        div()
+                            .debug_selector(|| "select-under-test".into())
+                            .child(column(
+                                "Shell",
+                                plain_select_row(
+                                    &tokens,
+                                    "select-under-test-row",
+                                    "系统默认",
+                                    false,
+                                    &slot,
+                                    |_, _, _| {},
+                                )
+                                .into_any_element(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "input-under-test".into())
+                            .child(column("工作目录", self.input.clone().into_any_element())),
+                    )
+            }
+        }
+
+        cx.update(|cx| crate::theme::init(None, cx));
+        let window = cx.add_window(|_window, cx| Harness {
+            input: cx.new(|cx| {
+                TextInput::new(cx, "占位", false, crate::font::terminal_font("monospace"))
+            }),
+        });
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let select = cx
+            .debug_bounds("select-under-test")
+            .expect("选择框要画出来");
+        let input = cx.debug_bounds("input-under-test").expect("输入框要画出来");
+        assert_eq!(
+            select.size.height, input.size.height,
+            "收起下拉与单行输入框必须等高（实测 {:?} vs {:?}）",
+            select.size.height, input.size.height
+        );
+    }
 }

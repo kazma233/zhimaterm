@@ -12,6 +12,7 @@ fn backends() -> Vec<(&'static str, backend::BackendKind)> {
     vec![
         ("alacritty", backend::BackendKind::Alacritty),
         ("termwiz", backend::BackendKind::Termwiz),
+        ("ghostty", backend::BackendKind::Ghostty),
     ]
 }
 
@@ -148,6 +149,28 @@ contract!(
         assert_eq!(model.snapshot().history_size, 30, "{label}");
         model.set_scrolling_history(10);
         assert_eq!(model.snapshot().history_size, 10, "{label}");
+    }
+);
+
+contract!(
+    history_reads_stay_anchored_when_pruning_exceeds_the_limit,
+    |model, label| {
+        use super::{CellSide, SelectionKind};
+        for i in 0..40 {
+            model.advance(format!("L{i}\r\n").as_bytes());
+        }
+        // 回看中选中视口顶行（历史行）的词；滚回底部后读的是同一锚定行，
+        // 必须仍是同一内容——历史行寻址以锚定行号为准，不随核心的实际
+        // 保留行数（页粒度修剪可高于配置上限）漂移
+        model.scroll(20);
+        model.begin_selection(0, 0, CellSide::Left, SelectionKind::Word);
+        let picked = model.selection_text();
+        model.scroll_to_bottom();
+        assert_eq!(
+            model.selection_text(),
+            picked,
+            "{label}: 滚回底部后同一锚定行的内容漂移"
+        );
     }
 );
 
@@ -522,11 +545,25 @@ impl KindText for super::SearchOutcome {
 
 // ---------- resize reflow 差分场景 ----------
 //
-// 同一场景在两个后端各跑一遍，逐检查点对比整张快照；alacritty 是参照实现。
+// 同一场景在每个后端各跑一遍，逐检查点对比整张快照；alacritty 是参照实现。
 
 /// 差分场景：喂同一段字节与 resize，收集各检查点快照。
 macro_rules! diff {
     ($name:ident, $scenario:expr) => {
+        diff_impl!($name, $scenario, true);
+    };
+}
+
+/// ghostty 是内容锚定重排（ADR-051 有意分歧）：这几个场景只对它断言
+/// 网格结构不变量（行数、行宽一致、光标在界内），不做整帧对比。
+macro_rules! diff_content_anchored {
+    ($name:ident, $scenario:expr) => {
+        diff_impl!($name, $scenario, false);
+    };
+}
+
+macro_rules! diff_impl {
+    ($name:ident, $scenario:expr, $ghostty_exact:expr) => {
         #[test]
         fn $name() {
             let run = |backend: backend::BackendKind| {
@@ -535,18 +572,52 @@ macro_rules! diff {
                 scenario(&mut model)
             };
             let alacritty = run(backend::BackendKind::Alacritty);
-            let termwiz = run(backend::BackendKind::Termwiz);
-            for (index, (left, right)) in alacritty.iter().zip(&termwiz).enumerate() {
-                assert_eq!(
-                    left,
-                    right,
-                    "检查点 {index} 分叉\nalacritty:\n{}\ntermwiz:\n{}",
-                    crate::tests::support::rendered(left),
-                    crate::tests::support::rendered(right)
-                );
+            for (label, backend) in backends() {
+                if backend == backend::BackendKind::Alacritty {
+                    continue;
+                }
+                let candidate = run(backend);
+                if backend == backend::BackendKind::Ghostty && !$ghostty_exact {
+                    for (index, snapshot) in candidate.iter().enumerate() {
+                        assert_grid_shape(snapshot, index);
+                    }
+                    continue;
+                }
+                for (index, (left, right)) in alacritty.iter().zip(&candidate).enumerate() {
+                    assert_eq!(
+                        left,
+                        right,
+                        "检查点 {index} 分叉（alacritty vs {label}）\nalacritty:\n{}\n{label}:\n{}",
+                        crate::tests::support::rendered(left),
+                        crate::tests::support::rendered(right)
+                    );
+                }
             }
         }
     };
+}
+
+/// 重排后的网格结构不变量：每行占格不超列数（行尾默认空白被裁剪后可以
+/// 少）、光标在界内。超列数正是缓存行宽滞后那类腐化的形状。
+fn assert_grid_shape(snapshot: &super::TerminalSnapshot, index: usize) {
+    for (row_index, row) in snapshot.rows.iter().enumerate() {
+        let columns: usize = row.iter().map(|run| run.columns).sum();
+        assert!(
+            columns <= snapshot.columns,
+            "检查点 {index} 行 {row_index}: 行占格总数 {columns} 超过列数 {}",
+            snapshot.columns
+        );
+    }
+    if let Some(cursor) = &snapshot.cursor_cell {
+        assert!(
+            cursor.row < snapshot.rows.len() && cursor.column < snapshot.columns,
+            "检查点 {index}: 光标越出网格（行 {} 列 {}，网格 {} 行 {} 列）",
+            cursor.row,
+            cursor.column,
+            snapshot.rows.len(),
+            snapshot.columns
+        );
+    }
 }
 
 diff!(diff_shrink_width_rewraps_history, |model| {
@@ -580,7 +651,7 @@ diff!(diff_shrink_height_cursor_at_bottom, |model| {
     checkpoints
 });
 
-diff!(diff_shrink_height_cursor_at_top, |model| {
+diff_content_anchored!(diff_shrink_height_cursor_at_top, |model| {
     let mut checkpoints = Vec::new();
     model.advance(b"a\r\nb\r\nc\r\nd\r\ne");
     model.advance(b"\x1b[1;1H");
@@ -602,7 +673,7 @@ diff!(diff_shrink_width_with_wide_chars, |model| {
     checkpoints
 });
 
-diff!(diff_shrink_width_cursor_inside_text, |model| {
+diff_content_anchored!(diff_shrink_width_cursor_inside_text, |model| {
     let mut checkpoints = Vec::new();
     model.advance(b"0123456789012345678901234567890123456789012345");
     model.advance(b"\x1b[1;31H");
@@ -622,7 +693,7 @@ diff!(diff_grow_width_unwraps_styled_rows, |model| {
     checkpoints
 });
 
-diff!(diff_odd_width_splits_wide_chars_with_spacer, |model| {
+diff_content_anchored!(diff_odd_width_splits_wide_chars_with_spacer, |model| {
     let mut checkpoints = Vec::new();
     // 缩到 21 列：宽字符跨在末列时行末留占位格，下一行接字符
     model.advance("甲乙丙丁戊己庚辛壬癸".repeat(2).as_bytes());
@@ -656,6 +727,21 @@ fn grow_after_straddle_keeps_all_content() {
         "增宽回程后全部字符仍在视口：{visible}"
     );
     assert_eq!(snapshot.history_size, 0, "内容完整时不需要历史");
+}
+
+/// ghostty 后端的簇宽度直达快照（ADR-051）：核心原生 mode 2027 字形簇
+/// 定宽，本仓接表格对齐的立项目用例——整行占格与生成方口径一致。
+#[test]
+fn ghostty_cluster_width_reaches_the_snapshot() {
+    let mut model = TerminalModel::with_backend(backend::BackendKind::Ghostty, 40, 3, 30);
+    model.advance("⚠️ 原：✅ 无关联 → 现：❌ 结果冲突".as_bytes());
+    model.advance(b"\x1b[1;1H");
+    let snapshot = model.snapshot();
+    let row = &snapshot.rows[0];
+    assert_eq!(row[0].text, "⚠️");
+    assert_eq!(row[0].columns, 2, "⚠️ 按簇占 2 格（核心原生口径）");
+    let total: usize = row.iter().map(|run| run.columns).sum();
+    assert_eq!(total, 34, "整行占格与其他终端一致（逐码点是 33）");
 }
 
 /// termwiz 后端的簇宽度直达快照（ADR-050 有意分歧）：共享层只认 GridCell

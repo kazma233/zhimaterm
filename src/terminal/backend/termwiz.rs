@@ -1153,10 +1153,10 @@ impl TermwizCore {
 
     // ---------- 查询应答 ----------
 
-    /// 颜色查询：应答字节与 alacritty 同格式（rgb:rrrr/gggg/bbbb，双写十六进制）。
-    /// 有效颜色由 worker 解析（程序改写优先，否则主题），后端只给格式。
+    /// 颜色查询：应答字节走共享 [`super::color_reply`]（与 alacritty 逐位
+    /// 一致）。有效颜色由 worker 解析（程序改写优先，否则主题），后端只给格式。
     fn color_query(&mut self, slot: ColorSlot, prefix: String) {
-        let formatter = move |rgb: super::Rgb| format!("\x1b]{prefix};{}\x07", RgbDisplay(rgb));
+        let formatter = move |rgb: super::Rgb| super::color_reply(&prefix, rgb);
         self.requests.push(TermRequest::ColorRequest {
             slot,
             format: Arc::new(formatter),
@@ -1929,23 +1929,6 @@ fn apply_kitty_mode(current: u16, flags: u16, mode: KittyKeyboardMode) -> u16 {
         KittyKeyboardMode::AssignAll => flags,
         KittyKeyboardMode::SetSpecified => current | flags,
         KittyKeyboardMode::ClearSpecified => current & !flags,
-    }
-}
-
-/// 颜色查询应答的显示格式：双写十六进制（rgb:rrrr/gggg/bbbb），与
-/// alacritty 的应答字节逐位一致。
-struct RgbDisplay(super::Rgb);
-
-impl std::fmt::Display for RgbDisplay {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let RgbDisplay(rgb) = self;
-        write!(
-            f,
-            "rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}",
-            r = rgb.r,
-            g = rgb.g,
-            b = rgb.b
-        )
     }
 }
 

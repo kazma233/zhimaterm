@@ -574,7 +574,7 @@ impl TerminalModel {
         scheme: Arc<ColorScheme>,
         history: usize,
     ) -> Self {
-        Self {
+        let mut model = Self {
             core: backend::create_backend(backend, columns, lines, history),
             buffer: RowBuffer::default(),
             size: Size { columns, lines },
@@ -582,12 +582,31 @@ impl TerminalModel {
             search_match: None,
             selection: None,
             option_as_alt: false,
-        }
+        };
+        model.push_theme_defaults();
+        model
     }
 
     /// 运行时切换配色方案：网格存的是语义色，下一次快照即按新方案解析。
     pub fn set_scheme(&mut self, scheme: Arc<ColorScheme>) {
         self.scheme = scheme;
+        self.push_theme_defaults();
+    }
+
+    /// 把主题默认色推给后端：颜色查询由核心自答的后端（ghostty）需要，
+    /// 其余后端无操作。语义色 → RGB 的换算与快照解析同一套。
+    fn push_theme_defaults(&mut self) {
+        let scheme = Arc::clone(&self.scheme);
+        let mut ansi = [backend::Rgb { r: 0, g: 0, b: 0 }; 16];
+        for (index, rgb) in ansi.iter_mut().enumerate() {
+            *rgb = colors::u32_to_rgb(scheme.ansi[index]);
+        }
+        self.core.set_theme_defaults(
+            colors::u32_to_rgb(scheme.foreground),
+            colors::u32_to_rgb(scheme.background),
+            colors::u32_to_rgb(scheme.cursor),
+            &ansi,
+        );
     }
 
     /// 切换 ⌥ 键语义（ADR-033）。下一次按键即按新语义编码。
@@ -622,6 +641,12 @@ impl TerminalModel {
     /// 强制结束同步输出，把缓冲的输出回放进网格。超时兜底专用；正常的 ESU 由核心自己处理。
     pub fn stop_sync(&mut self) {
         self.core.stop_sync();
+    }
+
+    /// 同步单元格像素尺寸：查询应答由核心自答的后端（ghostty）需要，
+    /// 其余后端默认无操作。随 Resize 命令从 worker 传入。
+    pub fn set_cell_pixels(&mut self, width: u16, height: u16) {
+        self.core.set_cell_pixels(width, height);
     }
 
     pub fn resize(&mut self, columns: usize, lines: usize) {

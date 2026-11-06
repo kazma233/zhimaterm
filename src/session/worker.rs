@@ -913,6 +913,7 @@ fn apply_command(
             let lines = lines.max(1);
             state.cell_size = (cell_width, cell_height);
             let lines_grew = lines > terminal.size().1;
+            terminal.set_cell_pixels(cell_width, cell_height);
             terminal.resize(columns, lines);
             // 灌入先于 SIGWINCH 发出：shell 因尺寸变化重画的提示符落在清屏后的空屏上
             advance_restore_hold(restore_hold, terminal, lines_grew);

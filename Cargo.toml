@@ -9,6 +9,11 @@ description = "Developer-focused desktop terminal with local and SSH shells, mul
 license = "MIT"
 default-run = "zhimaterm"
 
+# libghostty-vt 的仓内薄绑定（ADR-051）：成员 crate 的 build.rs 按 GHOSTTY.lock
+# 下载固定源码包并经 Zig 编译静态库；绑定预生成提交，构建只需要 Zig。
+[workspace]
+members = ["ffi/ghostty-vt-sys"]
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1"
@@ -25,6 +30,12 @@ serde_json = "=1.0.151"
 ssh2 = { version = "=0.9.6", features = ["vendored-openssl", "openssl-on-win32"] }
 # termwiz 后端（ADR-050）：VT 流式解析器；屏幕模型在本仓实现（src/terminal/backend/termwiz.rs）。
 termwiz = "0.23"
+# ghostty 后端（ADR-051）：libghostty-vt C 核心的仓内薄绑定（ffi/ghostty-vt-sys，
+# 按官方头文件 bindgen 出所用函数子集），字形簇定宽（mode 2027）原生口径。
+# 构建要求：Zig 0.17.x 在 PATH 或 ZIG 环境变量（自行安装）；首次构建联网
+# 下载 GHOSTTY.lock 固定的源码包（sha256 校验），离线构建设 GHOSTTY_SOURCE_DIR
+# 指向本地 Ghostty 源码树。macOS 是该 pin 的唯一 supported runtime。
+ghostty-vt-sys = { path = "ffi/ghostty-vt-sys" }
 unicode-segmentation = "1"
 # 保存连接的条目 id（ADR-018 修订）：凭据按条目 id 挂钥匙串，条目身份不再
 # 参与；需要不受存档内容影响的唯一键

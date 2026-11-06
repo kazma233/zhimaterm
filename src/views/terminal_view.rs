@@ -42,6 +42,10 @@ use crate::views::shell;
 /// 光标闪烁半周期（ADR-032）：只在程序要求闪烁且窗口激活时跑，每拍翻一次相位。
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// 后端名闪现时长：首次画面到达时中央亮出本格后端名，是「本格用的哪个
+/// 后端」对用户可见的唯一入口（ADR-050 §2 切换粒度）。
+const BACKEND_BADGE_DURATION: Duration = Duration::from_secs(1);
+
 /// 指标历史的保留点数：与迷你图槽位同源（2 秒一拍 × 30 = 最近 1 分钟），
 /// 两边必须一致，图上每槽才有对应样本。
 const METRIC_HISTORY_CAPACITY: usize = shell::SPARKLINE_SLOTS;
@@ -115,6 +119,11 @@ pub struct TerminalView {
     history: usize,
     /// 本格的终端核心后端（ADR-050）：随会话构造定型，重连沿用，不读当前设置。
     backend: BackendKind,
+    /// 内核闪现截止时刻：None = 不展示。展示条件同时校验未过期，定时器
+    /// 漏触发也不会常驻。
+    backend_badge_until: Option<Instant>,
+    /// 一次性 gate：只在格子生命周期的首个 Frame 闪现，重连不重闪。
+    backend_badge_done: bool,
     last_size: Rc<Cell<(usize, usize)>>,
     /// 触摸板以像素为单位连续滚动，累积不足一格的小增量，避免被四舍五入丢弃
     scroll_remainder: f32,
@@ -348,6 +357,8 @@ impl TerminalView {
             option_as_alt: params.option_as_alt,
             history: params.history,
             backend: params.backend,
+            backend_badge_until: None,
+            backend_badge_done: false,
             cwd: None,
             scrollback,
             last_size: Rc::new(Cell::new((0, 0))),
@@ -978,6 +989,21 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// 中央闪现本格后端名（首帧画面触发）：展示到截止时刻，定时器只负责
+    /// 到点触发一次重绘，隐藏条件由渲染侧的未过期校验保证（漏触发不常驻）。
+    fn show_backend_badge(&mut self, cx: &mut Context<Self>) {
+        self.backend_badge_until = Some(Instant::now() + BACKEND_BADGE_DURATION);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BACKEND_BADGE_DURATION).await;
+            let _ = this.update(cx, |view, cx| {
+                view.backend_badge_until = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn handle_session_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Frame(snapshot) => {
@@ -987,6 +1013,11 @@ impl TerminalView {
                 }
                 let blinking = snapshot.cursor_blinking;
                 self.snapshot = Some(Arc::new(snapshot));
+                // 首个画面到达时闪现内核身份：一次性，重连不重闪
+                if !self.backend_badge_done {
+                    self.backend_badge_done = true;
+                    self.show_backend_badge(cx);
+                }
                 if blinking && self.window_active {
                     self.ensure_blink(cx);
                 }
@@ -2491,6 +2522,32 @@ impl Render for TerminalView {
                                 })
                                 .absolute()
                                 .inset_0(),
+                            )
+                            // 内核闪现：首个画面到达时中央亮 1 秒（本格后端身份，
+                            // ADR-050/051）。中央覆盖不占布局、不 resize；纯展示
+                            // 不设 hitbox，鼠标事件穿透给网格；过期由 is_some_and
+                            // 校验兜底，不依赖定时器精确。
+                            .children(
+                                self.backend_badge_until
+                                    .is_some_and(|until| Instant::now() < until)
+                                    .then(|| {
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(2.))
+                                                    .rounded(px(4.))
+                                                    .bg(gpui::rgb(tokens.bg_row))
+                                                    .text_color(gpui::rgb(tokens.fg_faint))
+                                                    .text_size(ui_rems(10.))
+                                                    .child(self.backend.display_name()),
+                                            )
+                                    }),
                             )
                             // 网格中央提示（ADR-016）：只服务本地格——启动中、
                             // 启动失败与写入错误；远端的连接中在底栏（带已等待秒数）

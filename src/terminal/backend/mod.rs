@@ -17,6 +17,7 @@ use super::TermRequest;
 use super::UnderlineKind;
 
 pub(super) mod alacritty;
+pub(super) mod ghostty;
 pub(super) mod termwiz;
 
 /// 终端核心后端。
@@ -25,12 +26,17 @@ pub(crate) enum BackendKind {
     #[default]
     Alacritty,
     Termwiz,
+    Ghostty,
 }
 
 impl BackendKind {
     /// 设置项的候选：即全部后端。
     pub(crate) fn available() -> &'static [BackendKind] {
-        &[BackendKind::Alacritty, BackendKind::Termwiz]
+        &[
+            BackendKind::Alacritty,
+            BackendKind::Termwiz,
+            BackendKind::Ghostty,
+        ]
     }
 
     /// 设置文件里的名字。
@@ -38,6 +44,7 @@ impl BackendKind {
         match self {
             BackendKind::Alacritty => "alacritty",
             BackendKind::Termwiz => "termwiz",
+            BackendKind::Ghostty => "ghostty",
         }
     }
 
@@ -46,6 +53,7 @@ impl BackendKind {
         match self {
             BackendKind::Alacritty => "Alacritty",
             BackendKind::Termwiz => "Termwiz",
+            BackendKind::Ghostty => "Ghostty",
         }
     }
 
@@ -54,6 +62,7 @@ impl BackendKind {
     pub(crate) fn parse(name: &str) -> BackendKind {
         match name {
             "termwiz" => BackendKind::Termwiz,
+            "ghostty" => BackendKind::Ghostty,
             _ => BackendKind::Alacritty,
         }
     }
@@ -69,6 +78,7 @@ pub(super) fn create_backend(
     match kind {
         BackendKind::Alacritty => Box::new(alacritty::AlacrittyCore::new(columns, lines, history)),
         BackendKind::Termwiz => Box::new(termwiz::TermwizCore::new(columns, lines, history)),
+        BackendKind::Ghostty => Box::new(ghostty::GhosttyCore::new(columns, lines, history)),
     }
 }
 
@@ -125,6 +135,18 @@ pub enum ColorSlot {
     Background,
     /// 光标色（OSC 12）。
     Cursor,
+}
+
+/// OSC 4/10/11/12 颜色查询的应答字节：`ESC ] <prefix> ; rgb:… BEL`，每通道
+/// 双写两位十六进制（rgb:rrrr/gggg/bbbb）。termwiz 与 ghostty 共用这一份
+/// 实现保证应答字节逐位一致（ADR-051）；alacritty 沿用上游格式器，口径相同。
+pub(super) fn color_reply(prefix: &str, rgb: Rgb) -> String {
+    format!(
+        "\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07",
+        r = rgb.r,
+        g = rgb.g,
+        b = rgb.b
+    )
 }
 
 /// 程序经 OSC 4/10/11/12 改写过的颜色槽。
@@ -437,6 +459,23 @@ pub(super) trait TerminalCore: GridView {
 
     /// 强制结束同步输出，把缓冲的输出回放进网格。超时兜底专用。
     fn stop_sync(&mut self);
+
+    /// 同步单元格像素尺寸。查询应答由核心自答的后端（ghostty，CSI 14/16/18t）
+    /// 需要它回答像素级尺寸；应答走共享层格式器的后端（alacritty/termwiz）
+    /// 用不到，默认无操作。
+    fn set_cell_pixels(&mut self, _width: u16, _height: u16) {}
+
+    /// 推送主题默认色。颜色查询由核心自答的后端（ghostty）必须知道默认
+    /// 色，否则 OSC 10/11/12 查询在核心里被跳过、没有应答；应答走共享层
+    /// 格式器的后端（alacritty/termwiz）用不到，默认无操作。
+    fn set_theme_defaults(
+        &mut self,
+        _foreground: Rgb,
+        _background: Rgb,
+        _cursor: Rgb,
+        _ansi: &[Rgb; 16],
+    ) {
+    }
 }
 
 #[cfg(test)]

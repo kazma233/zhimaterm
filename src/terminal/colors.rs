@@ -29,8 +29,8 @@ fn override_of(slot: NamedSlot, palette: &ColorPalette) -> Option<u32> {
     }
 }
 
-/// 打包的 RGB → 真彩色。
-fn u32_to_rgb(value: u32) -> Rgb {
+/// 语义色的 RGB 打包值 → 中性 RGB（主题推送用，与快照解析同一套换算）。
+pub(super) fn u32_to_rgb(value: u32) -> Rgb {
     Rgb {
         r: (value >> 16) as u8,
         g: (value >> 8) as u8,

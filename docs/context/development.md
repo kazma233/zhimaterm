@@ -9,6 +9,12 @@
 - 开发运行：`cargo run --bin zhimaterm`——启动可交互的本地终端（左侧栏多会话，支持的全部交互见功能行为说明）。
 - 安装到当前用户：`task install`（先构建 release，再按平台做桌面集成：Linux 装进 `~/.local`、macOS 组装 .app 到 `~/Applications`、Windows 注册开始菜单）；卸载 `task uninstall`。
 - `cargo run --bin zhimaterm-ssh-sftp-probe`：验证单条 SSH session 中非阻塞 Shell 与 SFTP 的交替推进。该命令只使用 SSH Agent，且要求显式设置 `ZHIMATERM_SSH_ADDR`、`ZHIMATERM_SSH_USER` 和 `ZHIMATERM_SSH_HOST_KEY_SHA256`。不会读取、保存或打印密码、私钥或 `known_hosts`。
+- 构建依赖：ghostty 终端后端（[ADR-051](../decisions/051-ghostty-vt-backend.md)）经仓内
+  `ffi/ghostty-vt-sys`（workspace 成员）用 Zig 编译 vendored 的 libghostty-vt，需要 Zig 0.17.x
+  （PATH 或 `ZIG` 环境变量，自行安装）；首次构建联网下载 `GHOSTTY.lock` 固定的源码包
+  （sha256 校验），离线构建设 `GHOSTTY_SOURCE_DIR` 指向本地 Ghostty 源码树。FFI 绑定
+  预生成提交，构建只需要 Zig；再生成与更新 pin 见
+  [runbooks/ghostty-bindings](../runbooks/ghostty-bindings.md)。该后端目前只在 macOS 实测过运行时。
 
 ## 测试与验证
 

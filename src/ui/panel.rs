@@ -182,3 +182,25 @@ pub fn error_line(tokens: &UiTokens, message: &str) -> gpui::Div {
         .text_color(gpui::rgb(tokens.danger))
         .child(message.to_owned())
 }
+
+/// 表单小节标题：小节名 + 同行可选说明。说明比标题暗一档，承担语义
+/// （可选性、顺序、生效时机），字段标签因此可以只写名字。设置表单与
+/// 连接表单共用同一实现，两侧观感不会各自漂移。
+pub fn section_header(tokens: &UiTokens, title: &str, note: Option<&str>) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(ui_rems(11.))
+                .text_color(gpui::rgb(tokens.fg_secondary))
+                .child(title.to_owned()),
+        )
+        .children(note.map(|note| {
+            div()
+                .text_size(ui_rems(10.))
+                .text_color(gpui::rgb(tokens.fg_faint))
+                .child(note.to_owned())
+        }))
+}

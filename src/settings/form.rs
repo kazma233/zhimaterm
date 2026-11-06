@@ -13,6 +13,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Keystroke, Pixels, Window, div, px,
+    relative,
 };
 
 use crate::font;
@@ -278,15 +279,17 @@ impl SettingsForm {
     /// 表单里输入框的焦点环：按视觉顺序排（ADR-043）。模态内的 Tab 沿它移动，
     /// 走完一圈回到作用域根。自定义 Shell 路径只在选中「自定义…」时在场。
     pub fn focus_ring(&self, cx: &App) -> Vec<FocusHandle> {
+        // 与视觉顺序一致（ADR-043）：自定义 Shell 路径行画在 Shell 行与工作
+        // 目录行之间，环里也夹在 history 与 workdir 之间
         let mut ring = vec![
             self.ui_size.read(cx).focus_handle(),
             self.size.read(cx).focus_handle(),
             self.history.read(cx).focus_handle(),
-            self.workdir.read(cx).focus_handle(),
         ];
         if self.shell_custom() {
             ring.push(self.custom_shell.read(cx).focus_handle());
         }
+        ring.push(self.workdir.read(cx).focus_handle());
         ring
     }
 
@@ -419,14 +422,11 @@ fn resolve_shell_index(shells: &[String], configured: Option<&str>) -> (usize, S
     }
 }
 
-/// 设置面板里的小节标题：把「外观与终端」和「本地 Shell」分开，避免一列
-/// 标签连成一片。
-fn section_header(tokens: &crate::theme::UiTokens, text: &str) -> gpui::Div {
-    div()
-        .pt(px(2.))
-        .text_size(ui_rems(11.))
-        .text_color(gpui::rgb(tokens.fg_secondary))
-        .child(text.to_owned())
+/// 设置面板里的小节标题：与连接表单共用 [`panel::section_header`]，按生效
+/// 范围把字段分成「界面 / 终端 / 新会话」三段；本表单比共享版多 2px 顶部
+/// 呼吸空间。
+fn section_header(tokens: &crate::theme::UiTokens, title: &str, note: Option<&str>) -> gpui::Div {
+    panel::section_header(tokens, title, note).pt(px(2.))
 }
 
 /// 一列「标签 + 控件」，用于等宽两列行。标签在控件上方，两列顶对齐。
@@ -441,17 +441,6 @@ fn field_column(
         .gap(px(3.))
         .child(card::label(tokens, title))
         .child(control)
-}
-
-/// 两列等宽设置行：Shell 与工作目录并排，宽度不够时输入框内部滚动，
-/// 不再一条条占满整行。
-fn pair_row(left: gpui::Div, right: gpui::Div) -> gpui::Div {
-    div()
-        .flex()
-        .items_start()
-        .gap(px(8.))
-        .child(div().flex_1().min_w(px(0.)).child(left))
-        .child(div().flex_1().min_w(px(0.)).child(right))
 }
 
 /// 一行放一组字体设置：字体下拉占剩余宽度，字号框定宽在右。定宽按 rem 标定：
@@ -529,13 +518,21 @@ fn checkbox_row(
             )
             .child(card::title(tokens, title)),
     )
-    // 说明文字独占一行，左缘对齐标题（勾选框宽 + 间距，都换算成设计单位）；
-    // 长文字允许换行
+    // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
+    // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
+    // 预先折算会少算间距；长文字允许换行
     .child(
         div()
-            .min_w_0()
-            .pl(ui_rems(14. + 8. / DEFAULT_UI_FONT_SIZE))
-            .child(card::label(tokens, description).max_w_full()),
+            .flex()
+            .items_start()
+            .gap(px(8.))
+            .child(div().flex_none().w(ui_rems(14.)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(card::label(tokens, description)),
+            ),
     )
 }
 
@@ -636,8 +633,12 @@ impl ModalView for SettingsModal {
                 ))
         };
 
+        // 分组按生效范围划（外壳 apply_settings 的实际行为）：界面 = 整个窗口；
+        // 终端 = 「应用」时立即推给所有已开会话；新会话 = 只落盘、被新建会话
+        // 读取，已开会话不变。终端核心属于新会话组——它与 Shell/工作目录同一
+        // 生效时机，与「外观」无关。
         content = content
-            .child(section_header(tokens, "外观与终端"))
+            .child(section_header(tokens, "界面", None))
             .child(font_row(
                 tokens,
                 cx,
@@ -647,7 +648,10 @@ impl ModalView for SettingsModal {
                     MIN_UI_FONT_SIZE as i32, MAX_UI_FONT_SIZE as i32
                 ),
                 &form.ui_size,
-            ))
+            ));
+        content = content
+            .child(crate::ui::horizontal_divider(tokens))
+            .child(section_header(tokens, "终端", Some("已开会话立即生效")))
             .child(font_row(
                 tokens,
                 cx,
@@ -664,30 +668,6 @@ impl ModalView for SettingsModal {
                 ),
                 &form.history,
             ));
-        content = content.child(pair_row(
-            field_column(
-                tokens,
-                "终端核心（应用于新会话）",
-                plain_select_row(
-                    tokens,
-                    "select-terminal-backend",
-                    &form.backend_labels()[form.backend_index],
-                    form.backend_open,
-                    &form.backend_bounds,
-                    {
-                        let form = self.form.clone();
-                        move |_, _, cx| {
-                            form.update(cx, |form, cx| {
-                                form.toggle_dropdown(DropdownField::Backend, cx)
-                            });
-                        }
-                    },
-                ),
-            ),
-            field_column(tokens, "已运行会话保持原后端", {
-                card::label(tokens, "切换只影响之后新建的会话与标签").into_any_element()
-            }),
-        ));
         // ⌥ 键当 Alt 只在 macOS 有语义：其余平台的 Alt 键本就是 Alt，开关渲染
         // 出来是死设置（ADR-033）。配置字段不因平台分叉，照常持久化
         #[cfg(target_os = "macos")]
@@ -707,28 +687,50 @@ impl ModalView for SettingsModal {
         }
         content = content
             .child(crate::ui::horizontal_divider(tokens))
-            .child(section_header(tokens, "本地 Shell（应用于新建会话）"))
-            .child(pair_row(
-                field_column(
+            .child(section_header(tokens, "新会话", Some("已开会话保持不变")))
+            // 一行一条：生效时机由小节说明统一交代，字段标签只写名字
+            .child(field_column(
+                tokens,
+                "终端核心",
+                plain_select_row(
                     tokens,
-                    "Shell",
-                    plain_select_row(
-                        tokens,
-                        "select-local-shell",
-                        &form.shell_label(),
-                        form.shell_open,
-                        &form.shell_bounds,
-                        {
-                            let form = self.form.clone();
-                            move |_, _, cx| {
-                                form.update(cx, |form, cx| {
-                                    form.toggle_dropdown(DropdownField::Shell, cx)
-                                });
-                            }
-                        },
-                    ),
+                    "select-terminal-backend",
+                    &form.backend_labels()[form.backend_index],
+                    form.backend_open,
+                    &form.backend_bounds,
+                    {
+                        let form = self.form.clone();
+                        move |_, _, cx| {
+                            form.update(cx, |form, cx| {
+                                form.toggle_dropdown(DropdownField::Backend, cx)
+                            });
+                        }
+                    },
                 ),
-                field_column(tokens, "工作目录（留空 = home）", form.workdir.clone()),
+            ))
+            .child(field_column(
+                tokens,
+                "本地 Shell",
+                plain_select_row(
+                    tokens,
+                    "select-local-shell",
+                    &form.shell_label(),
+                    form.shell_open,
+                    &form.shell_bounds,
+                    {
+                        let form = self.form.clone();
+                        move |_, _, cx| {
+                            form.update(cx, |form, cx| {
+                                form.toggle_dropdown(DropdownField::Shell, cx)
+                            });
+                        }
+                    },
+                ),
+            ))
+            .child(field_column(
+                tokens,
+                "工作目录（留空 = home）",
+                form.workdir.clone(),
             ));
         if form.shell_custom() {
             content = content.child(input::field(
@@ -738,7 +740,38 @@ impl ModalView for SettingsModal {
                 &form.custom_shell,
             ));
         }
-        content.into_any_element()
+        // 内容区自滚（卡片走 full_content，不套内边距）：padding 与字段间距由
+        // 滚动容器自带（与卡片默认内边距同源），字段整体超过内容区高度时在区
+        // 内滚动，弹窗 header 与动作区保持可见
+        div()
+            .id("settings-content")
+            .flex_1()
+            .min_h(px(0.))
+            .px(px(card::PADDING_X))
+            .py(px(card::PADDING_Y))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .overflow_y_scroll()
+            .child(content)
+            .into_any_element()
+    }
+
+    /// 卡片高度封顶（八成窗高，与连接表单同档）：设置项一行一行落下来，窗口
+    /// 矮时不能把动作按钮顶出视口外——弹窗不比视口高，富余给内容区滚动。
+    fn card(&self, window: &Window, cx: &App) -> gpui::Div {
+        let tokens = crate::theme::tokens(cx);
+        let mut card = card::Card::new(&tokens)
+            .full_content()
+            .content(self.content(window, cx))
+            .actions(self.actions(cx));
+        if let Some(title) = self.title() {
+            card = card.header(card::title(&tokens, &title));
+        }
+        if let Some(footer) = self.footer(cx) {
+            card = card.footer(footer);
+        }
+        card.build().max_h(relative(0.8))
     }
 
     fn footer(&self, cx: &App) -> Option<AnyElement> {

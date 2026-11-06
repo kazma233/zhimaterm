@@ -1054,9 +1054,13 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
         };
         let mut base = div()
             .flex()
-            .flex_1()
             .min_w(px(0.))
-            .when(multiline, |d| d.h_full())
+            // flex_1 只给多行框：它的职责是撑满定高父容器。单行框的声明高度
+            // 是 CONTROL_HEIGHT，根上挂 flex_1（basis 0）在自适应高度的列
+            // 容器（input::field 这类）里会被内容最小高度接管，框缩到自然
+            // 行高、与下拉框错位；宽度撑开由列容器的交叉轴 stretch 完成，
+            // 不依赖 flex_1
+            .when(multiline, |d| d.flex_1().h_full())
             .when(!multiline, |d| {
                 d.h(crate::ui::ui_rems(crate::ui::CONTROL_HEIGHT))
                     .items_center()

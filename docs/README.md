@@ -77,11 +77,13 @@
 - [ssh-agent 图解](context/ssh-agent-explained.md)：面向不熟悉 SSH 内部的读者，讲清 agent 与转发在做什么。
 - [SSH 转发与跳板机入门](context/ssh-forward-vs-jump-host-primer.md)：本地/远程/动态转发的区别与跳板机选型。
 - [中文拼音输入排障](context/ime-pinyin-troubleshooting.md)：三层叠加假象的排查路径与可复用诊断方法（ADR-033）。
+- [libghostty-vt C API 机制笔记](context/libghostty-vt-api-notes.md)：tagged get/set、sized 结构、两段式缓冲、回调协议等扩展 ghostty 后端前的依据（探索快照，用前二次确认）。
 
 ## 运行手册（`runbooks/`）
 
 - [性能验收](runbooks/perf-acceptance.md)：固定输入、目标环境、结果记录与人工交互清单。
 - [SSH 端到端测试](runbooks/ssh-e2e.md)：门控 sshd 环境的三种形态、跑法与用例覆盖表。
+- [ghostty 绑定](runbooks/ghostty-bindings.md)：FFI 绑定再生成、更新 pin 与离线构建。
 
 ## 归档（`archive/`，仅作历史依据）
 

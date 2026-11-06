@@ -81,6 +81,10 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 |---|---|---|---|---|
 | OpenSSL | 3.6.3 | Apache-2.0 | The OpenSSL Project | 经 `openssl-src` 300.6.1，Windows 上 vendored 构建（ADR-006） |
 | libssh2 | 1.11.1 | BSD-2-Clause | libssh2 项目（COPYING 中的各版权人见下） | 经 `libssh2-sys` 0.3.3 随 crate 分发 |
+| libghostty-vt | 1.4.0-main.83fb956 | MIT | Mitchell Hashimoto 与 Ghostty 贡献者 | 经仓内 `ffi/ghostty-vt-sys` 按 GHOSTTY.lock 固定源码包 vendored 构建（ADR-051） |
+
+仓内 `ffi/ghostty-vt-sys` 的 build.rs 改编自 libghostty-vt-sys 0.2.2（MIT OR Apache-2.0）；
+`src/terminal/backend/ghostty/vt.rs` 的封装口径移植自 ghostty-vt 0.8.0（Apache-2.0）所用子集。
 
 libssh2 的 BSD-2-Clause 原文版权行（`libssh2/COPYING`）：
 

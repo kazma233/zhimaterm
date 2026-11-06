@@ -47,6 +47,9 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
   名字不存在或当前构建未编译该后端时回落默认，不报错。
 - `SessionConfig.backend` 随会话构造定型；`TerminalView` 记住本格后端，
   **重连沿用原格后端**，不读当前设置。
+- 本格用的哪个后端对用户可见：首次画面到达时画面中央闪现后端名约 1 秒
+  （`terminal_view.rs`）。常驻标识挤占终端画面，闪现只在开格最需要
+  确认的时刻出现。
 - 运行中的会话不接收后端切换；不提供「重启会话以换后端」（会丢 shell 状态，
   收益不抵代价）。
 - 默认后端是 alacritty（新会话未配置时）。两个后端都是普通依赖、始终编译
@@ -68,7 +71,7 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
 |---|---|---|
 | SGR 21 | 当 CancelBold（Linux console 口径） | termwiz 后端当双下划线（xterm/kitty/ECMA-48 口径）；共享 `UnderlineKind` 文档注明归后端决定 |
 | 跨列占位后增宽 | 会丢内容（`LEADING_WIDE_CHAR_SPACER` 的边缘缺陷） | termwiz 后端保证内容完整（有专门断言 `grow_after_straddle_keeps_all_content`） |
-| 制表位 | 上游不外露其制表位表，alacritty 适配层按默认 8 列近似 | termwiz 后端跟踪真实 HTS/TSD 制表位 |
+| 制表位 | 上游不外露其制表位表，alacritty 适配层按默认 8 列近似 | termwiz 后端跟踪真实 HTS/TSD 制表位；ghostty 后端同样不外露，按 8 列近似（ADR-051） |
 | emoji 字形簇宽度 | 逐码点定宽：`⚠️` 占 1 格、`👍🏽` 占 4 格，应用按簇口径补的空格对不上（表格边框错位） | termwiz 后端按簇口径回写：VS16 加宽 / VS15 收窄 / 修饰符并入 / ZWJ 序列整簇 2 格（2026-11-04 补，见下） |
 
 上游欠账（跟进上游修复后移除近似）：alacritty_terminal 未暴露制表位表与

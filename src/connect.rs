@@ -1604,7 +1604,7 @@ impl ConnectModal {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(section(tokens, "目标", None))
+                .child(panel::section_header(tokens, "目标", None))
                 .child(input::field(tokens, cx, "名称", &form.name))
                 .child(input::field(tokens, cx, "主机", &form.host))
                 .child(
@@ -2218,24 +2218,8 @@ fn bind_chip(
         .child(label.to_owned())
 }
 
-/// 段标题：小节名 + 一行说明。标题比正文亮一档（与设置表单的小节标题同档），
-/// 组间再由分组线隔开——只靠间距分组时各段会连成一片。说明承担语义（可选性、
-/// 顺序、生效时机），字段标签因此可以只写名字。
-fn section(tokens: &crate::theme::UiTokens, title: &str, note: Option<&str>) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            div()
-                .text_size(ui_rems(11.))
-                .text_color(gpui::rgb(tokens.fg_secondary))
-                .child(title.to_owned()),
-        )
-        .children(note.map(|note| muted(tokens, note)))
-}
-
-/// 比段标题更暗一档的说明文字。
+/// 比段标题更暗一档的说明文字（段标题本身走共享的
+/// [`panel::section_header`]）。
 fn muted(tokens: &crate::theme::UiTokens, text: &str) -> gpui::Div {
     div()
         .text_size(ui_rems(10.))

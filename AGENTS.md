@@ -28,6 +28,11 @@ task install                       # 构建release + 按平台做桌面集成（
 
 重量级用例集中在 `src/tests/`，全部 `#[ignore]` 门控，跑法见 [SSH e2e](docs/runbooks/ssh-e2e.md) 与 [性能验收](docs/runbooks/perf-acceptance.md) runbook。
 
+**构建依赖**：ghostty 终端后端（[ADR-051](docs/decisions/051-ghostty-vt-backend.md)）经仓内
+`ffi/ghostty-vt-sys`（workspace 成员，FFI 绑定预生成提交）用 Zig 编译 vendored 的 libghostty-vt，
+构建机需要 Zig 0.17.x（自行安装，在 PATH 或设 `ZIG` 环境变量）；
+首次构建联网下载固定源码包（sha256 校验），离线构建设 `GHOSTTY_SOURCE_DIR` 指向本地 Ghostty 源码树。
+
 **收尾检查（改了代码就必须跑）**：`cargo fmt` → `cargo clippy --workspace --all-targets` → `cargo test`，三项全绿才算改完。
 
 - `--all-targets` 不能省：不带它 `#[cfg(test)]` 里的代码不参与编译与 lint。
