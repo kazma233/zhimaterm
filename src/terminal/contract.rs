@@ -754,3 +754,185 @@ fn termwiz_cluster_width_reaches_the_snapshot() {
     let total: usize = row.iter().map(|run| run.columns).sum();
     assert_eq!(total, 34, "整行占格与其他终端一致（逐码点是 33）");
 }
+
+// ---------- 随机脚本 fuzz（全后端） ----------
+//
+// termwiz 后端的确定性 fuzz 骨架提升到模型层：同一份随机脚本（文本输出、
+// 光标移动、擦除、滚区、插删行、备用屏、同步输出冻结、resize、回看滚动）
+// 对全部已编译后端跑一遍，断言共享层不变量（快照自洽、稳定、滚动界内）。
+// rng 只被测试骨架消费，同一 seed 流对每个后端产生相同动作序列——差分口径
+// 的随机暴露。termwiz 自家的 core 级 fuzz 仍保留（内部网格状态断言是其
+// 专属深度）；ghostty 的视口缓存/冻结/回看慢路径由此获得与其风险匹配的覆盖。
+
+/// xorshift64（与 termwiz 后端 fuzz 同型）：确定性，失败可按 seed 复现。
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// 种子与步数：ghostty 的 advance 走 FFI、快照走视口缓存物化，量级以
+/// 「契约场景全量一遍」的时长为参照；不够再调。
+const SEEDS: u64 = 16;
+const STEPS: usize = 1500;
+
+#[test]
+fn random_scripts_never_break_contract_invariants() {
+    use super::replay::{
+        assert_scrolling_stays_in_history, assert_snapshot_is_coherent, assert_snapshots_are_stable,
+    };
+
+    for backend in backend::BackendKind::available() {
+        let label = backend.name();
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for seed in 0..SEEDS {
+            let mut model = TerminalModel::with_backend(
+                *backend,
+                80,
+                24,
+                crate::settings::DEFAULT_SCROLLING_HISTORY,
+            );
+            let context = |step: usize| format!("{label} seed {seed} step {step}");
+            for step in 0..STEPS {
+                let arm = rng.below(26);
+                match arm {
+                    // 普通文本（含 CJK、组合字符与 emoji 簇序列）
+                    0..=8 => {
+                        let pick = rng.below(5);
+                        let bytes: &[u8] = match pick {
+                            0 => "hello world. ",
+                            1 => "中文宽度测试，",
+                            2 => "combining e\u{301}\u{308} ",
+                            3 => "⚠️👍🏽 👨‍👩‍👧‍👦1️⃣❤️ ",
+                            _ => "tabs\there\tand\x07bell",
+                        }
+                        .as_bytes();
+                        model.advance(bytes);
+                        model.take_requests();
+                    }
+                    // 回看滚动（ghostty 的视口偏移与越出视口的慢路径寻址）
+                    9 => {
+                        let delta = rng.below(60) as i32 - 30;
+                        model.scroll(delta);
+                        if rng.below(3) == 0 {
+                            model.scroll_to_bottom();
+                        }
+                    }
+                    // 随机 CUP / 绝对定位
+                    10 => {
+                        let line = rng.below(60);
+                        let column = rng.below(140);
+                        model.advance(format!("\x1b[{line};{column}H").as_bytes());
+                    }
+                    // 光标相对移动
+                    11 => {
+                        let count = rng.below(30) + 1;
+                        let letter = b'A' + rng.below(4) as u8;
+                        model.advance(format!("\x1b[{count}{}", letter as char).as_bytes());
+                    }
+                    // 擦除
+                    12 => {
+                        let code = rng.below(4);
+                        model.advance(format!("\x1b[{code}J").as_bytes());
+                        let code = rng.below(4);
+                        model.advance(format!("\x1b[{code}K").as_bytes());
+                    }
+                    // DECAWM 开关
+                    13 => {
+                        let on = rng.below(2);
+                        model.advance(format!("\x1b[?{on}7h").as_bytes());
+                    }
+                    // 滚区 + 滚动
+                    14 => {
+                        let top = rng.below(20) + 1;
+                        let bottom = top + rng.below(10) + 1;
+                        model.advance(format!("\x1b[{top};{bottom}r").as_bytes());
+                        model.advance(b"\x1b[2S\x1b[2T");
+                    }
+                    // 插删行列
+                    15 => {
+                        model.advance(b"\x1b[3L\x1b[2M\x1b[4@\x1b[3P");
+                    }
+                    // 保存恢复光标、RI/IND
+                    16 => {
+                        model.advance(b"\x1b7\x1b8\x1bD\x1bM\x1bE");
+                    }
+                    // 同步输出包住一段输出（冻结窗内可能 resize：定格帧必须恒定）
+                    17 => {
+                        model.advance(b"\x1b[?2026h");
+                        model.advance("缓冲输出中文\r\n".as_bytes());
+                        if rng.below(3) == 0 {
+                            model.resize(
+                                (20 + rng.below(120)) as usize,
+                                (5 + rng.below(40)) as usize,
+                            );
+                            assert_snapshots_are_stable(&mut model, &context(step));
+                        }
+                        model.advance(b"\x1b[?2026l");
+                        model.take_requests();
+                    }
+                    // 随机 resize（最常见的触发源）
+                    18..=21 => {
+                        model.resize((20 + rng.below(120)) as usize, (5 + rng.below(40)) as usize);
+                    }
+                    // 超链接与 SGR 混合
+                    22 => {
+                        model.advance(
+                            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\x1b[1;3;4:3m",
+                        );
+                        model.advance("中文".as_bytes());
+                        model.advance(b"\x1b[0m");
+                    }
+                    // 备用屏进出
+                    23 => {
+                        model.advance(b"\x1b[?1049h");
+                        model.advance("alt screen\r\n".as_bytes());
+                        model.advance(b"\x1b[?1049l");
+                    }
+                    // 滚到底再深回看：历史寻址下的快照一致性
+                    24 => {
+                        model.scroll_to_bottom();
+                        model.scroll(100_000);
+                        assert_snapshot_is_coherent(&model.snapshot(), &context(step));
+                    }
+                    // 同步输出超时兜底：宿主强制结束（stop_sync 复位路径）
+                    _ => {
+                        model.advance(b"\x1b[?2026hstuck");
+                        model.stop_sync();
+                        assert_eq!(model.sync_deadline(), None, "{}", context(step));
+                    }
+                }
+                if step % 7 == 0 {
+                    assert_snapshot_is_coherent(&model.snapshot(), &context(step));
+                    assert_snapshots_are_stable(&mut model, &context(step));
+                }
+                if step % 49 == 0 {
+                    assert_scrolling_stays_in_history(&mut model, &context(step));
+                }
+            }
+            // 收尾不允许停在冻结或回看态
+            if model.sync_deadline().is_some() {
+                model.stop_sync();
+            }
+            assert_eq!(
+                model.sync_deadline(),
+                None,
+                "{label} seed {seed}: 收尾仍有同步输出"
+            );
+            model.scroll_to_bottom();
+            let final_context = format!("{label} seed {seed}: 收尾快照");
+            assert_snapshot_is_coherent(&model.snapshot(), &final_context);
+        }
+    }
+}

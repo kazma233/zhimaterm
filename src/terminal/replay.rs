@@ -1,12 +1,15 @@
 //! 录制流回归：把字节流按真实读取节奏回放，检查我们自己那层的可观察不变量。
 //!
-//! 终端解析由 `alacritty_terminal` 负责并有它自己的 ref 测试；这里保护的是我们写的部分：
+//! 终端解析归各后端（alacritty 有它自己的 ref 测试）；这里保护的是我们写的部分：
 //! 快照的 run/列宽是否自洽、滚动是否越界、选区是否能取到文本、连续快照是否稳定。
-//! 语料分两类：本文件内的确定性字节流，以及通过环境变量指定的外部录制（例如
-//! `alacritty_terminal` 自带的 `tests/ref/*/alacritty.recording`）。
+//! 语料对全部已编译后端回放——自研的屏幕模型（termwiz）与视口缓存（ghostty）
+//! 恰恰是最需要真实字节流打磨的部分。语料分两类：本文件内的确定性字节流，
+//! 以及通过环境变量指定的外部录制（例如 `alacritty_terminal` 自带的
+//! `tests/ref/*/alacritty.recording`）。
 
 use std::time::Instant;
 
+use super::backend::BackendKind;
 use super::{CellSide, SelectionKind, TerminalModel, TerminalSnapshot};
 
 /// 单次读取的块大小：与 worker 的 PTY 读缓冲一致，让回放节奏贴近真实会话。
@@ -50,7 +53,7 @@ fn replay(model: &mut TerminalModel, bytes: &[u8]) {
 }
 
 /// 快照自身必须自洽：每行的段宽之和不超过终端宽度，每段至少一格且不超过字数的两倍。
-fn assert_snapshot_is_coherent(snapshot: &TerminalSnapshot, context: &str) {
+pub(super) fn assert_snapshot_is_coherent(snapshot: &TerminalSnapshot, context: &str) {
     for (index, row) in snapshot.rows.iter().enumerate() {
         let columns: usize = row.iter().map(|run| run.columns).sum();
         assert!(
@@ -72,13 +75,13 @@ fn assert_snapshot_is_coherent(snapshot: &TerminalSnapshot, context: &str) {
 }
 
 /// 同一状态连续快照必须完全一致：快照不能夹带会自行变化的内容（例如残留 damage）。
-fn assert_snapshots_are_stable(model: &mut TerminalModel, context: &str) {
+pub(super) fn assert_snapshots_are_stable(model: &mut TerminalModel, context: &str) {
     let first = model.snapshot();
     let second = model.snapshot();
     assert_eq!(first, second, "{context}: 连续两次快照不一致");
 }
 
-fn assert_scrolling_stays_in_history(model: &mut TerminalModel, context: &str) {
+pub(super) fn assert_scrolling_stays_in_history(model: &mut TerminalModel, context: &str) {
     model.scroll(100_000);
     let top = model.display_offset();
     assert!(
@@ -116,14 +119,22 @@ fn assert_selection_can_copy(model: &mut TerminalModel, context: &str) {
 
 #[test]
 fn replayed_fixtures_keep_our_snapshot_invariants() {
-    for (name, bytes) in fixtures() {
-        let mut model = TerminalModel::new(80, 24);
-        replay(&mut model, &bytes);
+    for backend in BackendKind::available() {
+        for (name, bytes) in fixtures() {
+            let mut model = TerminalModel::with_backend(
+                *backend,
+                80,
+                24,
+                crate::settings::DEFAULT_SCROLLING_HISTORY,
+            );
+            replay(&mut model, &bytes);
 
-        assert_snapshot_is_coherent(&model.snapshot(), name);
-        assert_snapshots_are_stable(&mut model, name);
-        assert_scrolling_stays_in_history(&mut model, name);
-        assert_selection_can_copy(&mut model, name);
+            let context = format!("{}·{}", backend.name(), name);
+            assert_snapshot_is_coherent(&model.snapshot(), &context);
+            assert_snapshots_are_stable(&mut model, &context);
+            assert_scrolling_stays_in_history(&mut model, &context);
+            assert_selection_can_copy(&mut model, &context);
+        }
     }
 }
 
@@ -162,13 +173,21 @@ fn replays_external_recordings() {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let mut model = TerminalModel::new(96, 30);
-        replay(&mut model, &bytes);
+        for backend in BackendKind::available() {
+            let mut model = TerminalModel::with_backend(
+                *backend,
+                96,
+                30,
+                crate::settings::DEFAULT_SCROLLING_HISTORY,
+            );
+            replay(&mut model, &bytes);
 
-        assert_snapshot_is_coherent(&model.snapshot(), &name);
-        assert_snapshots_are_stable(&mut model, &name);
-        assert_scrolling_stays_in_history(&mut model, &name);
-        assert_selection_can_copy(&mut model, &name);
+            let context = format!("{}·{}", backend.name(), name);
+            assert_snapshot_is_coherent(&model.snapshot(), &context);
+            assert_snapshots_are_stable(&mut model, &context);
+            assert_scrolling_stays_in_history(&mut model, &context);
+            assert_selection_can_copy(&mut model, &context);
+        }
 
         played += 1;
         bytes_total += bytes.len();
