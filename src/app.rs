@@ -19,6 +19,7 @@ use gpui::{
 
 use crate::connect::{self, ConnectForm, ConnectModal, ConnectView};
 use crate::connections;
+use crate::connections::SavedSources;
 use crate::font::{self, CellMetrics, FontConfig};
 use crate::input::{CloseSession, NewSession, SplitDown, SplitRight};
 use crate::session::{LocalShell, SessionTarget, file_for, session_number_of};
@@ -175,13 +176,6 @@ pub struct ZhimaTermApp {
 pub(crate) enum CloseTarget {
     Pane { tab: usize, pane: PaneId },
     Tab(usize),
-}
-
-/// 已保存连接的实体负载：连接列表与它的读盘错误（错误决定列表可不可信，
-/// 一起变更）。所有者是 [`ZhimaTermApp::saved`]。
-pub(crate) struct SavedSources {
-    pub(crate) store: Option<connections::SavedConnections>,
-    pub(crate) error: Option<String>,
 }
 
 /// 浮层呼出通道（ADR-044 决策 3）：Global 只放应用实体句柄——浮层状态住
@@ -1070,6 +1064,9 @@ impl ZhimaTermApp {
 
     /// 栈顶的连接表单（栈顶是连接模态时才有）。经 as_any 下钻取具体类型
     /// （ADR-044）：模态开着动作才有落点，换模态或关掉自然拿不到。
+    ///
+    /// 这个查找兼作存活守卫：模态关闭后迟到的动作查不到表单即 no-op。
+    /// 不要改成闭包捕获表单实体——那会让迟到动作写进已关闭的模态。
     fn connect_form(&self) -> Option<&Entity<ConnectForm>> {
         self.overlay
             .top_view()?
@@ -1095,7 +1092,8 @@ impl ZhimaTermApp {
         cx.notify();
     }
 
-    /// 栈顶的设置表单（栈顶是设置模态时才有）。
+    /// 栈顶的设置表单（栈顶是设置模态时才有）。同 [`Self::connect_form`]：
+    /// 查找兼作存活守卫。
     fn settings_form(&self) -> Option<&Entity<SettingsForm>> {
         self.overlay
             .top_view()?
@@ -2183,39 +2181,6 @@ fn connect_modal_actions(cx: &Context<ZhimaTermApp>) -> connect::ModalActions {
         back: modal_action(cx, |this, window, cx| {
             this.set_connect_view(ConnectView::List, window, cx)
         }),
-        toggle: {
-            let app = app.clone();
-            Rc::new(move |field, cx| {
-                app.update(cx, |this, cx| {
-                    if let Some(form) = this.connect_form() {
-                        form.update(cx, |form, cx| form.toggle(field, cx));
-                    }
-                    cx.notify();
-                })
-            })
-        },
-        toggle_section: {
-            let app = app.clone();
-            Rc::new(move |section, cx| {
-                app.update(cx, |this, cx| {
-                    if let Some(form) = this.connect_form() {
-                        form.update(cx, |form, cx| form.toggle_section(section, cx));
-                    }
-                    cx.notify();
-                })
-            })
-        },
-        edit_forwards: {
-            let app = app.clone();
-            Rc::new(move |edit, cx| {
-                app.update(cx, |this, cx| {
-                    if let Some(form) = this.connect_form() {
-                        form.update(cx, |form, cx| form.edit_forward(edit, cx));
-                    }
-                    cx.notify();
-                })
-            })
-        },
         close: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),
     }
 }

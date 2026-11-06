@@ -213,6 +213,13 @@ impl SavedConnection {
     }
 }
 
+/// 已保存连接的实体负载：连接列表与它的读盘错误（错误决定列表可不可信，
+/// 一起变更）。语义属本模块，所有者是外壳的 `saved` 实体。
+pub(crate) struct SavedSources {
+    pub(crate) store: Option<SavedConnections>,
+    pub(crate) error: Option<String>,
+}
+
 /// 保存的连接集合。唯一所有者是它自己，落盘在配置目录。
 pub struct SavedConnections {
     path: PathBuf,

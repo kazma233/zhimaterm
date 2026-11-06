@@ -1475,16 +1475,9 @@ fn expand_home(path: &str) -> PathBuf {
 pub type SavedAction = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// 忘掉一条已保存的连接：参数是列表下标。
 pub type ForgetSavedAction = Rc<dyn Fn(usize, &mut App)>;
-/// 翻转一个表单开关（逐控件转发收敛为枚举分发，见 ADR-026）。
-pub type ToggleAction = Rc<dyn Fn(ConnectToggle, &mut App)>;
-/// 展开/收起一个可折叠段。
-pub type SectionToggleAction = Rc<dyn Fn(ConnectSection, &mut App)>;
-/// 编辑转发规则草稿（四种编辑收敛为枚举分发）。
-pub type ForwardEditAction = Rc<dyn Fn(ForwardEdit, &mut App)>;
-
 /// 连接弹窗的交互装配：渲染层只依赖回调，不接触应用实体，改的始终是应用状态机。
-/// 回调只留语义动作，逐控件的开关与转发草稿编辑经 [`ConnectToggle`] /
-/// [`ForwardEdit`] 枚举分发。
+/// 回调只留需要外壳资源的语义动作；逐控件交互（开关、折叠、转发草稿）由
+/// 渲染层直调表单实体（与设置表单同一纪律，ADR-026）。
 pub struct ModalActions {
     /// 行上「连接」：直接连（缺口令时由外壳弹输入框或退到编辑视图）
     pub connect_saved: SavedAction,
@@ -1500,12 +1493,6 @@ pub struct ModalActions {
     pub save_and_connect: WindowAction,
     /// 编辑视图「返回」：丢弃表单改动回到列表
     pub back: WindowAction,
-    /// 翻转一个表单开关
-    pub toggle: ToggleAction,
-    /// 展开/收起一个可折叠段
-    pub toggle_section: SectionToggleAction,
-    /// 编辑转发规则草稿
-    pub edit_forwards: ForwardEditAction,
     /// 打开原生文件选择器挑私钥文件，把路径写回「私钥文件」输入框
     pub pick_key_file: WindowAction,
     /// 关闭弹窗（列表视图的关闭按钮、点击遮罩）。要窗口：关闭时把焦点还给会话
@@ -1529,7 +1516,7 @@ pub struct ConnectModal {
     pub actions: ModalActions,
     /// 已保存连接的实体（外壳唯一所有者，这里只读渲染）：忘掉/保存后列表
     /// 要立即刷新，读实体而不是打开时快照
-    pub saved: Entity<crate::app::SavedSources>,
+    pub saved: Entity<crate::connections::SavedSources>,
     /// 当前视图；由外壳经 `as_any_mut` 切换
     pub view: ConnectView,
 }
@@ -1593,6 +1580,27 @@ impl ConnectModal {
     fn edit_body(&self, tokens: &crate::theme::UiTokens, cx: &App) -> gpui::Div {
         let form = self.form.read(cx);
         let actions = &self.actions;
+        // 逐控件交互直调表单实体（ADR-026，与设置表单同一纪律）：外壳只收
+        // 语义动作。局部闭包与旧字段同形，渲染站点只换 clone 的来源。
+        let form_entity = self.form.clone();
+        let toggle = {
+            let form = form_entity.clone();
+            Rc::new(move |field: ConnectToggle, cx: &mut App| {
+                form.update(cx, |form, cx| form.toggle(field, cx));
+            })
+        };
+        let toggle_section = {
+            let form = form_entity.clone();
+            Rc::new(move |section: ConnectSection, cx: &mut App| {
+                form.update(cx, |form, cx| form.toggle_section(section, cx));
+            })
+        };
+        let edit_forwards = {
+            let form = form_entity.clone();
+            Rc::new(move |edit: ForwardEdit, cx: &mut App| {
+                form.update(cx, |form, cx| form.edit_forward(edit, cx));
+            })
+        };
         // 分组结构（better-layout：组间距 ≥ 2× 组内距）：容器 gap(16) 管组间，
         // 每组内部 gap(8)；组间再画分组线，各段边界一眼可辨（与设置表单同一
         // 分组语言）。口令类短字段两列并排压缩竖向高度。
@@ -1646,7 +1654,7 @@ impl ConnectModal {
                     Some("都可选；按 agent → 私钥 → 密码 顺序尝试"),
                     auth_open,
                     {
-                        let toggle = actions.toggle_section.clone();
+                        let toggle = toggle_section.clone();
                         move |_, _, cx| toggle(ConnectSection::Auth, cx)
                     },
                 ))
@@ -1667,7 +1675,7 @@ impl ConnectModal {
                                     "使用本地 ssh-agent",
                                     form.use_agent,
                                     {
-                                        let toggle = actions.toggle.clone();
+                                        let toggle = toggle.clone();
                                         move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
                                     },
                                 ))
@@ -1748,7 +1756,7 @@ impl ConnectModal {
                         "经跳板机连接",
                         form.jump_enabled,
                         {
-                            let toggle = actions.toggle.clone();
+                            let toggle = toggle.clone();
                             move |_, _, cx| toggle(ConnectToggle::JumpEnabled, cx)
                         },
                     ))
@@ -1790,7 +1798,7 @@ impl ConnectModal {
                         "跳板用本地 ssh-agent",
                         form.jump_use_agent,
                         {
-                            let toggle = actions.toggle.clone();
+                            let toggle = toggle.clone();
                             move |_, _, cx| toggle(ConnectToggle::JumpUseAgent, cx)
                         },
                     ))
@@ -1831,7 +1839,7 @@ impl ConnectModal {
                     Some("连接经跳板转发（ProxyJump）；跳板密码只在内存，不进钥匙串"),
                     jump_open,
                     {
-                        let toggle = actions.toggle_section.clone();
+                        let toggle = toggle_section.clone();
                         move |_, _, cx| toggle(ConnectSection::Jump, cx)
                     },
                 ))
@@ -1855,7 +1863,7 @@ impl ConnectModal {
                     Some("转发 agent 到远端；随连接生效"),
                     options_open,
                     {
-                        let toggle = actions.toggle_section.clone();
+                        let toggle = toggle_section.clone();
                         move |_, _, cx| toggle(ConnectSection::Options, cx)
                     },
                 ))
@@ -1874,7 +1882,7 @@ impl ConnectModal {
                                 "转发 agent 到远端",
                                 form.forward_agent,
                                 {
-                                    let toggle = actions.toggle.clone();
+                                    let toggle = toggle.clone();
                                     move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
                                 },
                             ))
@@ -1887,7 +1895,7 @@ impl ConnectModal {
         // 组 5：端口转发（ADR-011）——规则列表天然占行，组内收窄到 6。
         let mut forward_rows = div().flex().flex_col().gap(px(6.));
         for (index, draft) in form.forwards.iter().enumerate() {
-            forward_rows = forward_rows.child(forward_rule_row(tokens, index, draft, actions));
+            forward_rows = forward_rows.child(forward_rule_row(tokens, index, draft, &form_entity));
         }
         let forwards_open = form.forwards_open;
         fields = fields.child(
@@ -1902,7 +1910,7 @@ impl ConnectModal {
                     Some("建立连接时生效；单条失败不影响会话"),
                     forwards_open,
                     {
-                        let toggle = actions.toggle_section.clone();
+                        let toggle = toggle_section.clone();
                         move |_, _, cx| toggle(ConnectSection::Forwards, cx)
                     },
                 ))
@@ -1918,7 +1926,7 @@ impl ConnectModal {
                             "＋ 添加转发规则",
                             None,
                             {
-                                let edit = actions.edit_forwards.clone();
+                                let edit = edit_forwards.clone();
                                 move |_, _, cx| edit(ForwardEdit::Add, cx)
                             },
                         )))
@@ -2101,7 +2109,7 @@ fn forward_rule_row(
     tokens: &crate::theme::UiTokens,
     index: usize,
     draft: &ForwardRuleDraft,
-    actions: &ModalActions,
+    form: &Entity<ConnectForm>,
 ) -> gpui::Div {
     let prefix = |text: &'static str| {
         div()
@@ -2128,8 +2136,12 @@ fn forward_rule_row(
             kind_label,
             true,
             {
-                let edit = actions.edit_forwards.clone();
-                move |_, _, cx| edit(ForwardEdit::ToggleKind(index), cx)
+                let form = form.clone();
+                move |_, _, cx| {
+                    form.update(cx, |form, cx| {
+                        form.edit_forward(ForwardEdit::ToggleKind(index), cx)
+                    });
+                }
             },
         ));
 
@@ -2142,8 +2154,12 @@ fn forward_rule_row(
         };
         listen_line =
             listen_line.child(bind_chip(tokens, ("forward-bind", index), label, risky, {
-                let edit = actions.edit_forwards.clone();
-                move |_, _, cx| edit(ForwardEdit::ToggleBind(index), cx)
+                let form = form.clone();
+                move |_, _, cx| {
+                    form.update(cx, |form, cx| {
+                        form.edit_forward(ForwardEdit::ToggleBind(index), cx)
+                    });
+                }
             }));
     }
 
@@ -2151,8 +2167,12 @@ fn forward_rule_row(
         .child(div().w(px(76.)).child(draft.listen_port.clone()))
         .child(
             panel::clickable(("remove-forward", index), {
-                let edit = actions.edit_forwards.clone();
-                move |_, _, cx| edit(ForwardEdit::Remove(index), cx)
+                let form = form.clone();
+                move |_, _, cx| {
+                    form.update(cx, |form, cx| {
+                        form.edit_forward(ForwardEdit::Remove(index), cx)
+                    });
+                }
             })
             .ml_auto()
             .px(px(4.))
@@ -3155,9 +3175,6 @@ fn keys_route_by_view(cx: &mut gpui::TestAppContext) {
         save: noop.clone(),
         save_and_connect: noop.clone(),
         back: noop.clone(),
-        toggle: Rc::new(|_: ConnectToggle, _: &mut App| {}),
-        toggle_section: Rc::new(|_: ConnectSection, _: &mut App| {}),
-        edit_forwards: Rc::new(|_: ForwardEdit, _: &mut App| {}),
         pick_key_file: noop.clone(),
         close: noop,
     };
@@ -3165,7 +3182,7 @@ fn keys_route_by_view(cx: &mut gpui::TestAppContext) {
         let font = crate::font::terminal_font("monospace");
         let form = cx.new(|cx| ConnectForm::new(font, cx));
         // 键裁决不读已保存连接,给个空源即可
-        let saved = cx.new(|_| crate::app::SavedSources {
+        let saved = cx.new(|_| crate::connections::SavedSources {
             store: None,
             error: None,
         });
