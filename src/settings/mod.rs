@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::terminal::backend::BackendKind;
+
 /// 终端字号下限：再小连光标都看不清。
 pub const MIN_FONT_SIZE: f32 = 6.0;
 /// 终端字号上限：再大一个格子占掉小半个窗口，行列表格全被撑破。
@@ -59,6 +61,44 @@ pub struct Settings {
     /// 终端核心后端（ADR-050）。存名字，与主题的回落纪律一致：名字不存在
     /// 时回落默认。只影响新会话。
     pub terminal_backend: Option<String>,
+}
+
+/// 设置表单的值：打开时的生效快照与「应用」出口共用一份字段。
+///
+/// `ui_font_family` 的 None = 系统默认界面字体（`font::SYSTEM_UI_FONT`），
+/// 哨兵字符串只留在候选列表里做显示名，不参与值传递。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsValues {
+    pub font_family: String,
+    pub font_size: f32,
+    /// None = 系统默认界面字体。
+    pub ui_font_family: Option<String>,
+    pub ui_font_size: f32,
+    pub scrolling_history: usize,
+    pub local_shell: Option<String>,
+    pub local_workdir: Option<String>,
+    pub option_as_alt: bool,
+    /// 新会话用的终端核心后端（ADR-050）。
+    pub terminal_backend: BackendKind,
+}
+
+impl SettingsValues {
+    /// 编辑值落盘：theme 不在表单里编辑，从现有设置抄回；其余字段全部由
+    /// 编辑值覆盖。这条映射是「漏抄一个字段」的唯一防线。
+    pub fn to_settings(&self, existing: &Settings) -> Settings {
+        Settings {
+            font_family: Some(self.font_family.clone()),
+            font_size: Some(self.font_size),
+            ui_font_family: self.ui_font_family.clone(),
+            ui_font_size: Some(self.ui_font_size),
+            theme: existing.theme.clone(),
+            option_as_alt: self.option_as_alt,
+            scrolling_history: Some(self.scrolling_history),
+            local_shell: self.local_shell.clone(),
+            local_workdir: self.local_workdir.clone(),
+            terminal_backend: Some(self.terminal_backend.name().to_owned()),
+        }
+    }
 }
 
 impl Settings {
@@ -314,6 +354,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
         dir.join("settings.json")
+    }
+
+    #[test]
+    fn edited_values_write_every_field_and_keep_the_theme() {
+        let existing = Settings {
+            theme: Some("Dracula".into()),
+            font_family: Some("Old Mono".into()),
+            local_shell: Some("/bin/sh".into()),
+            ..Default::default()
+        };
+        let values = super::SettingsValues {
+            font_family: "Mono".into(),
+            font_size: 15.0,
+            ui_font_family: Some("Sans".into()),
+            ui_font_size: 13.0,
+            scrolling_history: 2_000,
+            local_shell: Some("/bin/zsh".into()),
+            local_workdir: Some("/tmp".into()),
+            option_as_alt: true,
+            terminal_backend: crate::terminal::backend::BackendKind::Termwiz,
+        };
+        assert_eq!(
+            values.to_settings(&existing),
+            Settings {
+                font_family: Some("Mono".into()),
+                font_size: Some(15.0),
+                ui_font_family: Some("Sans".into()),
+                ui_font_size: Some(13.0),
+                theme: Some("Dracula".into()),
+                option_as_alt: true,
+                scrolling_history: Some(2_000),
+                local_shell: Some("/bin/zsh".into()),
+                local_workdir: Some("/tmp".into()),
+                terminal_backend: Some("termwiz".into()),
+            },
+            "9 个编辑字段全部落盘，theme 从现有设置抄回"
+        );
+    }
+
+    /// 界面字体选「系统默认」时落盘为 None，不继承旧值。
+    #[test]
+    fn system_ui_font_is_written_as_none_not_inherited() {
+        let existing = Settings {
+            ui_font_family: Some("Old Sans".into()),
+            ..Default::default()
+        };
+        let values = super::SettingsValues {
+            font_family: "Mono".into(),
+            font_size: 13.0,
+            ui_font_family: None,
+            ui_font_size: 12.0,
+            scrolling_history: 1_000,
+            local_shell: None,
+            local_workdir: None,
+            option_as_alt: false,
+            terminal_backend: crate::terminal::backend::BackendKind::Alacritty,
+        };
+        assert_eq!(values.to_settings(&existing).ui_font_family, None);
     }
 
     #[test]

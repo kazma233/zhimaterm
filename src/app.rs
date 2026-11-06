@@ -23,9 +23,8 @@ use crate::font::{self, CellMetrics, FontConfig};
 use crate::input::{CloseSession, NewSession, SplitDown, SplitRight};
 use crate::session::{LocalShell, SessionTarget, file_for, session_number_of};
 use crate::settings;
-use crate::settings::form::{
-    CandidateLists, EffectiveSettings, ModalActions, SettingsForm, SettingsModal,
-};
+use crate::settings::SettingsValues;
+use crate::settings::form::{CandidateLists, ModalActions, SettingsForm, SettingsModal};
 use crate::theme::picker;
 use crate::theme::picker::ThemePicker;
 use crate::ui::WindowAction;
@@ -1237,13 +1236,10 @@ impl ZhimaTermApp {
     /// 自己（ADR-043），不落到某个输入框上。
     fn open_settings_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.settings.as_ref();
-        let current = EffectiveSettings {
+        let current = SettingsValues {
             font_family: self.font.family.clone(),
             font_size: self.font.size,
-            ui_font_family: self
-                .ui_font_family
-                .clone()
-                .unwrap_or_else(|| font::SYSTEM_UI_FONT.to_owned()),
+            ui_font_family: self.ui_font_family.clone(),
             ui_font_size: self.ui_font_size,
             scrolling_history: store
                 .map(|store| store.scrolling_history_or_default())
@@ -1346,7 +1342,7 @@ impl ZhimaTermApp {
         };
 
         let font = FontConfig {
-            family: edited.font_family,
+            family: edited.font_family.clone(),
             size: edited.font_size,
         };
         let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
@@ -1363,20 +1359,12 @@ impl ZhimaTermApp {
         self.ui_font_size = edited.ui_font_size;
         window.set_rem_size(px(edited.ui_font_size));
         // 界面字体：应用根节点按它设置，下一帧全部界面文字继承
-        self.ui_font_family =
-            (edited.ui_font_family != font::SYSTEM_UI_FONT).then_some(edited.ui_font_family);
+        self.ui_font_family = edited.ui_font_family.clone();
 
         match self.settings.as_mut() {
             Some(store) => {
-                store.font_family = Some(font.family.clone());
-                store.font_size = Some(font.size);
-                store.ui_font_family = self.ui_font_family.clone();
-                store.ui_font_size = Some(edited.ui_font_size);
-                store.option_as_alt = edited.option_as_alt;
-                store.scrolling_history = Some(edited.scrolling_history);
-                store.local_shell = edited.local_shell;
-                store.local_workdir = edited.local_workdir;
-                store.terminal_backend = Some(edited.terminal_backend.name().to_owned());
+                // 落盘映射单点在 SettingsValues::to_settings（theme 从旧设置抄回）
+                *store = edited.to_settings(store);
                 if let Err(error) = store.save() {
                     return self.fail_settings(
                         format!("已应用，但保存失败：{error:#}；重启后将恢复为上次保存的设置"),

@@ -19,8 +19,8 @@ use gpui::{
 use crate::font;
 use crate::settings::{
     DEFAULT_SCROLLING_HISTORY, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_UI_FONT_SIZE,
-    validate_font_size, validate_local_shell, validate_local_workdir, validate_scrolling_history,
-    validate_ui_font_size,
+    SettingsValues, validate_font_size, validate_local_shell, validate_local_workdir,
+    validate_scrolling_history, validate_ui_font_size,
 };
 use crate::terminal::backend::BackendKind;
 use crate::ui::card;
@@ -51,23 +51,65 @@ pub enum DropdownField {
     Backend,
 }
 
+impl DropdownField {
+    /// 展开浮层的元素 id（同一时间只存在一个浮层）。
+    fn popover_id(self) -> &'static str {
+        match self {
+            Self::Terminal => "font-select-popover",
+            Self::Interface => "ui-font-select-popover",
+            Self::Shell => "shell-select-popover",
+            Self::Backend => "backend-select-popover",
+        }
+    }
+}
+
 /// 选择框 bounds 槽位：渲染帧写入，展开的浮层按它定位。
 type BoundsSlot = Rc<Cell<Bounds<Pixels>>>;
 
-/// 打开设置表单时的生效配置快照：外壳从自身状态与设置文件拼出的 8 个纯值，
-/// 表单按它预填。读盘失败的设置文件传默认值（横幅由外壳另行提示）。
-#[derive(Debug)]
-pub struct EffectiveSettings {
-    pub font_family: String,
-    pub font_size: f32,
-    pub ui_font_family: String,
-    pub ui_font_size: f32,
-    pub scrolling_history: usize,
-    pub local_shell: Option<String>,
-    pub local_workdir: Option<String>,
-    pub option_as_alt: bool,
-    /// 新会话用的终端核心后端（ADR-050）。
-    pub terminal_backend: BackendKind,
+/// 一个下拉的全部状态：选中项下标 + 选择框 bounds。展开与否由表单的
+/// `open: Option<DropdownField>` 单值表达，同一时间最多展开一个。
+struct DropdownState {
+    selected: usize,
+    bounds: BoundsSlot,
+}
+
+impl DropdownState {
+    fn new(selected: usize) -> Self {
+        Self {
+            selected,
+            bounds: Rc::new(Cell::new(Bounds::default())),
+        }
+    }
+}
+
+/// 本地 Shell 的选择：系统默认 / 注册表候选 / 自定义路径。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellChoice {
+    Default,
+    Candidate(usize),
+    Custom,
+}
+
+impl ShellChoice {
+    /// 在 `shell_labels`（系统默认 + 候选 + 自定义）里的下标。
+    fn index(self, candidates: usize) -> usize {
+        match self {
+            Self::Default => 0,
+            Self::Candidate(index) => index + 1,
+            Self::Custom => candidates + 1,
+        }
+    }
+
+    /// 下拉下标 → 选择。
+    fn from_index(index: usize, candidates: usize) -> Self {
+        if index == 0 {
+            Self::Default
+        } else if index > candidates {
+            Self::Custom
+        } else {
+            Self::Candidate(index - 1)
+        }
+    }
 }
 
 /// 打开表单时的候选快照：字体与 Shell 候选由外壳取一次传入（connect 表单
@@ -81,30 +123,10 @@ pub struct CandidateLists {
     pub shells: Vec<String>,
 }
 
-/// 「应用」出口：表单的全部编辑值，逐项校验过。theme 不在其中——表单不
-/// 编辑它，落盘时由外壳从现有设置抄回。
-#[derive(Debug)]
-pub struct EditedSettings {
-    pub font_family: String,
-    pub font_size: f32,
-    pub ui_font_family: String,
-    pub ui_font_size: f32,
-    pub scrolling_history: usize,
-    pub local_shell: Option<String>,
-    pub local_workdir: Option<String>,
-    pub option_as_alt: bool,
-    /// 新会话用的终端核心后端（ADR-050）。
-    pub terminal_backend: BackendKind,
-}
-
 /// 自定义 Shell 输入的占位路径：只作格式提示，不代表任何平台的默认。
 const CUSTOM_SHELL_PLACEHOLDER: &str = "/usr/local/bin/fish";
 
 pub struct SettingsForm {
-    /// 选中的终端字体在 `candidates` 里的下标
-    font_index: usize,
-    /// 选中的界面字体在 `ui_candidates` 里的下标
-    ui_font_index: usize,
     /// 终端字号
     size: Entity<TextInput>,
     /// 界面字号（rem 根）
@@ -113,43 +135,33 @@ pub struct SettingsForm {
     history: Entity<TextInput>,
     /// 本地 Shell 候选（系统注册表，打开表单时取一次）
     shells: Vec<String>,
-    /// 选中的 Shell：0 = 系统默认；1..=shells.len() = 候选；末位 = 自定义
-    shell_index: usize,
+    /// 选中的 Shell：系统默认 / 候选 / 自定义
+    shell_choice: ShellChoice,
     /// 自定义 Shell 路径输入（仅「自定义」项选中时显示）
     custom_shell: Entity<TextInput>,
     /// 默认工作目录（空 = home）
     workdir: Entity<TextInput>,
     /// macOS 上 ⌥ 键当 Alt（ADR-033）。默认关：保持系统原生特殊字符输入。
     option_as_alt: bool,
-    /// 选中的终端核心后端（ADR-050）在候选表里的下标；候选 = 当前构建可用
-    /// 的全部后端。
-    backend_index: usize,
-    /// 终端核心下拉是否展开
-    backend_open: bool,
-    /// 终端核心选择框 bounds（渲染帧写入）
-    backend_bounds: BoundsSlot,
     /// 可选的等宽字体：打开表单时取一次（系统字体列表不会在运行中变化）
     candidates: Vec<String>,
     /// 可选的界面字体：全部系统字体，第一项是系统默认
     ui_candidates: Vec<String>,
     /// 校验或保存失败的原因：显示在表单底部，不弹窗
     error: Option<String>,
-    /// 终端字体下拉是否展开
-    font_open: bool,
-    /// 界面字体下拉是否展开
-    ui_font_open: bool,
-    /// Shell 下拉是否展开
-    shell_open: bool,
-    /// 三个收起选择框的 bounds，由渲染帧写入
-    select_bounds: BoundsSlot,
-    ui_select_bounds: BoundsSlot,
-    shell_bounds: BoundsSlot,
+    /// 四个下拉的选中项与锚点
+    terminal: DropdownState,
+    interface: DropdownState,
+    shell: DropdownState,
+    backend: DropdownState,
+    /// 展开着的下拉：单值即互斥（同一时间最多一个）
+    open: Option<DropdownField>,
 }
 
 impl SettingsForm {
     /// 组装一张预填好的设置表单（ADR-026 同款：输入实体、占位文案与预填
     /// 全部自持），候选按 [`CandidateLists`] 传入、下标解析在这里完成。
-    pub fn new(lists: CandidateLists, current: EffectiveSettings, cx: &mut Context<Self>) -> Self {
+    pub fn new(lists: CandidateLists, current: SettingsValues, cx: &mut Context<Self>) -> Self {
         let candidates = lists.terminal_fonts;
         let ui_candidates = lists.ui_fonts;
         // 当前字体没出现在候选里（被卸载）时选第一项：应用与否都由用户决定
@@ -157,13 +169,16 @@ impl SettingsForm {
             .iter()
             .position(|name| *name == current.font_family)
             .unwrap_or(0);
-        let ui_font_index = ui_candidates
-            .iter()
-            .position(|name| *name == current.ui_font_family)
+        // 界面字体：None = 系统默认，正好是候选表第一项
+        let ui_font_index = current
+            .ui_font_family
+            .as_ref()
+            .and_then(|family| ui_candidates.iter().position(|name| name == family))
             .unwrap_or(0);
         let shells = lists.shells;
-        let (shell_index, custom_shell_text) =
-            resolve_shell_index(&shells, current.local_shell.as_deref());
+        let (shell_choice, custom_shell_text) =
+            resolve_shell_choice(&shells, current.local_shell.as_deref());
+        let shell_index = shell_choice.index(shells.len());
         let input_font = font::terminal_font(&current.font_family);
         let make = |placeholder: &str, cx: &mut Context<Self>| {
             cx.new(|cx| TextInput::new(cx, placeholder, false, input_font.clone()))
@@ -187,12 +202,6 @@ impl SettingsForm {
         workdir.update(cx, |input, cx| {
             input.set_text(current.local_workdir.as_deref().unwrap_or(""), cx)
         });
-        let empty_bounds = || {
-            Rc::new(Cell::new(Bounds::new(
-                gpui::point(px(0.), px(0.)),
-                gpui::size(px(0.), px(0.)),
-            )))
-        };
         // 后端候选 = 全部后端；当前值不在候选里（手改了设置文件）时选默认
         let backends = BackendKind::available();
         let backend_index = backends
@@ -200,41 +209,37 @@ impl SettingsForm {
             .position(|backend| *backend == current.terminal_backend)
             .unwrap_or(0);
         Self {
-            font_index,
-            font_open: false,
-            ui_font_index,
-            ui_font_open: false,
             size,
             ui_size,
             history,
             shells,
-            shell_index,
+            shell_choice,
             custom_shell,
             workdir,
             option_as_alt: current.option_as_alt,
-            backend_index,
-            backend_open: false,
-            backend_bounds: empty_bounds(),
             candidates,
             ui_candidates,
-            shell_open: false,
-            select_bounds: empty_bounds(),
-            ui_select_bounds: empty_bounds(),
-            shell_bounds: empty_bounds(),
             error: None,
+            terminal: DropdownState::new(font_index),
+            interface: DropdownState::new(ui_font_index),
+            shell: DropdownState::new(shell_index),
+            backend: DropdownState::new(backend_index),
+            open: None,
         }
     }
 
     /// 校验并取走表单的全部编辑值；失败返回可直接展示的错误文案
     /// （展示由 [`SettingsForm::fail`] 写到表单底部，不弹窗）。
-    pub fn edited_settings(&self, cx: &App) -> Result<EditedSettings, String> {
+    pub fn edited_settings(&self, cx: &App) -> Result<SettingsValues, String> {
         // 家族只能从候选列表里选，列表取自已安装字体，无需再校验
-        let Some(font_family) = self.candidates.get(self.font_index).cloned() else {
+        let Some(font_family) = self.candidates.get(self.terminal.selected).cloned() else {
             return Err("没有可选的等宽字体".into());
         };
-        let Some(ui_font_family) = self.ui_candidates.get(self.ui_font_index).cloned() else {
+        let Some(ui_font_family) = self.ui_candidates.get(self.interface.selected).cloned() else {
             return Err("没有可选的系统字体".into());
         };
+        // 候选表第一项是系统默认哨兵：值里落成 None，哨兵不参与值传递
+        let ui_font_family = (self.interface.selected != 0).then_some(ui_font_family);
         let font_size = validate_font_size(self.size.read(cx).text())?;
         let ui_font_size = validate_ui_font_size(self.ui_size.read(cx).text())?;
         let scrolling_history = validate_scrolling_history(self.history.read(cx).text())?;
@@ -248,10 +253,10 @@ impl SettingsForm {
         let local_shell = validate_local_shell(&shell_text)?;
         let local_workdir = validate_local_workdir(self.workdir.read(cx).text())?;
         let terminal_backend = BackendKind::available()
-            .get(self.backend_index)
+            .get(self.backend.selected)
             .copied()
             .unwrap_or_default();
-        Ok(EditedSettings {
+        Ok(SettingsValues {
             font_family,
             font_size,
             ui_font_family,
@@ -293,52 +298,44 @@ impl SettingsForm {
         ring
     }
 
-    /// 展开一个下拉：同一时间最多展开一个，展开谁就收起其他。
+    /// 展开一个下拉：同一时间最多展开一个，展开了就收起其他；再点自己收起。
     pub fn toggle_dropdown(&mut self, field: DropdownField, cx: &mut Context<Self>) {
-        match field {
-            DropdownField::Terminal => self.font_open = !self.font_open,
-            DropdownField::Interface => self.ui_font_open = !self.ui_font_open,
-            DropdownField::Shell => self.shell_open = !self.shell_open,
-            DropdownField::Backend => self.backend_open = !self.backend_open,
-        }
-        if field != DropdownField::Terminal {
-            self.font_open = false;
-        }
-        if field != DropdownField::Interface {
-            self.ui_font_open = false;
-        }
-        if field != DropdownField::Shell {
-            self.shell_open = false;
-        }
-        if field != DropdownField::Backend {
-            self.backend_open = false;
-        }
+        self.open = if self.open == Some(field) {
+            None
+        } else {
+            Some(field)
+        };
         cx.notify();
     }
 
     /// 在展开的下拉里选中一项：记录选择并收起；生效仍由「应用」触发。
     pub fn pick(&mut self, field: DropdownField, index: usize, cx: &mut Context<Self>) {
         match field {
-            DropdownField::Terminal => self.font_index = index,
-            DropdownField::Interface => self.ui_font_index = index,
-            DropdownField::Shell => self.shell_index = index,
-            DropdownField::Backend => self.backend_index = index,
+            DropdownField::Terminal => self.terminal.selected = index,
+            DropdownField::Interface => self.interface.selected = index,
+            DropdownField::Shell => {
+                self.shell.selected = index;
+                self.shell_choice = ShellChoice::from_index(index, self.shells.len());
+            }
+            DropdownField::Backend => self.backend.selected = index,
         }
         self.close_dropdowns(cx);
     }
 
     /// 收起所有下拉。
     pub fn close_dropdowns(&mut self, cx: &mut Context<Self>) {
-        self.font_open = false;
-        self.ui_font_open = false;
-        self.shell_open = false;
-        self.backend_open = false;
+        self.open = None;
         cx.notify();
     }
 
     /// 是否有下拉展开着：Esc 要先收下拉再关表单。
     pub fn dropdown_open(&self) -> bool {
-        self.font_open || self.ui_font_open || self.shell_open || self.backend_open
+        self.open.is_some()
+    }
+
+    /// 某个下拉是否展开（渲染收起态样式用）。
+    pub fn is_open(&self, field: DropdownField) -> bool {
+        self.open == Some(field)
     }
 
     /// 终端核心下拉的候选显示名。
@@ -351,7 +348,7 @@ impl SettingsForm {
 
     /// 当前选中的是「自定义…」项（候选表之后的末位）。
     pub fn shell_custom(&self) -> bool {
-        self.shell_index == self.shells.len() + 1
+        self.shell_choice == ShellChoice::Custom
     }
 
     /// Shell 下拉的显示项：「系统默认」+ 注册表候选 + 「自定义…」。
@@ -366,17 +363,16 @@ impl SettingsForm {
     /// 选中项在 `shell_labels` 里的文字。
     pub fn shell_label(&self) -> String {
         self.shell_labels()
-            .get(self.shell_index)
+            .get(self.shell.selected)
             .cloned()
             .unwrap_or_else(|| "系统默认（$SHELL）".to_owned())
     }
 
-    /// 选中项对应的 Shell 路径：系统默认 = None；候选 = 路径；自定义走输入框。
+    /// 选中项对应的 Shell 路径：系统默认与自定义 = None（自定义走输入框）。
     pub fn shell_value(&self) -> Option<String> {
-        if self.shell_index == 0 || self.shell_custom() {
-            None
-        } else {
-            self.shells.get(self.shell_index - 1).cloned()
+        match self.shell_choice {
+            ShellChoice::Candidate(index) => self.shells.get(index).cloned(),
+            ShellChoice::Default | ShellChoice::Custom => None,
         }
     }
 
@@ -385,14 +381,12 @@ impl SettingsForm {
     pub fn reset_to_defaults(&mut self, cx: &mut Context<Self>) {
         // 自动挑选就是候选列表的第一项（见 font::resolve_font_family）；
         // 界面字体列表第一项固定是系统默认
-        self.font_index = 0;
-        self.font_open = false;
-        self.ui_font_index = 0;
-        self.ui_font_open = false;
-        self.shell_index = 0;
-        self.shell_open = false;
-        self.backend_index = 0;
-        self.backend_open = false;
+        self.terminal.selected = 0;
+        self.interface.selected = 0;
+        self.shell.selected = 0;
+        self.shell_choice = ShellChoice::Default;
+        self.backend.selected = 0;
+        self.open = None;
         self.custom_shell
             .update(cx, |input, cx| input.set_text("", cx));
         self.workdir.update(cx, |input, cx| input.set_text("", cx));
@@ -410,14 +404,14 @@ impl SettingsForm {
     }
 }
 
-/// 配置的 Shell 落到下拉的哪一项：0 = 系统默认；命中候选 = 下标 + 1；
+/// 配置的 Shell 落到哪一项：未配置 = 系统默认；命中候选 = 候选下标；
 /// 保存的路径不在系统候选里（手改或跨机器搬运）落到「自定义…」并回填路径。
-fn resolve_shell_index(shells: &[String], configured: Option<&str>) -> (usize, String) {
+fn resolve_shell_choice(shells: &[String], configured: Option<&str>) -> (ShellChoice, String) {
     match configured {
-        None => (0, String::new()),
+        None => (ShellChoice::Default, String::new()),
         Some(path) => match shells.iter().position(|candidate| candidate == path) {
-            Some(index) => (index + 1, String::new()),
-            None => (shells.len() + 1, path.to_owned()),
+            Some(index) => (ShellChoice::Candidate(index), String::new()),
+            None => (ShellChoice::Custom, path.to_owned()),
         },
     }
 }
@@ -575,7 +569,7 @@ impl ModalView for SettingsModal {
         } else {
             let current = form
                 .candidates
-                .get(form.font_index)
+                .get(form.terminal.selected)
                 .map(String::as_str)
                 .unwrap_or("");
             div()
@@ -587,8 +581,8 @@ impl ModalView for SettingsModal {
                     tokens,
                     "select-terminal-font",
                     current,
-                    form.font_open,
-                    &form.select_bounds,
+                    form.is_open(DropdownField::Terminal),
+                    &form.terminal.bounds,
                     font::terminal_font,
                     font_display_name,
                     {
@@ -606,7 +600,7 @@ impl ModalView for SettingsModal {
         } else {
             let current = form
                 .ui_candidates
-                .get(form.ui_font_index)
+                .get(form.interface.selected)
                 .map(String::as_str)
                 .unwrap_or("");
             div()
@@ -618,8 +612,8 @@ impl ModalView for SettingsModal {
                     tokens,
                     "select-ui-font",
                     current,
-                    form.ui_font_open,
-                    &form.ui_select_bounds,
+                    form.is_open(DropdownField::Interface),
+                    &form.interface.bounds,
                     font::ui_font,
                     font_display_name,
                     {
@@ -695,9 +689,9 @@ impl ModalView for SettingsModal {
                 plain_select_row(
                     tokens,
                     "select-terminal-backend",
-                    &form.backend_labels()[form.backend_index],
-                    form.backend_open,
-                    &form.backend_bounds,
+                    &form.backend_labels()[form.backend.selected],
+                    form.is_open(DropdownField::Backend),
+                    &form.backend.bounds,
                     {
                         let form = self.form.clone();
                         move |_, _, cx| {
@@ -715,8 +709,8 @@ impl ModalView for SettingsModal {
                     tokens,
                     "select-local-shell",
                     &form.shell_label(),
-                    form.shell_open,
-                    &form.shell_bounds,
+                    form.is_open(DropdownField::Shell),
+                    &form.shell.bounds,
                     {
                         let form = self.form.clone();
                         move |_, _, cx| {
@@ -821,95 +815,72 @@ impl ModalView for SettingsModal {
         let form = self.form.read(cx);
         let viewport_height = _window.viewport_size().height;
 
-        let font_popover = match (form.font_open, form.ui_font_open) {
-            (true, _) if !form.candidates.is_empty() => Some((
-                DropdownField::Terminal,
-                font::terminal_font as fn(&str) -> gpui::Font,
-                form.candidates.clone(),
-                form.font_index,
-                form.select_bounds.clone(),
-            )),
-            (_, true) if form.ui_candidates.len() > 1 => Some((
-                DropdownField::Interface,
-                font::ui_font as fn(&str) -> gpui::Font,
-                form.ui_candidates.clone(),
-                form.ui_font_index,
-                form.ui_select_bounds.clone(),
-            )),
-            _ => None,
+        // 展开着的下拉只有一个（单值 `open`）：候选、选中项、锚点与是否
+        // 按候选字体预览都在这里取一次，浮层装配只有一份
+        let Some(field) = form.open else {
+            return Vec::new();
         };
-        if let Some((field, preview_font, candidates, selected, bounds)) = font_popover {
-            let form = self.form.clone();
-            let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
-                form.update(cx, |form, cx| form.pick(field, index, cx));
-            });
-            let form_close = self.form.clone();
-            return vec![
-                select_backdrop(move |_, cx| {
-                    form_close.update(cx, |form, cx| form.close_dropdowns(cx));
-                })
-                .into_any_element(),
-                select_popover(
-                    tokens,
-                    "font-select-popover",
-                    &candidates,
-                    selected,
-                    &bounds,
-                    viewport_height,
-                    preview_font,
-                    font_display_name,
-                    pick,
-                )
-                .into_any_element(),
-            ];
-        }
-        if form.shell_open {
-            let pick_form = self.form.clone();
-            let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
-                pick_form.update(cx, |form, cx| form.pick(DropdownField::Shell, index, cx));
-            });
-            let close_form = self.form.clone();
-            return vec![
-                select_backdrop(move |_, cx| {
-                    close_form.update(cx, |form, cx| form.close_dropdowns(cx));
-                })
-                .into_any_element(),
-                plain_select_popover(
-                    tokens,
-                    "shell-select-popover",
-                    &form.shell_labels(),
-                    form.shell_index,
-                    &form.shell_bounds,
-                    viewport_height,
-                    pick,
-                )
-                .into_any_element(),
-            ];
-        }
-        if form.backend_open {
-            let pick_form = self.form.clone();
-            let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
-                pick_form.update(cx, |form, cx| form.pick(DropdownField::Backend, index, cx));
-            });
-            let close_form = self.form.clone();
-            return vec![
-                select_backdrop(move |_, cx| {
-                    close_form.update(cx, |form, cx| form.close_dropdowns(cx));
-                })
-                .into_any_element(),
-                plain_select_popover(
-                    tokens,
-                    "backend-select-popover",
-                    &form.backend_labels(),
-                    form.backend_index,
-                    &form.backend_bounds,
-                    viewport_height,
-                    pick,
-                )
-                .into_any_element(),
-            ];
-        }
-        Vec::new()
+        let (candidates, selected, bounds, preview_font) = match field {
+            DropdownField::Terminal if !form.candidates.is_empty() => (
+                form.candidates.clone(),
+                form.terminal.selected,
+                form.terminal.bounds.clone(),
+                Some(font::terminal_font as fn(&str) -> gpui::Font),
+            ),
+            DropdownField::Interface if form.ui_candidates.len() > 1 => (
+                form.ui_candidates.clone(),
+                form.interface.selected,
+                form.interface.bounds.clone(),
+                Some(font::ui_font as fn(&str) -> gpui::Font),
+            ),
+            DropdownField::Shell => (
+                form.shell_labels(),
+                form.shell.selected,
+                form.shell.bounds.clone(),
+                None,
+            ),
+            DropdownField::Backend => (
+                form.backend_labels(),
+                form.backend.selected,
+                form.backend.bounds.clone(),
+                None,
+            ),
+            // 空候选（没有等宽字体/系统字体）时没有浮层可展
+            _ => return Vec::new(),
+        };
+
+        let pick_form = self.form.clone();
+        let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
+            pick_form.update(cx, |form, cx| form.pick(field, index, cx));
+        });
+        let close_form = self.form.clone();
+        let backdrop = select_backdrop(move |_, cx| {
+            close_form.update(cx, |form, cx| form.close_dropdowns(cx));
+        })
+        .into_any_element();
+        let popover = match preview_font {
+            Some(preview_font) => select_popover(
+                tokens,
+                field.popover_id(),
+                &candidates,
+                selected,
+                &bounds,
+                viewport_height,
+                preview_font,
+                font_display_name,
+                pick,
+            ),
+            None => plain_select_popover(
+                tokens,
+                field.popover_id(),
+                &candidates,
+                selected,
+                &bounds,
+                viewport_height,
+                pick,
+            ),
+        };
+        vec![backdrop, popover.into_any_element()]
     }
 
     /// 下拉展开时 Esc 先收下拉，再按一次才关表单；Enter 应用。
@@ -969,11 +940,11 @@ mod tests {
 
     /// 家族名不匹配候选：落第 0 项，正好覆盖回退分支；其余值取与默认不同的
     /// 具体值，断言往返才有区分度。
-    fn effective() -> EffectiveSettings {
-        EffectiveSettings {
+    fn effective() -> SettingsValues {
+        SettingsValues {
             font_family: "Mono B".to_owned(),
             font_size: 13.5,
-            ui_font_family: "Sans B".to_owned(),
+            ui_font_family: Some("Sans B".to_owned()),
             ui_font_size: 13.0,
             scrolling_history: 5_000,
             local_shell: Some(test_paths::alt_shell()),
@@ -1001,9 +972,9 @@ mod tests {
             assert!(edited.option_as_alt);
             let form = form.read(cx);
             assert_eq!(edited.font_family, "Mono B");
-            assert_eq!(edited.ui_font_family, "Sans B");
-            assert_eq!(form.font_index, 1);
-            assert_eq!(form.shell_index, 2);
+            assert_eq!(edited.ui_font_family.as_deref(), Some("Sans B"));
+            assert_eq!(form.terminal.selected, 1);
+            assert_eq!(form.shell.selected, 2);
         });
     }
 
@@ -1011,18 +982,18 @@ mod tests {
     #[gpui::test]
     fn an_uninstalled_font_falls_back_to_the_first_candidate(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let current = EffectiveSettings {
+            let current = SettingsValues {
                 font_family: "Gone Font".to_owned(),
-                ui_font_family: "Gone UI".to_owned(),
+                ui_font_family: Some("Gone UI".to_owned()),
                 ..effective()
             };
             let form = cx.new(|cx| SettingsForm::new(lists(), current, cx));
             let form = form.read(cx);
-            assert_eq!(form.font_index, 0);
-            assert_eq!(form.ui_font_index, 0);
+            assert_eq!(form.terminal.selected, 0);
+            assert_eq!(form.interface.selected, 0);
             let edited = form.edited_settings(cx).expect("回落值应通过校验");
             assert_eq!(edited.font_family, "Mono A");
-            assert_eq!(edited.ui_font_family, font::SYSTEM_UI_FONT);
+            assert_eq!(edited.ui_font_family, None);
         });
     }
 
@@ -1076,7 +1047,7 @@ mod tests {
         });
     }
 
-    /// 下拉互斥：展开一个收起其他；选中即收起全部。
+    /// 下拉互斥：展开一个收起其他；再点自己收起；选中即收起全部。
     #[gpui::test]
     fn dropdowns_are_exclusive_and_picking_closes_them(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1085,75 +1056,41 @@ mod tests {
                 form.toggle_dropdown(DropdownField::Terminal, cx);
                 assert!(form.dropdown_open());
                 form.toggle_dropdown(DropdownField::Interface, cx);
-                assert!(!form.font_open && form.ui_font_open);
-                form.pick(DropdownField::Interface, 0, cx);
+                assert!(
+                    !form.is_open(DropdownField::Terminal)
+                        && form.is_open(DropdownField::Interface)
+                );
+                form.toggle_dropdown(DropdownField::Interface, cx);
+                assert!(!form.dropdown_open(), "再点自己收起");
+                form.toggle_dropdown(DropdownField::Backend, cx);
+                form.pick(DropdownField::Backend, 0, cx);
                 assert!(!form.dropdown_open());
-                assert_eq!(form.ui_font_index, 0);
+                assert_eq!(form.backend.selected, 0);
             });
         });
     }
 
-    /// Shell 下标解析：默认 = 0；命中候选 = 下标 + 1；不在候选 = 自定义项并
-    /// 回填路径（自定义输入框的预填文本）。
+    /// Shell 选择的三态与下拉下标互相映射：系统默认 0、候选 i+1、自定义末位。
     #[test]
-    fn resolve_shell_index_maps_configured_paths() {
-        let shells = vec!["/bin/zsh".to_owned(), "/bin/bash".to_owned()];
-        assert_eq!(resolve_shell_index(&shells, None), (0, String::new()));
+    fn shell_choice_maps_between_labels_and_paths() {
+        let shells = vec!["/bin/sh".to_owned(), "/bin/zsh".to_owned()];
         assert_eq!(
-            resolve_shell_index(&shells, Some("/bin/zsh")),
-            (1, String::new())
+            resolve_shell_choice(&shells, None),
+            (ShellChoice::Default, String::new())
         );
         assert_eq!(
-            resolve_shell_index(&shells, Some("/usr/local/bin/fish")),
-            (3, "/usr/local/bin/fish".to_owned())
+            resolve_shell_choice(&shells, Some("/bin/zsh")),
+            (ShellChoice::Candidate(1), String::new())
         );
-    }
-
-    /// 设置模态的键裁决（ADR-044）：下拉展开时 Esc 先收下拉（Action），再按一次
-    /// 才关表单（Close）；Enter 应用（Action）。原 overlay_key_route 的这条特例
-    /// 语义随栈化搬进模态自己。
-    #[gpui::test]
-    fn escape_collapses_the_open_dropdown_first(cx: &mut gpui::TestAppContext) {
-        use crate::ui::overlay::KeyHandling;
-        use gpui::{App, Window};
-
-        let actions = ModalActions {
-            apply: Rc::new(|_: &mut Window, _: &mut App| {}),
-            cancel: Rc::new(|_: &mut Window, _: &mut App| {}),
-        };
-        let escape = Keystroke {
-            key: "escape".into(),
-            key_char: Some("escape".into()),
-            modifiers: Default::default(),
-        };
-        let enter = Keystroke {
-            key: "enter".into(),
-            key_char: Some("enter".into()),
-            modifiers: Default::default(),
-        };
-        cx.update(|cx| {
-            let form = cx.new(|cx| SettingsForm::new(lists(), effective(), cx));
-            let modal = SettingsModal {
-                form,
-                actions,
-                error_banner: None,
-            };
-
-            // 下拉收起：Esc 关表单
-            assert!(matches!(modal.key_action(&escape, cx), KeyHandling::Close));
-            // 展开字体下拉：Esc 先收下拉
-            modal.form.update(cx, |form, cx| {
-                form.toggle_dropdown(DropdownField::Terminal, cx)
-            });
-            assert!(matches!(
-                modal.key_action(&escape, cx),
-                KeyHandling::Action(_)
-            ));
-            // 回车应用
-            assert!(matches!(
-                modal.key_action(&enter, cx),
-                KeyHandling::Action(_)
-            ));
-        });
+        assert_eq!(
+            resolve_shell_choice(&shells, Some("/opt/fish")),
+            (ShellChoice::Custom, "/opt/fish".to_owned())
+        );
+        assert_eq!(ShellChoice::Default.index(2), 0);
+        assert_eq!(ShellChoice::Candidate(1).index(2), 2);
+        assert_eq!(ShellChoice::Custom.index(2), 3);
+        assert_eq!(ShellChoice::from_index(0, 2), ShellChoice::Default);
+        assert_eq!(ShellChoice::from_index(2, 2), ShellChoice::Candidate(1));
+        assert_eq!(ShellChoice::from_index(3, 2), ShellChoice::Custom);
     }
 }
