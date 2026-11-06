@@ -1227,12 +1227,14 @@ fn ime_text_is_typed_into_the_pty_verbatim() {
     let (probe, ready) = (pty_probe_command("ime"), "READY-IME");
     #[cfg(not(windows))]
     let (probe, ready) = (
+        // 两端统一成 String：Windows 侧探针命令是 String，调用处才能共用 `&probe`
         concat!(
             "stty raw -echo; ",
             "reply=$(head -c 6); stty sane; ",
             r#"if [ "$reply" = "$(printf '\344\270\255\346\226\207')" ]; then "#,
             r#"printf 'IME-%s\n' TEXT-OK; else printf 'IME-%s\n' TEXT-WRONG; fi"#,
-        ),
+        )
+        .to_owned(),
         // 命令回显里的 "raw"/"IME-" 证明探针行已被执行
         "raw",
     );
@@ -1324,7 +1326,8 @@ fn shell_queries_are_answered_on_the_pty() {
         "stty sane; ",
         r#"if [ "$reply" = "$(printf '\033[0n')" ]; then "#,
         r#"printf 'DSR-%s\n' ANSWER-MATCHED; else printf 'DSR-%s\n' ANSWER-WRONG; fi"#,
-    );
+    )
+    .to_owned();
     type_line(&session, &probe);
 
     let output = wait_for_frame(&events, Duration::from_secs(5), |snapshot| {
