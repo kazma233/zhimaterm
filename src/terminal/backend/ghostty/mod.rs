@@ -363,17 +363,9 @@ impl GhosttyCore {
         for event in self.terminal.events().collect::<Vec<_>>() {
             match event {
                 VtEvent::PtyWrite(bytes) => match color_query_slot(&bytes) {
-                    // 核心自答的颜色查询转成共享层的 ColorRequest：应答由
-                    // 主题色格式化，与另两个后端同一套字节（ADR-051）
-                    Some(slot) => {
-                        let prefix = color_slot_prefix(slot);
-                        self.requests.push(TermRequest::ColorRequest {
-                            slot,
-                            format: Arc::new(move |rgb: super::Rgb| {
-                                super::color_reply(&prefix, rgb)
-                            }),
-                        });
-                    }
+                    // 核心自答的颜色查询转成纯槽位请求：应答字节由共享层
+                    // 单点格式化，与另两个后端同一套（ADR-051 §2.1）
+                    Some(slot) => self.requests.push(TermRequest::ColorRequest { slot }),
                     None => self.requests.push(TermRequest::PtyWrite(
                         String::from_utf8_lossy(&bytes).into_owned(),
                     )),
@@ -634,16 +626,6 @@ fn color_query_slot(bytes: &[u8]) -> Option<super::ColorSlot> {
         .parse::<u8>()
         .ok()?;
     (tail.get(semicolon + 1..)?.first() == Some(&b'r')).then_some(super::ColorSlot::Indexed(index))
-}
-
-/// 颜色槽 → OSC 前缀（应答格式 `ESC ] <prefix> ; rgb:… BEL`）。
-fn color_slot_prefix(slot: super::ColorSlot) -> String {
-    match slot {
-        super::ColorSlot::Indexed(index) => format!("4;{index}"),
-        super::ColorSlot::Foreground => "10".to_owned(),
-        super::ColorSlot::Background => "11".to_owned(),
-        super::ColorSlot::Cursor => "12".to_owned(),
-    }
 }
 
 /// 剪贴板写入里的纯文本（OSC 52 的 text/plain）；没有就不产生请求。

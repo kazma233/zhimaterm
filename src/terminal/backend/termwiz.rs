@@ -32,7 +32,7 @@ use termwiz::escape::{
 use unicode_width::UnicodeWidthChar;
 
 use super::{CellColor, ColorPalette, ColorSlot, CursorState, GridCell, GridView};
-use super::{NamedSlot, RowBuffer, TermModes, TerminalCore, WindowSize};
+use super::{NamedSlot, RowBuffer, TermModes, TerminalCore};
 use crate::terminal::{CursorKind, TermRequest, UnderlineKind};
 
 /// 默认制表位间隔（terminfo `it` 的通行值）。
@@ -1153,19 +1153,11 @@ impl TermwizCore {
 
     // ---------- 查询应答 ----------
 
-    /// 颜色查询：应答字节走共享 [`super::color_reply`]（与 alacritty 逐位
-    /// 一致）。有效颜色由 worker 解析（程序改写优先，否则主题），后端只给格式。
-    fn color_query(&mut self, slot: ColorSlot, prefix: String) {
-        let formatter = move |rgb: super::Rgb| super::color_reply(&prefix, rgb);
-        self.requests.push(TermRequest::ColorRequest {
-            slot,
-            format: Arc::new(formatter),
-        });
-    }
-
-    fn osc_color_query(&mut self, queries: Vec<(ColorSlot, String)>) {
-        for (slot, prefix) in queries {
-            self.color_query(slot, prefix);
+    /// 颜色查询：只报槽位，应答字节由共享层单点格式化；有效颜色由 worker
+    /// 解析（程序改写优先，否则主题）。
+    fn osc_color_query(&mut self, queries: Vec<ColorSlot>) {
+        for slot in queries {
+            self.requests.push(TermRequest::ColorRequest { slot });
         }
     }
 
@@ -1563,16 +1555,7 @@ impl TermwizCore {
                     .push(TermRequest::PtyWrite(format!("\x1b[8;{rows};{columns}t")));
             }
             Window::ReportTextAreaSizePixels => {
-                self.requests
-                    .push(TermRequest::TextAreaSizeRequest(Arc::new(
-                        |size: WindowSize| {
-                            format!(
-                                "\x1b[4;{};{}t",
-                                size.cell_height * u16::try_from(size.lines).unwrap_or(u16::MAX),
-                                size.cell_width * u16::try_from(size.columns).unwrap_or(u16::MAX)
-                            )
-                        },
-                    )));
+                self.requests.push(TermRequest::TextAreaSizeRequest);
             }
             _ => {}
         }
@@ -1601,9 +1584,7 @@ impl TermwizCore {
                             self.palette.indexed[pair.palette_index as usize] =
                                 Some(srgba_u32(srgba));
                         }
-                        ColorOrQuery::Query => {
-                            queries.push((ColorSlot::Indexed(pair.palette_index), "4".to_owned()))
-                        }
+                        ColorOrQuery::Query => queries.push(ColorSlot::Indexed(pair.palette_index)),
                     }
                 }
                 self.osc_color_query(queries);
@@ -1629,9 +1610,7 @@ impl TermwizCore {
                                 ColorSlot::Cursor => self.palette.cursor = Some(srgba_u32(srgba)),
                                 ColorSlot::Indexed(_) => {}
                             },
-                            ColorOrQuery::Query => {
-                                queries.push((slot, dynamic_color_prefix(which).to_owned()));
-                            }
+                            ColorOrQuery::Query => queries.push(slot),
                         }
                     }
                 }
@@ -1911,16 +1890,6 @@ fn dec_mode_number(mode: &DecPrivateMode) -> u16 {
         DecPrivateModeCode::BracketedPaste => 2004,
         DecPrivateModeCode::SynchronizedOutput => 2026,
         _ => 0,
-    }
-}
-
-/// OSC 10/11/12 查询应答的前缀。
-fn dynamic_color_prefix(which: DynamicColorNumber) -> &'static str {
-    match which {
-        DynamicColorNumber::TextForegroundColor => "10",
-        DynamicColorNumber::TextBackgroundColor => "11",
-        DynamicColorNumber::TextCursorColor => "12",
-        _ => "",
     }
 }
 

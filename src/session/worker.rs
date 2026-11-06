@@ -456,13 +456,13 @@ pub(super) fn run(
                 TermRequest::ClipboardStore(text) => {
                     emit_control(&control, ControlEvent::ClipboardStore(text));
                 }
-                TermRequest::ColorRequest { slot, format } => {
-                    let answer = format(terminal.query_color(slot));
+                TermRequest::ColorRequest { slot } => {
+                    let answer = crate::terminal::reply(slot, terminal.query_color(slot));
                     write_bytes(&mut writer, answer.as_bytes())?;
                 }
-                TermRequest::TextAreaSizeRequest(format) => {
+                TermRequest::TextAreaSizeRequest => {
                     let (columns, lines) = terminal.size();
-                    let answer = format(WindowSize {
+                    let answer = text_area_size_reply(WindowSize {
                         lines,
                         columns,
                         cell_width: state.cell_size.0,
@@ -1002,6 +1002,15 @@ fn write_bytes(writer: &mut Option<Box<dyn Write + Send>>, bytes: &[u8]) -> Resu
     Ok(())
 }
 
+/// CSI 14t（文本区像素尺寸）的应答：`\x1b[4;{height};{width}t`，高在前、
+/// 按格×行列（xterm 规格）。格像素由 Resize 命令记账，应答字节在此单点
+/// 拼装（颜色应答同归共享层，见 GLOSSARY「查询应答」）。
+fn text_area_size_reply(size: WindowSize) -> String {
+    let height = u32::from(size.cell_height) * size.lines as u32;
+    let width = u32::from(size.cell_width) * size.columns as u32;
+    format!("\x1b[4;{height};{width}t")
+}
+
 /// 用户产生输入时回到最新输出；回看历史期间输入必须先把视口拉回底部，
 /// 否则新输出会落在看不见的位置。
 fn follow_output(terminal: &mut TerminalModel) -> bool {
@@ -1169,10 +1178,11 @@ pub(super) fn emit_control(control: &Sender<ControlEvent>, event: ControlEvent) 
 #[cfg(test)]
 mod tests {
     use super::join_with_deadline;
+    use super::text_area_size_reply;
     use super::wait_startup_size;
     use super::{RestoreHold, advance_restore_hold, restore_poured};
     use crate::session::{SessionCommand, StartupSize};
-    use crate::terminal::{StoredLine, StoredRun, StoredStyle, TerminalModel};
+    use crate::terminal::{StoredLine, StoredRun, StoredStyle, TerminalModel, WindowSize};
     use smol::channel::bounded;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -1184,6 +1194,20 @@ mod tests {
             cell_width: 8,
             cell_height: 16,
         }
+    }
+
+    #[test]
+    fn text_area_size_reply_is_height_first_in_cells_times_extent() {
+        // 与三个后端替换前的格式逐位一致（xterm 规格：高在前、格×行列）
+        assert_eq!(
+            text_area_size_reply(WindowSize {
+                lines: 24,
+                columns: 80,
+                cell_width: 9,
+                cell_height: 18,
+            }),
+            "\x1b[4;432;720t"
+        );
     }
 
     #[test]

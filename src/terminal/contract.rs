@@ -16,11 +16,6 @@ fn backends() -> Vec<(&'static str, backend::BackendKind)> {
     ]
 }
 
-/// 请求序列的比较键：`TermRequest` 只有 `Debug`，测试断言用它的稳定输出。
-fn requests_key(requests: &[super::TermRequest]) -> String {
-    format!("{requests:?}")
-}
-
 /// 每个后端各跑一遍场景。
 macro_rules! contract {
     ($name:ident, $scenario:expr) => {
@@ -288,20 +283,20 @@ contract!(
 contract!(device_queries_are_answered, |model, label| {
     model.advance(b"\x1b[c");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::PtyWrite("\x1b[?6c".into())]),
+        model.take_requests(),
+        [super::TermRequest::PtyWrite("\x1b[?6c".into())],
         "{label}"
     );
     model.advance(b"\x1b[5n");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::PtyWrite("\x1b[0n".into())]),
+        model.take_requests(),
+        [super::TermRequest::PtyWrite("\x1b[0n".into())],
         "{label}"
     );
     model.advance(b"\x1b[2;3H\x1b[6n");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::PtyWrite("\x1b[2;3R".into())]),
+        model.take_requests(),
+        [super::TermRequest::PtyWrite("\x1b[2;3R".into())],
         "{label}"
     );
 });
@@ -309,8 +304,8 @@ contract!(device_queries_are_answered, |model, label| {
 contract!(kitty_keyboard_query_is_answered, |model, label| {
     model.advance(b"\x1b[>7u\x1b[?u");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::PtyWrite("\x1b[?7u".into())]),
+        model.take_requests(),
+        [super::TermRequest::PtyWrite("\x1b[?7u".into())],
         "{label}"
     );
     // disambiguate 打开后 Esc 报 CSI u
@@ -359,8 +354,8 @@ contract!(focus_is_reported_only_when_asked, |model, label| {
 contract!(osc52_allows_copy_and_denies_paste, |model, label| {
     model.advance(b"\x1b]52;c;aGVsbG8=\x07");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::ClipboardStore("hello".into())]),
+        model.take_requests(),
+        [super::TermRequest::ClipboardStore("hello".into())],
         "{label}"
     );
     model.advance(b"\x1b]52;c;?\x07");
@@ -370,16 +365,12 @@ contract!(osc52_allows_copy_and_denies_paste, |model, label| {
 contract!(title_and_bell_are_surfaced, |model, label| {
     model.advance(b"\x1b]0;my-title\x07");
     assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::Title("my-title".into())]),
+        model.take_requests(),
+        [super::TermRequest::Title("my-title".into())],
         "{label}"
     );
     model.advance(b"\x07");
-    assert_eq!(
-        requests_key(&model.take_requests()),
-        requests_key(&[super::TermRequest::Bell]),
-        "{label}"
-    );
+    assert_eq!(model.take_requests(), [super::TermRequest::Bell], "{label}");
 });
 
 contract!(hyperlinks_reach_the_snapshot, |model, label| {
@@ -418,7 +409,7 @@ contract!(color_queries_report_the_active_slot, |model, label| {
     model.advance(b"\x1b]10;rgb:11/22/33\x07");
     model.advance(b"\x1b]11;?\x07");
     let requests = model.take_requests();
-    let [super::TermRequest::ColorRequest { slot, .. }] = requests.as_slice() else {
+    let [super::TermRequest::ColorRequest { slot }] = requests.as_slice() else {
         panic!("{label}: OSC 11 查询应产生一个颜色请求，得到 {requests:?}");
     };
     assert_eq!(

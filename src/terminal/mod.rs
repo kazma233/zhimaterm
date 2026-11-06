@@ -36,17 +36,18 @@ use selection::{Selection, SelectionType};
 /// 窗口尺寸：查询应答（CSI 14t）要用的字符与像素尺寸。
 pub use self::backend::WindowSize;
 
+/// 颜色查询应答的单点格式化（GLOSSARY「查询应答」）：worker 拿 `query_color`
+/// 的有效色来这里拼 OSC 4/10/11/12 应答字节。
+pub(crate) use colors::reply;
+
 /// 回滚转录的持久化格式：编解码与逻辑行装配住 `terminal::transcript`
 /// （文件格式与 VT 模型是两条变更轴，ADR-039/040）。
 pub use transcript::{StoredLine, StoredRun, StoredStyle};
 
-/// 颜色应答的格式化闭包：核心提供，负责拼出符合查询语法的转义序列。
-pub type ColorFormatter = std::sync::Arc<dyn Fn(Rgb) -> String + Send + Sync + 'static>;
-
-/// 尺寸应答的格式化闭包：输入是当前窗口的字符与像素尺寸。
-pub type SizeFormatter = std::sync::Arc<dyn Fn(WindowSize) -> String + Send + Sync + 'static>;
-
 /// 终端核心提出的请求：核心只管语义，跨到 PTY 或 UI 的动作必须由外面执行。
+/// 请求只携带语义载荷（槽位、意图），不携带格式——应答字节归共享层单点
+/// 格式化（见 GLOSSARY「查询应答」）。
+#[derive(Clone, Debug, PartialEq)]
 pub enum TermRequest {
     /// 终端查询的应答（设备属性、状态、模式、尺寸）。必须写回 PTY，
     /// 否则前台程序收不到应答，会降级功能或等在超时上。
@@ -56,32 +57,16 @@ pub enum TermRequest {
     Bell,
     /// 前台程序请求把文本写入系统剪贴板（OSC 52）。读取请求由配置直接拒绝。
     ClipboardStore(String),
-    /// 颜色查询（OSC 4/10/11/12）：按槽位回有效颜色，再用后端给的方式拼应答。
+    /// 颜色查询（OSC 4/10/11/12）：只报槽位，worker 用 `query_color` 取
+    /// 有效色后经共享格式器拼应答。
     ColorRequest {
         slot: ColorSlot,
-        format: ColorFormatter,
     },
-    /// 文本区像素尺寸查询（CSI 14t）：需要 UI 提供的格子像素尺寸。
-    TextAreaSizeRequest(SizeFormatter),
+    /// 文本区像素尺寸查询（CSI 14t）：格像素尺寸由 worker 随 Resize 记账，
+    /// 应答同样由 worker 侧拼。
+    TextAreaSizeRequest,
     /// 鼠标指针形状可能变化（程序开关鼠标上报时会触发）。
     MouseCursorDirty,
-}
-
-impl std::fmt::Debug for TermRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PtyWrite(text) => f.debug_tuple("PtyWrite").field(text).finish(),
-            Self::Title(title) => f.debug_tuple("Title").field(title).finish(),
-            Self::ResetTitle => f.write_str("ResetTitle"),
-            Self::Bell => f.write_str("Bell"),
-            Self::ClipboardStore(text) => f.debug_tuple("ClipboardStore").field(text).finish(),
-            Self::ColorRequest { slot, .. } => {
-                f.debug_struct("ColorRequest").field("slot", slot).finish()
-            }
-            Self::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
-            Self::MouseCursorDirty => f.write_str("MouseCursorDirty"),
-        }
-    }
 }
 
 /// 核心在解析同一线程内同步回调，请求每轮都会被 worker 排空，

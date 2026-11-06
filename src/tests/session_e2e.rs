@@ -1117,11 +1117,12 @@ fn mouse_reporting_reaches_the_program_instead_of_selecting() {
 )]
 fn color_queries_are_answered_with_the_effective_palette() {
     let (session, events) = spawn(80, 24);
-    // 期望值：DEFAULT_FOREGROUND = 0xd9e2ea，核心按 xterm 规则把每个分量写两遍
+    // 期望值：DEFAULT_FOREGROUND = 0xd9e2ea，每个分量写两遍；结尾固定 ST
+    // （kitty/ghostty 口径，ADR-051 §2.1），整条应答 25 字节
     let probe = concat!(
         "stty raw -echo; ",
-        r#"printf '\033]10;?\007'; reply=$(head -c 24); stty sane; "#,
-        r#"if [ "$reply" = "$(printf '\033]10;rgb:d9d9/e2e2/eaea\007')" ]; then "#,
+        r#"printf '\033]10;?\007'; reply=$(head -c 25); stty sane; "#,
+        r#"if [ "$reply" = "$(printf '\033]10;rgb:d9d9/e2e2/eaea\033\\')" ]; then "#,
         r#"printf 'COLOR-%s\n' FG-OK; else printf 'COLOR-%s\n' FG-WRONG; fi"#,
     );
     type_line(&session, probe);

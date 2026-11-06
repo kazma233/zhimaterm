@@ -62,6 +62,27 @@ XTGETTCAP 等查询应答全部由核心内部生成。ADR-050 的后端契约
 - 契约另两个小扩展：`set_cell_pixels`（核心自答 CSI 14/16/18t 需要格像素，
   worker 随 Resize 命令传入）。
 
+### 2.1 修订（2026-11）：应答格式归共享层单点
+
+> 本节修订上文「颜色查询应答转共享层」的实现机制，口径不变（三后端应答
+> 字节同一套），机制从「适配层闭包携带格式器」收敛为「应答字节只从共享层
+> 一份格式器吐出」；术语见 GLOSSARY「查询应答」。
+
+- `TermRequest` 收敛为纯数据：`ColorRequest { slot }`、`TextAreaSizeRequest`
+  不再携带 `ColorFormatter`/`SizeFormatter` 闭包（原设计让每个后端自带一份
+  格式器，ghostty 还要先解析核心应答字节再让共享层重拼一遍）。应答字节由
+  共享层 `colors::reply` 单点格式化（slot→前缀推导内置），worker 拿
+  `query_color` 的语义应答装配后直写 PTY。
+- **结尾符统一为固定 ST**（`\x1b\\`，双写十六进制）——kitty/ghostty 口径。
+  原共享格式固定 BEL，alacritty 上游则按查询结尾镜像（BEL 查询回 BEL）；
+  主流本就分裂（xterm/alacritty 镜像 vs kitty/ghostty 固定 ST），本仓选
+  kitty/ghostty 阵营并放弃无条件 BEL（无主流背书）。alacritty 后端的
+  BEL 结尾查询应答随统一变为 ST，计入 ADR-050 §4 分歧表。
+- `set_theme_defaults` / `set_cell_pixels` 留任（修订时复核过）：
+  前者除触发核心自答外，还是 ghostty 调色板 effective/default 差分的
+  基线（不推默认色则程序对 fg/bg/cursor 的 OSC 改写全部被判未改写）；
+  后者是核心自答 CSI 14/16/18t 的几何输入。二者 doc 改写为机制表述。
+
 ### 3. 已知有意分歧（不照抄上游/alacritty 口径）
 
 | 项 | alacritty/termwiz | ghostty 后端 |

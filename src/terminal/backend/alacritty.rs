@@ -20,7 +20,7 @@ use alacritty_terminal::{
 use super::{
     CellColor, ColorPalette, ColorSlot, CursorState, GridCell, GridView, NamedSlot, RowBuffer,
 };
-use super::{Rgb, TermModes, TerminalCore, WindowSize};
+use super::{TermModes, TerminalCore};
 use crate::terminal::{CursorKind, TermRequest, UnderlineKind};
 
 /// 上游 `Term` 的尺寸适配：`Dimensions` 是上游网格的尺寸契约。
@@ -58,28 +58,12 @@ impl EventListener for RequestProxy {
             Event::ResetTitle => TermRequest::ResetTitle,
             Event::Bell => TermRequest::Bell,
             Event::ClipboardStore(_, text) => TermRequest::ClipboardStore(text),
-            // 上游给出的应答格式器按上游的颜色类型收参，这里包一层换算：
-            // 应答字节的格式由上游决定，不自己重写，免得与实机对不上。
-            Event::ColorRequest(index, format) => TermRequest::ColorRequest {
+            // 应答字节归共享层单点格式化（GLOSSARY「查询应答」），这里只报
+            // 槽位/意图，不再包装上游格式器。
+            Event::ColorRequest(index, _) => TermRequest::ColorRequest {
                 slot: color_slot(index),
-                format: Arc::new(move |rgb: Rgb| {
-                    format(AlacrittyRgb {
-                        r: rgb.r,
-                        g: rgb.g,
-                        b: rgb.b,
-                    })
-                }),
             },
-            Event::TextAreaSizeRequest(format) => {
-                TermRequest::TextAreaSizeRequest(Arc::new(move |size: WindowSize| {
-                    format(alacritty_terminal::event::WindowSize {
-                        num_lines: size.lines.min(u16::MAX as usize) as u16,
-                        num_cols: size.columns.min(u16::MAX as usize) as u16,
-                        cell_width: size.cell_width,
-                        cell_height: size.cell_height,
-                    })
-                }))
-            }
+            Event::TextAreaSizeRequest(_) => TermRequest::TextAreaSizeRequest,
             Event::MouseCursorDirty => TermRequest::MouseCursorDirty,
             // 剪贴板读取按 ADR-002 的策略在配置层就被拒绝，因此不会到达这里
             Event::ClipboardLoad(..) => return,

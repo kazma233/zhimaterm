@@ -106,8 +106,8 @@ pub(super) enum CellColor {
 
 /// 命名色槽。
 ///
-/// 只有真实存在 VT 语义的槽位才在这里：默认前景/背景/光标三槽可被
-/// OSC 10/11/12 改写，暗色系列是「对应颜色压暗」的推导值，不占独立槽。
+/// 只有真实存在 VT 语义的槽位才在这里：默认前景/背景/光标三槽可被 OSC 10/11/12 改写，
+/// 暗色系列是「对应颜色压暗」的推导值，不占独立槽。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NamedSlot {
     /// 默认前景色（OSC 10 改写优先）。
@@ -135,18 +135,6 @@ pub enum ColorSlot {
     Background,
     /// 光标色（OSC 12）。
     Cursor,
-}
-
-/// OSC 4/10/11/12 颜色查询的应答字节：`ESC ] <prefix> ; rgb:… BEL`，每通道
-/// 双写两位十六进制（rgb:rrrr/gggg/bbbb）。termwiz 与 ghostty 共用这一份
-/// 实现保证应答字节逐位一致（ADR-051）；alacritty 沿用上游格式器，口径相同。
-pub(super) fn color_reply(prefix: &str, rgb: Rgb) -> String {
-    format!(
-        "\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07",
-        r = rgb.r,
-        g = rgb.g,
-        b = rgb.b
-    )
 }
 
 /// 程序经 OSC 4/10/11/12 改写过的颜色槽。
@@ -460,14 +448,15 @@ pub(super) trait TerminalCore: GridView {
     /// 强制结束同步输出，把缓冲的输出回放进网格。超时兜底专用。
     fn stop_sync(&mut self);
 
-    /// 同步单元格像素尺寸。查询应答由核心自答的后端（ghostty，CSI 14/16/18t）
-    /// 需要它回答像素级尺寸；应答走共享层格式器的后端（alacritty/termwiz）
-    /// 用不到，默认无操作。
+    /// 同步单元格像素尺寸：核心自答几何查询（CSI 14/16/18t）的后端需要它
+    /// 作为应答输入，由 worker 随 Resize 命令传入；应答经共享层格式化的
+    /// 后端用不到，默认无操作。
     fn set_cell_pixels(&mut self, _width: u16, _height: u16) {}
 
-    /// 推送主题默认色。颜色查询由核心自答的后端（ghostty）必须知道默认
-    /// 色，否则 OSC 10/11/12 查询在核心里被跳过、没有应答；应答走共享层
-    /// 格式器的后端（alacritty/termwiz）用不到，默认无操作。
+    /// 推送主题默认色。颜色查询由核心自答的后端需要它：既是核心对
+    /// OSC 10/11/12 查询产生应答的前提，也是其调色板「程序改写槽」差分
+    /// （effective vs default）的基线——不推则改写全部被判未改写。应答经
+    /// 共享层格式化的后端用不到，默认无操作。
     fn set_theme_defaults(
         &mut self,
         _foreground: Rgb,

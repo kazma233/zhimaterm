@@ -81,6 +81,30 @@ pub(super) fn query(slot: ColorSlot, palette: &ColorPalette, scheme: &ColorSchem
     }
 }
 
+/// 颜色查询（OSC 4/10/11/12）的应答字节：`ESC ] <prefix> ; rgb:… ST`，每通道
+/// 双写两位十六进制，结尾固定 ST——kitty/ghostty 口径，不镜像查询结尾（分歧
+/// 记录见 ADR-050 §4、ADR-051 §2.1）。三后端的应答都从这一份格式化器产出，
+/// adapter 不得自带格式（GLOSSARY「查询应答」）。
+pub(crate) fn reply(slot: ColorSlot, rgb: Rgb) -> String {
+    format!(
+        "\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\",
+        prefix = slot_prefix(slot),
+        r = rgb.r,
+        g = rgb.g,
+        b = rgb.b
+    )
+}
+
+/// 查询槽位 → 应答里的 OSC 前缀。
+fn slot_prefix(slot: ColorSlot) -> String {
+    match slot {
+        ColorSlot::Indexed(index) => format!("4;{index}"),
+        ColorSlot::Foreground => "10".to_owned(),
+        ColorSlot::Background => "11".to_owned(),
+        ColorSlot::Cursor => "12".to_owned(),
+    }
+}
+
 /// SGR 2（dim）比照终端惯例压到 2/3 亮度。
 pub(super) fn dim(rgb: u32) -> u32 {
     let r = ((rgb >> 16) & 0xff) * 2 / 3;
@@ -146,8 +170,8 @@ mod tests {
 
 #[cfg(test)]
 mod query_tests {
-    use super::{cursor_color, default_background, default_foreground, query};
-    use crate::terminal::backend::{ColorPalette, ColorSlot};
+    use super::{cursor_color, default_background, default_foreground, query, reply};
+    use crate::terminal::backend::{ColorPalette, ColorSlot, Rgb};
     use crate::theme::default_theme;
 
     #[test]
@@ -225,6 +249,30 @@ mod query_tests {
         assert_eq!(
             default_background(&ColorPalette::new(), &scheme),
             scheme.background
+        );
+    }
+
+    #[test]
+    fn reply_formats_doubled_hex_with_a_fixed_st_terminator() {
+        let rgb = Rgb {
+            r: 0xd9,
+            g: 0xe2,
+            b: 0xea,
+        };
+        assert_eq!(
+            reply(ColorSlot::Foreground, rgb),
+            "\x1b]10;rgb:d9d9/e2e2/eaea\x1b\\"
+        );
+        assert_eq!(
+            reply(
+                ColorSlot::Indexed(4),
+                Rgb {
+                    r: 0,
+                    g: 0xab,
+                    b: 0xff
+                }
+            ),
+            "\x1b]4;4;rgb:0000/abab/ffff\x1b\\"
         );
     }
 }
