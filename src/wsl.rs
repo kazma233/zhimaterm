@@ -94,7 +94,7 @@ pub fn list_distros() -> Vec<WslDistro> {
 
     let raw = root
         .keys()
-        .map(|keys| keys.into_iter().map(String::from).collect::<Vec<_>>())
+        .map(|keys| keys.into_iter().collect::<Vec<_>>())
         .unwrap_or_default()
         .into_iter()
         .filter(|guid| is_distro_guid(guid))

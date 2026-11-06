@@ -456,7 +456,14 @@ fn restored_scrollback_opens_at_the_delivered_size() {
         scrollback: Some(path.clone()),
         pane: crate::tests::support::test_pane(),
     });
-    type_line(&session, "printf '\\033[1;31msize-probe-4321\\033[0m\\n'");
+    // PowerShell 5.1 给原生 exe 传无空格参数会剥掉反斜杠，printf 的转义直接
+    // 失效（PATH 上有 GNU printf 也救不回来）；Windows 分支用 $e 拼 ESC 原生
+    // 输出彩色标记，不依赖 PATH。
+    #[cfg(windows)]
+    let probe = r##"$e=[char]27; Write-Output "$e[1;31msize-probe-4321$e[0m""##;
+    #[cfg(not(windows))]
+    let probe = "printf '\\033[1;31msize-probe-4321\\033[0m\\n'";
+    type_line(&session, probe);
     wait_for_frame(&events, Duration::from_secs(10), output_visible)
         .expect("探针输出应出现在画面上");
     session.close();
@@ -533,7 +540,12 @@ fn restored_scrollback_waits_for_a_late_resize() {
         scrollback: Some(path.clone()),
         pane: crate::tests::support::test_pane(),
     });
-    type_line(&session, "printf '\\033[1;31mlate-probe-4321\\033[0m\\n'");
+    // 同 restored_scrollback_opens_at_the_delivered_size 的平台分支
+    #[cfg(windows)]
+    let probe = r##"$e=[char]27; Write-Output "$e[1;31mlate-probe-4321$e[0m""##;
+    #[cfg(not(windows))]
+    let probe = "printf '\\033[1;31mlate-probe-4321\\033[0m\\n'";
+    type_line(&session, probe);
     wait_for_frame(&events, Duration::from_secs(10), output_visible)
         .expect("探针输出应出现在画面上");
     session.close();
@@ -1224,7 +1236,7 @@ fn ime_text_is_typed_into_the_pty_verbatim() {
         // 命令回显里的 "raw"/"IME-" 证明探针行已被执行
         "raw",
     );
-    type_line(&session, probe);
+    type_line(&session, &probe);
     assert!(
         wait_for_frame(&events, Duration::from_secs(5), |snapshot| {
             rendered(snapshot).contains("IME-") || rendered(snapshot).contains(ready)
@@ -1313,7 +1325,7 @@ fn shell_queries_are_answered_on_the_pty() {
         r#"if [ "$reply" = "$(printf '\033[0n')" ]; then "#,
         r#"printf 'DSR-%s\n' ANSWER-MATCHED; else printf 'DSR-%s\n' ANSWER-WRONG; fi"#,
     );
-    type_line(&session, probe);
+    type_line(&session, &probe);
 
     let output = wait_for_frame(&events, Duration::from_secs(5), |snapshot| {
         rendered(snapshot).contains("DSR-ANSWER-MATCHED")

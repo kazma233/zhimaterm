@@ -1,4 +1,4 @@
-# Windows 用户级安装/卸载:二进制 -> %LOCALAPPDATA%\Programs,
+﻿# Windows 用户级安装/卸载:二进制 -> %LOCALAPPDATA%\Programs,
 # 开始菜单快捷方式。图标由 build.rs 内嵌进 exe,快捷方式直接指向 exe。
 # 只装主程序;ssh-sftp-probe / pty-probe 是开发探针,不进用户安装。
 param(

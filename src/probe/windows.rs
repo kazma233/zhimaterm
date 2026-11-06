@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use anyhow::{Context, Result, bail};
 
 use super::{ListeningSocket, ProbeProcess};
-use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, STILL_ACTIVE};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
 };
@@ -21,8 +21,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
-    TerminateProcess,
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess,
 };
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
@@ -51,7 +51,9 @@ pub(super) fn listening_sockets(
 /// Unix「先优雅后确认」的口径差异显式接受（ADR-028）。发信号前按采样期的
 /// 完整路径复核身份（QueryFullProcessImageNameW 现行值比对），不一致即 PID
 /// 已被复用，拒杀；采样期路径缺失（None）时无从比对，交给 OpenProcess 的
-/// 存在性检查。
+/// 存在性检查。「已退出」有两种形态：对象已销毁时 OpenProcess 报 87；对象
+/// 仍被某人持有（调用方未回收、句柄存活）时 OpenProcess 成功，须按退出码
+/// 判定，对已终止的对象 TerminateProcess 只会得到拒绝访问。
 pub(super) fn kill_process(pid: u32, expect_exe: Option<&str>) -> Result<()> {
     if let Some(expected) = expect_exe
         && full_image_path(pid).as_deref() != Some(expected)
@@ -60,7 +62,11 @@ pub(super) fn kill_process(pid: u32, expect_exe: Option<&str>) -> Result<()> {
     }
     // SAFETY: 只传标量参数；句柄判空后使用并在块尾关闭。
     unsafe {
-        let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        let process = OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
         if process.is_null() {
             let error = std::io::Error::last_os_error();
             // 87 = ERROR_INVALID_PARAMETER：OpenProcess 对不存在进程的报错形态
@@ -69,6 +75,13 @@ pub(super) fn kill_process(pid: u32, expect_exe: Option<&str>) -> Result<()> {
                 anyhow::bail!("进程 {pid} 已退出");
             }
             return Err(anyhow::Error::new(error).context(format!("无法结束进程 {pid}")));
+        }
+        // STILL_ACTIVE（259）是约定的「仍在运行」哨兵值，与 pty::Child::try_wait
+        // 同一口径；真退出码恰为 259 的进程会被误判为仍在，只能硬杀报错
+        let mut code: u32 = 0;
+        if GetExitCodeProcess(process, &mut code) != 0 && code != STILL_ACTIVE as u32 {
+            CloseHandle(process);
+            anyhow::bail!("进程 {pid} 已退出");
         }
         let ok = TerminateProcess(process, 1);
         let error = std::io::Error::last_os_error();

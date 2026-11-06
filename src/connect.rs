@@ -1459,12 +1459,13 @@ fn form_forwards(form: &ConnectForm, cx: &App) -> Result<Vec<ForwardRule>, FormE
 }
 
 /// 展开开头的 `~`：用户按习惯写路径，应用不去猜 shell 的展开规则。
+/// 主目录来源与配置目录一致（`config_paths::home_dir`）。
 fn expand_home(path: &str) -> PathBuf {
     let Some(rest) = path.strip_prefix("~/") else {
         return PathBuf::from(path);
     };
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(rest),
+    match crate::config_paths::home_dir() {
+        Some(home) => home.join(rest),
         None => PathBuf::from(path),
     }
 }

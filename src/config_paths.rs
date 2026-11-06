@@ -11,9 +11,7 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(dir));
     }
 
-    let base = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .context("无法确定用户主目录")?;
+    let base = home_dir().context("无法确定用户主目录")?;
     #[cfg(target_os = "macos")]
     let dir = PathBuf::from(&base).join("Library/Application Support/Zhimaterm");
     // Windows 逐段 join：整串 "AppData/Roaming/..." join 进去会保留正斜杠，
@@ -30,6 +28,14 @@ pub fn config_dir() -> Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from(&base).join(".config"))
         .join("zhimaterm");
     Ok(dir)
+}
+
+/// 用户主目录：`HOME`，Windows 上通常未设、回退 `USERPROFILE`。配置目录
+/// 定位与 connect 表单的 `~` 展开共用这一来源，避免两处各猜一套。
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// 本地格滚动回滚的持久化目录（ADR-039）：每格一个 `<会话编号>.log`，

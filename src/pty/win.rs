@@ -10,7 +10,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::ExitStatusExt;
@@ -31,16 +31,11 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-use super::{Command, PtySize};
+use super::{Command, PtyReader, PtySize, PtyWriter};
 
 const PSEUDOCONSOLE_INHERIT_CURSOR: u32 = 0x1;
 const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
 const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
-
-/// 三个 flag 组合与 portable-pty 0.9.0 一致。注意 INHERIT_CURSOR 的代价：
-/// ConPTY 启动即向宿主发 `ESC[6n`（DSR-CPR）并同步阻塞等回复，宿主的
-/// VT 栈必须应答（应用内由 alacritty 终端模型完成），否则子进程控制台
-/// 初始化永远挂起——无应答的宿主（如测试）需要自己回 `ESC[行;列R`。
 
 /// windows-sys 未导出该属性常量，值来自 Win32 SDK（procthreadsapi.h）。
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
@@ -48,12 +43,16 @@ const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 pub(super) fn spawn(
     command: &Command,
     size: PtySize,
-) -> Result<(Master, Child, Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+) -> Result<(Master, Child, PtyReader, PtyWriter)> {
     let (stdin_read, stdin_write) = pipe().context("创建 ConPTY 输入管道失败")?;
     let (stdout_read, stdout_write) = pipe().context("创建 ConPTY 输出管道失败")?;
 
     let mut attrs = ProcThreadAttributeList::with_capacity(1)?;
 
+    // 三个 flag 组合与 portable-pty 0.9.0 一致。注意 INHERIT_CURSOR 的代价：
+    // ConPTY 启动即向宿主发 `ESC[6n`（DSR-CPR）并同步阻塞等回复，宿主的
+    // VT 栈必须应答（应用内由 alacritty 终端模型完成），否则子进程控制台
+    // 初始化永远挂起——无应答的宿主（如测试）需要自己回 `ESC[行;列R`。
     let mut con: HPCON = 0;
     // SAFETY: 两个管道句柄是本函数刚创建的合法端点，con 指向已初始化的本地变量。
     let hr = unsafe {
@@ -144,8 +143,8 @@ pub(super) fn spawn(
 
     let master = Master { con };
     // SAFETY: 两个管道端此后只由对应 File 独占持有，不会双重关闭。
-    let reader: Box<dyn Read + Send> = Box::new(unsafe { File::from_raw_handle(stdout_read) });
-    let writer: Box<dyn Write + Send> = Box::new(unsafe { File::from_raw_handle(stdin_write) });
+    let reader: PtyReader = Box::new(unsafe { File::from_raw_handle(stdout_read) });
+    let writer: PtyWriter = Box::new(unsafe { File::from_raw_handle(stdin_write) });
     Ok((master, child, reader, writer))
 }
 
@@ -289,17 +288,6 @@ impl Child {
         } else {
             Ok(Some(ExitStatus::from_raw(code)))
         }
-    }
-
-    pub(super) fn wait(&self) -> io::Result<ExitStatus> {
-        // SAFETY: 句柄有效且具备同步等待权限；INFINITE 阻塞直到进程对象受信。
-        unsafe { WaitForSingleObject(self.proc.as_raw_handle(), INFINITE) };
-        let mut code: u32 = 0;
-        // SAFETY: 同上，等待完成后句柄仍有效。
-        if unsafe { GetExitCodeProcess(self.proc.as_raw_handle(), &mut code) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(ExitStatus::from_raw(code))
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
@@ -502,7 +490,7 @@ mod tests {
     }
 
     /// 端到端冒烟：ConPTY 里起默认 Shell 家族的 powershell 退出码 0，覆盖
-    /// 管道、属性列表、CreateProcessW 与 wait 全链路。
+    /// 管道、属性列表、CreateProcessW 与 try_wait 全链路。
     ///
     /// 应答线程代替应用的 VT 栈回复 DSR-CPR：INHERIT_CURSOR 下 ConPTY
     /// 启动即同步等这个回复。不 join——子进程退出后 ConPTY 的 EOF 不保证
@@ -516,7 +504,7 @@ mod tests {
     /// 退出码断言保持不变。
     #[test]
     fn spawns_shell_and_waits_for_clean_exit() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::process::ExitStatus;
         use std::time::{Duration, Instant};
 
