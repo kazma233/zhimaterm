@@ -79,6 +79,52 @@ impl Row {
     }
 }
 
+/// 行的可见格序列：跳过占位格（宽字符尾格/行首让位格）。孤儿占位（拥有者
+/// 已不在）随之丢弃，悬空宽字符（尾格被占）由 [`rebuild_row`] 重建时补齐。
+fn row_visible(cells: &[GridCell]) -> Vec<GridCell> {
+    cells
+        .iter()
+        .filter(|cell| !cell.is_placeholder())
+        .cloned()
+        .collect()
+}
+
+/// 格坐标 → 可见格序号：落在宽字符尾格上时，拥有它的宽字符算作编辑起点
+/// （xterm 口径——右半受击即整字受击）。
+fn visible_start(cells: &[GridCell], column: usize) -> usize {
+    let mut visible = cells[..column]
+        .iter()
+        .filter(|cell| !cell.is_placeholder())
+        .count();
+    if cells[column].spacer && visible > 0 {
+        visible -= 1;
+    }
+    visible
+}
+
+/// 可见格序列拼回一行：width==2 的格自动带出新的尾格占位，行尾放不下的
+/// 宽字符让位为空白，行长补齐到列数——行宽不变量（非占位宽度和 ≤ 列数）
+/// 由重建本身保证。
+fn rebuild_row(cells: &mut Vec<GridCell>, visible: &[GridCell], columns: usize, erased: &GridCell) {
+    cells.clear();
+    for cell in visible {
+        if cells.len() + usize::from(cell.width) > columns {
+            break;
+        }
+        cells.push(cell.clone());
+        if cell.width == 2 {
+            let mut spacer = GridCell::blank();
+            spacer.spacer = true;
+            spacer.fg = cell.fg;
+            spacer.bg = cell.bg;
+            cells.push(spacer);
+        }
+    }
+    while cells.len() < columns {
+        cells.push(erased.clone());
+    }
+}
+
 /// 当前 SGR 属性：写到格子里的是这些值的快照。
 #[derive(Clone)]
 struct Attrs {
@@ -459,6 +505,16 @@ impl TermwizCore {
         let mapped = self.map_charset(character);
         let attrs = self.cursor.attrs.clone();
         let (line, column) = (self.cursor.line, self.cursor.column);
+        // 光标落在宽字符的尾格占位上（CUP、resize 钳制都可能指到）：拥有者
+        // （前格 width==2 的本格）整体让位、按当前属性擦除（xterm 同口径）
+        // ——否则宽字符仍占 2 列而新字符再占 1 列，行宽超出列数。前格不是
+        // 宽字符本格时是孤儿占位（插删/重排遗留），直接覆写即可
+        if self.viewport[line].cells[column].spacer {
+            let owner = &mut self.viewport[line].cells[column - 1];
+            if owner.width == 2 && !owner.is_placeholder() {
+                *owner = attrs.erased_cell();
+            }
+        }
         self.viewport[line].cells[column] = GridCell {
             c: mapped,
             zerowidth: None,
@@ -1488,25 +1544,32 @@ impl TermwizCore {
                 let erased = self.cursor.attrs.erased_cell();
                 let row = &mut self.viewport[self.cursor.line];
                 let column = self.cursor.column;
-                // 光标后的内容整体右移，腾出的格子填空白
-                let tail_len = self.columns - column - count;
-                for offset in (0..tail_len).rev() {
-                    row.cells.swap(column + count + offset, column + offset);
+                // 光标处插入空白可见格，右侧可见格整体右移；被推出行尾的
+                // 宽字符让位为空白（半格放不下整字）
+                let mut visible = row_visible(&row.cells);
+                let start = visible_start(&row.cells, column);
+                let tail: Vec<GridCell> = visible.split_off(start);
+                for _ in 0..count {
+                    visible.push(erased.clone());
                 }
-                for cell in &mut row.cells[column..column + count] {
-                    *cell = erased.clone();
-                }
+                visible.extend(tail);
+                rebuild_row(&mut row.cells, &visible, self.columns, &erased);
             }
             Edit::DeleteCharacter(count) => {
                 let count = (count.max(1) as usize).min(self.columns - self.cursor.column);
                 let erased = self.cursor.attrs.erased_cell();
                 let row = &mut self.viewport[self.cursor.line];
-                for _ in 0..count {
-                    row.cells.remove(self.cursor.column);
-                }
-                while row.cells.len() < self.columns {
-                    row.cells.push(erased.clone());
-                }
+                let column = self.cursor.column;
+                // 光标起的 count 个可见格删除（宽字符连尾格原子消失），
+                // 尾段左移、行尾补空白
+                let mut visible = row_visible(&row.cells);
+                let start = visible_start(&row.cells, column);
+                let tail: Vec<GridCell> = visible
+                    .drain((start + count).min(visible.len())..)
+                    .collect();
+                visible.truncate(start);
+                visible.extend(tail);
+                rebuild_row(&mut row.cells, &visible, self.columns, &erased);
             }
             _ => {}
         }
@@ -1908,6 +1971,67 @@ mod fuzz {
 
     use super::TermwizCore;
     use crate::terminal::backend::{GridView, RowBuffer, TerminalCore};
+
+    /// 备用屏缩宽 resize 把光标钳到宽字符的尾格占位上，随后打印必须保持
+    /// 行宽不超列数（全后端随机脚本 fuzz 抓到的腐化形态，2026-11-06）：
+    /// 写格落在尾格占位上时宽字符整体让位，前格按当前属性擦除。
+    #[test]
+    fn printing_onto_a_wide_spacer_keeps_row_width_within_columns() {
+        use crate::terminal::TerminalModel;
+        let mut model = TerminalModel::with_backend(
+            crate::terminal::backend::BackendKind::Termwiz,
+            80,
+            24,
+            500,
+        );
+        model.advance(b"\x1b[?1049h");
+        model.advance("中文宽度测试，".as_bytes());
+        model.advance("中文宽度测试，".as_bytes());
+        model.resize(28, 36);
+        model.advance(b"hello world. ");
+        let snapshot = model.snapshot();
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            let columns: usize = row.iter().map(|run| run.columns).sum();
+            assert!(
+                columns <= snapshot.columns,
+                "行 {index} 占 {columns} 列超过 {}",
+                snapshot.columns
+            );
+        }
+    }
+
+    /// 插删字符（ICH/DCH）以可见格为单位：宽字符连尾格原子移动/删除，
+    /// 不劈开配对留下悬空宽字符或孤儿占位（同一次 fuzz 抓到的第二处腐化：
+    /// 裸格平移把尾格推出行尾，本格悬空占 2 列）。
+    #[test]
+    fn insert_delete_chars_keep_wide_cells_paired() {
+        use crate::terminal::TerminalModel;
+        for edit in [b"\x1b[3P".as_slice(), b"\x1b[4@".as_slice()] {
+            let mut model = TerminalModel::with_backend(
+                crate::terminal::backend::BackendKind::Termwiz,
+                20,
+                3,
+                30,
+            );
+            model.advance("ab中cd文ef\x1b[1;1H".as_bytes());
+            // 逐列移动光标，在每个位置做一次插/删——覆盖击中宽字符左右半
+            // 与普通格的全部组合
+            for column in 1..=8 {
+                model.advance(format!("\x1b[1;{column}H").as_bytes());
+                model.advance(edit);
+                model.advance(b"\x1b[1;1H");
+                let snapshot = model.snapshot();
+                for (row_index, row) in snapshot.rows.iter().enumerate() {
+                    let columns: usize = row.iter().map(|run| run.columns).sum();
+                    assert!(
+                        columns <= snapshot.columns,
+                        "编辑 {edit:?} 光标列 {column} 后行 {row_index} 占 {columns} 列超过 {}",
+                        snapshot.columns
+                    );
+                }
+            }
+        }
+    }
 
     /// xorshift64：确定性，失败可复现。
     struct Rng(u64);
