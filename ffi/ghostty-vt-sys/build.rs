@@ -201,16 +201,24 @@ fn download_and_extract(lock: &Lock, src: &Path) {
 }
 
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    use ureq::tls::{TlsConfig, TlsProvider};
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
     // Cargo.toml 按构建主机选了 TLS 后端（macOS/Windows 系统栈、其余 rustls），
-    // ureq 侧要显式指定成同一个。
+    // ureq 侧要显式指定成同一个；信任锚也用平台系统根：ureq 默认的内置
+    // Mozilla 根集不含 pin 站点链路的锚（Cloudflare 走 GlobalSign ECC
+    // Root CA - R4 交叉签发，该根已从 Mozilla 列表移除），信任系统证书库
+    // 才能下载，与 cargo/git 等构建工具的口径一致。
     let provider = if cfg!(any(target_os = "macos", windows)) {
         TlsProvider::NativeTls
     } else {
         TlsProvider::Rustls
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(TlsConfig::builder().provider(provider).build())
+        .tls_config(
+            TlsConfig::builder()
+                .provider(provider)
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
         .build()
         .into();
     let response = agent.get(url).call().map_err(|error| error.to_string())?;

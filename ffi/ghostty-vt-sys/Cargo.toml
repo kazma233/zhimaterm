@@ -38,12 +38,14 @@ tar = "0.4"
 
 # 下载固定源码包走系统 TLS 栈：macOS/Windows 用 NativeTls，其余用 rustls，
 # 避免给构建机引入 OpenSSL 依赖（ureq 3 按后端选 feature）。
+# 根证书同样用平台系统根（build.rs fetch 里显式 PlatformVerifier），所以
+# macOS/Windows 不带 ureq 的 webpki 根集、Linux 需补 platform-verifier。
 [target.'cfg(any(target_os = "macos", windows))'.build-dependencies.ureq]
 version = "3"
-features = ["native-tls"]
+features = ["native-tls-no-default"]
 default-features = false
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.build-dependencies.ureq]
 version = "3"
-features = ["rustls"]
+features = ["rustls", "platform-verifier"]
 default-features = false
