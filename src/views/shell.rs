@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, Keystroke, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, ElementId, Entity, Keystroke, MouseButton, Window, div, px};
 
 use crate::workspace::PaneId;
 use zhimaterm_base::theme::UiTokens;
@@ -71,6 +71,68 @@ pub struct AutoReconnect {
 /// 底栏统一高度：控制台下方状态栏与会话栏底部动作行共用同一常量，两条横向
 /// 底栏在窗口里保持等高，谁也不能单独改。
 pub const STATUS_BAR_HEIGHT: f32 = 30.0;
+
+/// 状态开关 chip 的「开」配色语义：开关亮起时说的是什么。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChipTone {
+    /// 普通开关（SFTP / 历史 / 记录 / 进程面板）：亮起 = 功能开着。
+    Success,
+    /// 开着也带警示（转发：规则生效意味着流量在走，ADR-011）。
+    Warn,
+}
+
+/// 状态开关 chip 的显示态：关（灰）、开（按 tone 高亮）、注意（灰底 +
+/// 警示前景——转发有规则下发失败时的中间态：提示去看，但不装成开着）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChipState {
+    Off,
+    On,
+    Attention,
+}
+
+/// 底栏右侧的状态开关 chip（可点）：样式五处一份——SFTP、历史、记录、
+/// 转发与探针「进程」开关共用。点击语义各异（切面板、开模态、翻浮层），
+/// 由调用方在返回值上链式接 `on_click`（与连接表单的 `bind_chip` 同一模式）。
+pub fn status_chip(
+    tokens: &UiTokens,
+    id: impl Into<ElementId>,
+    label: &str,
+    tone: ChipTone,
+    state: ChipState,
+) -> gpui::Stateful<gpui::Div> {
+    let (bg_on, fg_on) = match tone {
+        ChipTone::Success => (tokens.bg_success, tokens.accent),
+        ChipTone::Warn => (tokens.bg_warn, tokens.warn_strong),
+    };
+    let (bg, fg) = match state {
+        ChipState::Off => (tokens.bg_row, tokens.fg_muted),
+        ChipState::On => (bg_on, fg_on),
+        ChipState::Attention => (tokens.bg_row, fg_on),
+    };
+    div()
+        .id(id.into())
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(px(4.))
+        .text_size(ui_rems(10.))
+        .bg(gpui::rgb(bg))
+        .text_color(gpui::rgb(fg))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(label.to_owned())
+}
+
+/// 状态开关 chip 的不可点占位：面板实体未就绪的毫秒级窗口里渲染同款灰态
+/// （探针「进程」开关，ADR-028），底栏从首帧起恒在、不因就绪先后抖动。
+pub fn status_chip_plain(tokens: &UiTokens, label: &str) -> gpui::Div {
+    div()
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(px(4.))
+        .text_size(ui_rems(10.))
+        .bg(gpui::rgb(tokens.bg_row))
+        .text_color(gpui::rgb(tokens.fg_dim))
+        .child(label.to_owned())
+}
 
 /// 统一状态底栏：终端画面下方一行，上边框分隔，任何阶段都常驻（仅远端会话，ADR-016）。
 /// `lang` 是 LANG 下发状态（ADR-019）：运行期在信息区尾部展示，已结束的底栏不带。

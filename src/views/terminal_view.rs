@@ -409,36 +409,27 @@ impl TerminalView {
             .probe_panel
             .as_ref()
             .is_some_and(|panel| panel.read(cx).is_open());
-        // 开关芯片样式对齐底栏 SFTP 开关；面板实体未就绪（ProbeReady 尚未到达的
-        // 毫秒级窗口）时渲染同款但不可点的占位
-        let chip = div()
-            .px(px(6.))
-            .py(px(2.))
-            .rounded(px(4.))
-            .text_size(ui_rems(10.))
-            .child("进程");
+        // 开关样式单点在 shell（status_chip）；面板实体未就绪（ProbeReady 尚未
+        // 到达的毫秒级窗口）时渲染同款但不可点的占位
         let toggle: gpui::AnyElement = if let Some(entity) = self.probe_panel.clone() {
-            let chip = chip
-                .bg(gpui::rgb(if open {
-                    tokens.bg_success
-                } else {
-                    tokens.bg_row
-                }))
-                .text_color(gpui::rgb(if open {
-                    tokens.accent
-                } else {
-                    tokens.fg_muted
-                }));
-            chip.id("probe-toggle")
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |panel, cx| panel.toggle(cx));
-                })
-                .into_any_element()
+            let state = if open {
+                shell::ChipState::On
+            } else {
+                shell::ChipState::Off
+            };
+            shell::status_chip(
+                &tokens,
+                "probe-toggle",
+                "进程",
+                shell::ChipTone::Success,
+                state,
+            )
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |panel, cx| panel.toggle(cx));
+            })
+            .into_any_element()
         } else {
-            chip.bg(gpui::rgb(tokens.bg_row))
-                .text_color(gpui::rgb(tokens.fg_dim))
-                .into_any_element()
+            shell::status_chip_plain(&tokens, "进程").into_any_element()
         };
         div()
             .flex_none()
@@ -2093,6 +2084,108 @@ impl Render for TerminalView {
             }
         }
 
+        // 装配分段进行（主区 / 底栏，见各函数）：render 只留副作用裁决与
+        // 根骨架——根属性、层序与落焦锚点。
+        let main_area = self.render_main_area(&tokens, cx);
+        let bottom_bar = self.render_bottom_bar(&tokens, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(gpui::rgb(tokens.bg_root))
+            .text_color(gpui::rgb(tokens.fg))
+            // 只有终端网格持有焦点才带上 "Terminal" 上下文：复制/粘贴绑定只在终端生效，
+            // SFTP 面板的输入框获得焦点后，⌘C/⌘V 仍归输入框自己处理（见 input::app_key_bindings）
+            .key_context(if self.focus.is_focused(window) {
+                "ZhimaTerm Terminal"
+            } else {
+                "ZhimaTerm"
+            })
+            .track_focus(&self.focus)
+            .on_key_down(
+                cx.listener(|this, event, window, cx| this.handle_key_down(event, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, _| this.copy_selection()))
+            .on_action(cx.listener(|this, _: &PasteClipboard, _, cx| this.paste_clipboard(cx)))
+            .child(main_area)
+            .children(bottom_bar)
+            // 死会话的落焦锚点：零尺寸、不参与命中。track_focus 的元素会在
+            // 鼠标按下命中自己时自动聚焦并阻止祖先抢焦（gpui div 的行为），
+            // 锚点有面积就会抢走网格的点击聚焦、终端就打不了字；焦点派发
+            // 只需要它存在于派发树里（焦点路径的起点），不需要可见可点。
+            .child(div().absolute().size_0().track_focus(&self.dead_focus))
+    }
+}
+
+impl TerminalView {
+    /// 主区容器：终端网格面与一切停靠/浮层（探针面板、转发浮层、SFTP 面板、
+    /// 搜索条、右键菜单）的宿主。SFTP 浮层根是 absolute，以这层（relative）
+    /// 为定位基准贴右缘悬浮；探针面板是 flex 子元素，展开时终端让宽、PTY
+    /// 按新列数重排（ADR-028）。搜索条与右键菜单最后挂载，盖在面板之上。
+    fn render_main_area(
+        &self,
+        tokens: &zhimaterm_base::theme::UiTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let view_entity = cx.entity();
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .relative()
+            .flex()
+            .child(self.render_grid_surface(tokens, cx))
+            // 探针停靠面板（ADR-028）：展开时作为 flex 子元素贴右缘，
+            // 终端让宽、PTY 按新列数重排；收起时不渲染
+            .children(self.probe_panel.clone())
+            // 转发状态浮层（ADR-011/012/038）：右上角小卡片，标题栏按钮开关；
+            // 增删在浮层里完成，写回配置经外壳回调
+            .children(self.forward_open.then(|| {
+                render_forward_overlay(
+                    tokens,
+                    &self.forward_states,
+                    self.forward_agent,
+                    self.agent_forward_error.as_deref(),
+                    self.forward_hooks.saved_connection,
+                    self.forward_save,
+                    &forward_overlay_actions(&view_entity),
+                )
+            }))
+            .children(self.sftp_panel.clone())
+            // 搜索条（ADR-015）：底部覆盖层，不挤占网格（PTY 不因开关无谓 resize）
+            .children(self.search_open.then(|| {
+                render_search_bar(
+                    self.search_input.as_ref(),
+                    self.search_regex,
+                    self.state.data().search_feedback.as_deref(),
+                    cx,
+                )
+            }))
+            // 右键菜单（ADR-023）：遮罩与浮层最后挂载，盖在面板与搜索条之上
+            .children(
+                self.context_menu
+                    .and_then(|click| {
+                        let bounds = self.container_bounds.get();
+                        (bounds.size.width > px(0.))
+                            .then(|| render_context_menu(click - bounds.origin, bounds.size, cx))
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            // 容器 bounds 每帧写入：菜单的容器内定位与夹取按它换算
+            .child(zhimaterm_base::ui::canvas::bounds_recorder(
+                self.container_bounds.clone(),
+            ))
+    }
+
+    /// 终端网格面：字体与命中测试的宿主。画布三件套（resize 记录、全局鼠标
+    /// 监听、输入处理器）与网格立即模式绘制都在这层；中央卡片层后挂，
+    /// 画在定格画面之上。
+    fn render_grid_surface(
+        &self,
+        tokens: &zhimaterm_base::theme::UiTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let metrics = self.metrics;
         let font_size = self.font.size;
         let hovered = self.hovered;
@@ -2140,57 +2233,212 @@ impl Render for TerminalView {
                 app.update(cx, |this, _| this.handle_mouse_up(event));
             },
         );
+        div()
+            .id("terminal-surface")
+            .relative()
+            // 终端字体只属于网格区域：顶栏、底栏与 SFTP 面板这些
+            // 界面文字从应用根继承界面字体（设置里可换）
+            .font(font::terminal_font(&self.font.family))
+            .text_size(px(self.font.size))
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_hidden()
+            .bg(gpui::rgb(tokens.bg_terminal))
+            .cursor(cursor)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event, window, cx| {
+                    this.handle_mouse_down(event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event, window, cx| {
+                    this.handle_mouse_down(event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event, window, cx| {
+                    this.handle_mouse_down(event, window, cx);
+                }),
+            )
+            .on_scroll(cx.listener(|this, event, _, cx| this.handle_scroll(event, cx)))
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        bounds_state.set(bounds);
+                        // 判重键 = 命令载荷：纯像素变化（换字体）也算
+                        let geometry = grid::GridGeometry::from_bounds(bounds, metrics);
+                        if resize_state.get() != geometry {
+                            resize_state.set(geometry);
+                            resize_session.resize(
+                                geometry.columns,
+                                geometry.lines,
+                                geometry.cell_width,
+                                geometry.cell_height,
+                            );
+                        }
+                        bounds
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(mouse_listeners)
+            .child(zhimaterm_base::ui::canvas::input_handler_canvas(
+                &self.focus,
+                cx.entity(),
+            ))
+            // 网格立即模式绘制：绝对定位铺满终端区域，字形逐格钉位
+            // （见 grid::GridPainter）。比逐行 div 少两个数量级的布局节点。
+            // Arc 克隆一帧画面只有一次原子操作，克隆后 cx 即可变使用。
+            .child(
+                canvas(move |_, _, _| (), {
+                    let view_entity = view_entity.clone();
+                    move |bounds, _, window, cx| {
+                        let Some(snapshot) = view_entity.read(cx).snapshot.clone() else {
+                            return;
+                        };
+                        painter.paint(bounds, &snapshot, window, cx);
+                    }
+                })
+                .absolute()
+                .inset_0(),
+            )
+            .children(self.render_center_cards(tokens, cx))
+            .into_any_element()
+    }
 
-        // SSH 会话才有 SFTP 面板：底栏右侧放一个开关
-        let sftp_toggle = self.sftp_panel.as_ref().map(|panel| {
-            let entity = panel.clone();
-            let open = panel.read(cx).is_open();
-            div()
-                .id("sftp-toggle")
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .bg(gpui::rgb(if open {
-                    tokens.bg_success
-                } else {
-                    tokens.bg_row
-                }))
-                .text_color(gpui::rgb(if open {
-                    tokens.accent
-                } else {
-                    tokens.fg_muted
-                }))
-                .text_size(ui_rems(10.))
-                .cursor(gpui::CursorStyle::PointingHand)
+    /// 中央卡片层：叠在网格画面上的覆盖物，按绘制顺序返回——后端徽标、
+    /// 中央提示、信任卡、密码卡。调用方必须把它们挂在绘制画布之后：
+    /// 后挂的子元素画在上层，否则定格画面（不透明背景）会把卡片盖住。
+    fn render_center_cards(
+        &self,
+        tokens: &zhimaterm_base::theme::UiTokens,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut cards = Vec::new();
+        // 内核闪现：首个画面到达时中央亮 1 秒（本格后端身份，ADR-050/051）。
+        // 中央覆盖不占布局、不 resize；纯展示不设 hitbox，鼠标事件穿透给网格；
+        // 过期由 is_some_and 校验兜底，不依赖定时器精确。
+        if self
+            .backend_badge_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            cards.push(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .bg(gpui::rgb(tokens.bg_row))
+                            .text_color(gpui::rgb(tokens.fg_faint))
+                            .text_size(ui_rems(10.))
+                            .child(self.backend.display_name()),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // 网格中央提示（ADR-016）：只服务本地格——启动中、启动失败与写入错误；
+        // 远端的连接中在底栏（带已等待秒数）
+        if let Some((text, hint)) = center_notice(
+            self.local,
+            self.state.data().exited,
+            self.snapshot.is_some(),
+            &self.state.data().status,
+        ) {
+            cards.push(render_center_notice(tokens, text, hint).into_any_element());
+        }
+        // 信任确认卡：与密码卡同位同层，盖在定格画面之上——用户看不见
+        // 确认入口，连接就停在等待里，看起来像卡死
+        if let Some(request) = self.state.data().trust_request.clone() {
+            let app = cx.entity();
+            cards.push(
+                shell::render_trust_prompt(tokens, &request, move |accept, cx| {
+                    app.update(cx, |view, cx| view.answer_trust(accept, cx));
+                })
+                .into_any_element(),
+            );
+        }
+        // 连接期密码卡与信任卡同位同层。Enter 确认与列表密码小框同约定
+        // （单行输入框放行回车，提交键由容器接）
+        if let Some(input) = self.password_prompt.clone() {
+            let app = cx.entity();
+            let enter_input = input.clone();
+            let enter = cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "enter" {
+                    let text = enter_input.read(cx).text().to_owned();
+                    this.answer_password(Some(text), cx);
+                }
+            });
+            cards.push(
+                shell::render_password_prompt(tokens, &input, move |password, cx| {
+                    app.update(cx, |view, cx| view.answer_password(password, cx));
+                })
+                .on_key_down(enter)
+                .into_any_element(),
+            );
+        }
+        cards
+    }
+
+    /// 底栏：远端格是统一状态栏（信息区 + 右端入口 chips），本地默认 Shell
+    /// 格是探针底栏（只承载「进程」开关）；WSL 格无底栏（ADR-016/028）。
+    /// 入口 chips 的样式单点在 shell::status_chip，点击语义各归各处。
+    fn render_bottom_bar(
+        &self,
+        tokens: &zhimaterm_base::theme::UiTokens,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut bar = Vec::new();
+        if !self.local {
+            // SSH 会话才有 SFTP 面板：底栏右侧放一个开关
+            let sftp_toggle = self.sftp_panel.as_ref().map(|panel| {
+                let entity = panel.clone();
+                let open = panel.read(cx).is_open();
+                shell::status_chip(
+                    tokens,
+                    "sftp-toggle",
+                    "SFTP",
+                    shell::ChipTone::Success,
+                    if open {
+                        shell::ChipState::On
+                    } else {
+                        shell::ChipState::Off
+                    },
+                )
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |panel, cx| panel.toggle(cx));
                 })
-                .child("SFTP")
-        });
-        // 「历史」入口（右下角）：SFTP 已结束的操作汇成的操作记录，全屏模态
-        // （ADR-044）。与 SFTP 面板解耦——没开面板也能看历史，SSH 会话即显示
-        let history_toggle = (!self.local).then(|| {
-            let pane = self.pane;
-            // 有未看过的新操作时高亮（与 SFTP 开关、记录中的状态色同语言）
-            let fresh = zhimaterm_recording::recorder::history(pane)
-                .is_some_and(|history| history.read(cx).has_fresh());
-            div()
-                .id("session-history-toggle")
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .bg(gpui::rgb(if fresh {
-                    tokens.bg_success
-                } else {
-                    tokens.bg_row
-                }))
-                .text_color(gpui::rgb(if fresh {
-                    tokens.accent
-                } else {
-                    tokens.fg_muted
-                }))
-                .text_size(ui_rems(10.))
-                .cursor(gpui::CursorStyle::PointingHand)
+                .into_any_element()
+            });
+            // 「历史」入口（右下角）：SFTP 已结束的操作汇成的操作记录，全屏模态
+            // （ADR-044）。与 SFTP 面板解耦——没开面板也能看历史，SSH 会话即显示
+            let history_toggle = {
+                let pane = self.pane;
+                // 有未看过的新操作时高亮（与 SFTP 开关、记录中的状态色同语言）
+                let fresh = zhimaterm_recording::recorder::history(pane)
+                    .is_some_and(|history| history.read(cx).has_fresh());
+                shell::status_chip(
+                    tokens,
+                    "session-history-toggle",
+                    "历史",
+                    shell::ChipTone::Success,
+                    if fresh {
+                        shell::ChipState::On
+                    } else {
+                        shell::ChipState::Off
+                    },
+                )
                 .on_click(move |_, window, cx| {
                     // 历史实体经门面查（ADR-045）；按钮在格底栏上，格必在。
                     // 打开即视为已读：清掉高亮，模态期间新落的条目会再置位
@@ -2206,30 +2454,24 @@ impl Render for TerminalView {
                         );
                     }
                 })
-                .child("历史")
-        });
-        // 「记录」入口（历史右边）：会话输出日志（ADR-017）的开关与打开。
-        // 记录中亮绿（与 SFTP 开关同款状态色），开关状态在弹出的记录模态里切
-        let log_toggle = (!self.local).then(|| {
-            let view = cx.entity();
-            let logging = self.logging_enabled();
-            div()
-                .id("session-log-entry")
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .bg(gpui::rgb(if logging {
-                    tokens.bg_success
-                } else {
-                    tokens.bg_row
-                }))
-                .text_color(gpui::rgb(if logging {
-                    tokens.accent
-                } else {
-                    tokens.fg_muted
-                }))
-                .text_size(ui_rems(10.))
-                .cursor(gpui::CursorStyle::PointingHand)
+                .into_any_element()
+            };
+            // 「记录」入口（历史右边）：会话输出日志（ADR-017）的开关与打开。
+            // 记录中亮绿（与 SFTP 开关同款状态色），开关状态在弹出的记录模态里切
+            let log_toggle = {
+                let view = cx.entity();
+                let logging = self.logging_enabled();
+                shell::status_chip(
+                    tokens,
+                    "session-log-entry",
+                    "记录",
+                    shell::ChipTone::Success,
+                    if logging {
+                        shell::ChipState::On
+                    } else {
+                        shell::ChipState::Off
+                    },
+                )
                 .on_click(move |_, window, cx| {
                     zhimaterm_base::ui::overlay::overlay_open(
                         Box::new(zhimaterm_recording::history::LoggingModal {
@@ -2239,298 +2481,48 @@ impl Render for TerminalView {
                         cx,
                     );
                 })
-                .child("记录")
-        });
+                .into_any_element()
+            };
 
-        // 转发状态入口（ADR-011/012）：配了规则或开了 agent 转发就有；有失败时标红
-        let forward_toggle = (!self.forward_states.is_empty() || self.forward_agent).then(|| {
-            let view = cx.entity();
-            let open = self.forward_open;
-            let any_failed = self.agent_forward_error.is_some()
-                || self
-                    .forward_states
-                    .iter()
-                    .any(|state| state.failed.is_some());
-            div()
-                .id("forward-toggle")
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .bg(gpui::rgb(if open { tokens.bg_warn } else { tokens.bg_row }))
-                .text_color(gpui::rgb(if any_failed || open {
-                    tokens.warn_strong
-                } else {
-                    tokens.fg_muted
-                }))
-                .text_size(ui_rems(10.))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |view, cx| {
-                        view.forward_open = !view.forward_open;
-                        cx.notify();
-                    });
-                })
-                .child("转发")
-        });
+            // 转发状态入口（ADR-011/012）：配了规则或开了 agent 转发就有。
+            // 开着是警示色（规则生效意味着流量在走）；关着但有规则下发失败
+            // 用 Attention（灰底警示字）提示去看，不装成开着
+            let forward_toggle =
+                (!self.forward_states.is_empty() || self.forward_agent).then(|| {
+                    let view = cx.entity();
+                    let open = self.forward_open;
+                    let any_failed = self.agent_forward_error.is_some()
+                        || self
+                            .forward_states
+                            .iter()
+                            .any(|state| state.failed.is_some());
+                    let state = if open {
+                        shell::ChipState::On
+                    } else if any_failed {
+                        shell::ChipState::Attention
+                    } else {
+                        shell::ChipState::Off
+                    };
+                    shell::status_chip(
+                        tokens,
+                        "forward-toggle",
+                        "转发",
+                        shell::ChipTone::Warn,
+                        state,
+                    )
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |view, cx| {
+                            view.forward_open = !view.forward_open;
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+                });
 
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(gpui::rgb(tokens.bg_root))
-            .text_color(gpui::rgb(tokens.fg))
-            // 只有终端网格持有焦点才带上 "Terminal" 上下文：复制/粘贴绑定只在终端生效，
-            // SFTP 面板的输入框获得焦点后，⌘C/⌘V 仍归输入框自己处理（见 input::app_key_bindings）
-            .key_context(if self.focus.is_focused(window) {
-                "ZhimaTerm Terminal"
-            } else {
-                "ZhimaTerm"
-            })
-            .track_focus(&self.focus)
-            .on_key_down(
-                cx.listener(|this, event, window, cx| this.handle_key_down(event, window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
-            .on_action(cx.listener(|this, _: &CopySelection, _, _| this.copy_selection()))
-            .on_action(cx.listener(|this, _: &PasteClipboard, _, cx| this.paste_clipboard(cx)))
-            // 终端与 SFTP 浮层/探针停靠面板的容器：SFTP 浮层根是 absolute，以这层
-            // （relative）为定位基准贴右缘悬浮；探针面板是 flex 子元素，展开时
-            // 终端让宽、PTY 按新列数重排（ADR-028）。
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .relative()
-                    .flex()
-                    .child(
-                        div()
-                            .id("terminal-surface")
-                            .relative()
-                            // 终端字体只属于网格区域：顶栏、底栏与 SFTP 面板这些
-                            // 界面文字从应用根继承界面字体（设置里可换）
-                            .font(font::terminal_font(&self.font.family))
-                            .text_size(px(self.font.size))
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .overflow_hidden()
-                            .bg(gpui::rgb(tokens.bg_terminal))
-                            .cursor(cursor)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event, window, cx| {
-                                    this.handle_mouse_down(event, window, cx);
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|this, event, window, cx| {
-                                    this.handle_mouse_down(event, window, cx);
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Middle,
-                                cx.listener(|this, event, window, cx| {
-                                    this.handle_mouse_down(event, window, cx);
-                                }),
-                            )
-                            .on_scroll(
-                                cx.listener(|this, event, _, cx| this.handle_scroll(event, cx)),
-                            )
-                            .child(
-                                canvas(
-                                    move |bounds, _, _| {
-                                        bounds_state.set(bounds);
-                                        // 判重键 = 命令载荷：纯像素变化（换字体）也算
-                                        let geometry =
-                                            grid::GridGeometry::from_bounds(bounds, metrics);
-                                        if resize_state.get() != geometry {
-                                            resize_state.set(geometry);
-                                            resize_session.resize(
-                                                geometry.columns,
-                                                geometry.lines,
-                                                geometry.cell_width,
-                                                geometry.cell_height,
-                                            );
-                                        }
-                                        bounds
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
-                            )
-                            .child(mouse_listeners)
-                            .child(zhimaterm_base::ui::canvas::input_handler_canvas(
-                                &self.focus,
-                                cx.entity(),
-                            ))
-                            // 网格立即模式绘制：绝对定位铺满终端区域，字形逐格钉位
-                            // （见 grid::GridPainter）。比逐行 div 少两个数量级的布局节点。
-                            // Arc 克隆一帧画面只有一次原子操作，克隆后 cx 即可变使用。
-                            .child(
-                                canvas(move |_, _, _| (), {
-                                    let view_entity = view_entity.clone();
-                                    move |bounds, _, window, cx| {
-                                        let Some(snapshot) = view_entity.read(cx).snapshot.clone()
-                                        else {
-                                            return;
-                                        };
-                                        painter.paint(bounds, &snapshot, window, cx);
-                                    }
-                                })
-                                .absolute()
-                                .inset_0(),
-                            )
-                            // 内核闪现：首个画面到达时中央亮 1 秒（本格后端身份，
-                            // ADR-050/051）。中央覆盖不占布局、不 resize；纯展示
-                            // 不设 hitbox，鼠标事件穿透给网格；过期由 is_some_and
-                            // 校验兜底，不依赖定时器精确。
-                            .children(
-                                self.backend_badge_until
-                                    .is_some_and(|until| Instant::now() < until)
-                                    .then(|| {
-                                        div()
-                                            .absolute()
-                                            .inset_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .px(px(8.))
-                                                    .py(px(2.))
-                                                    .rounded(px(4.))
-                                                    .bg(gpui::rgb(tokens.bg_row))
-                                                    .text_color(gpui::rgb(tokens.fg_faint))
-                                                    .text_size(ui_rems(10.))
-                                                    .child(self.backend.display_name()),
-                                            )
-                                    }),
-                            )
-                            // 网格中央提示（ADR-016）：只服务本地格——启动中、
-                            // 启动失败与写入错误；远端的连接中在底栏（带已等待秒数）
-                            .children(
-                                center_notice(
-                                    self.local,
-                                    self.state.data().exited,
-                                    self.snapshot.is_some(),
-                                    &self.state.data().status,
-                                )
-                                .map(|(text, hint)| render_center_notice(&tokens, text, hint)),
-                            )
-                            // 信任确认浮层必须挂在终端网格之后：后挂的子元素画在上层，
-                            // 否则定格画面（不透明背景）会把确认框盖住——用户看不见
-                            // 确认入口，连接就停在等待里，看起来像卡死
-                            .children(self.state.data().trust_request.clone().map(|request| {
-                                let app = cx.entity();
-                                shell::render_trust_prompt(&tokens, &request, move |accept, cx| {
-                                    app.update(cx, |view, cx| view.answer_trust(accept, cx));
-                                })
-                            }))
-                            // 连接期密码卡与信任卡同位同层：后挂的子元素画在定格画面之上。
-                            // Enter 确认与列表密码小框同约定（单行输入框放行回车，
-                            // 提交键由容器接）
-                            .children(self.password_prompt.clone().map(|input| {
-                                let app = cx.entity();
-                                let enter_input = input.clone();
-                                let enter =
-                                    cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                                        if event.keystroke.key == "enter" {
-                                            let text = enter_input.read(cx).text().to_owned();
-                                            this.answer_password(Some(text), cx);
-                                        }
-                                    });
-                                shell::render_password_prompt(
-                                    &tokens,
-                                    &input,
-                                    move |password, cx| {
-                                        app.update(cx, |view, cx| {
-                                            view.answer_password(password, cx)
-                                        });
-                                    },
-                                )
-                                .on_key_down(enter)
-                            })),
-                    )
-                    // 探针停靠面板（ADR-028）：展开时作为 flex 子元素贴右缘，
-                    // 终端让宽、PTY 按新列数重排；收起时不渲染
-                    .children(self.probe_panel.clone())
-                    // 转发状态浮层（ADR-011/012/038）：右上角小卡片，标题栏按钮开关；
-                    // 增删在浮层里完成，写回配置经外壳回调
-                    .children(self.forward_open.then(|| {
-                        let overlay_actions = OverlayActions {
-                            add: {
-                                let view = view_entity.clone();
-                                std::rc::Rc::new(move |_, window, cx| {
-                                    let open = view.read(cx).forward_hooks.open_form.clone();
-                                    open(view.clone(), window, cx);
-                                })
-                            },
-                            toggle_save: {
-                                let view = view_entity.clone();
-                                std::rc::Rc::new(move |_, _, cx| {
-                                    view.update(cx, |view, cx| {
-                                        view.forward_save = !view.forward_save;
-                                        cx.notify();
-                                    });
-                                })
-                            },
-                            remove: {
-                                let view = view_entity.clone();
-                                std::rc::Rc::new(move |id, window, cx| {
-                                    view.update(cx, |view, cx| {
-                                        view.remove_forward(id, cx);
-                                        view.notify_forwards_changed(cx);
-                                    });
-                                    let _ = window;
-                                })
-                            },
-                        };
-                        render_forward_overlay(
-                            &tokens,
-                            &self.forward_states,
-                            self.forward_agent,
-                            self.agent_forward_error.as_deref(),
-                            self.forward_hooks.saved_connection,
-                            self.forward_save,
-                            &overlay_actions,
-                        )
-                    }))
-                    .children(self.sftp_panel.clone())
-                    // 搜索条（ADR-015）：底部覆盖层，不挤占网格（PTY 不因开关无谓 resize）
-                    .children(self.search_open.then(|| {
-                        render_search_bar(
-                            self.search_input.as_ref(),
-                            self.search_regex,
-                            self.state.data().search_feedback.as_deref(),
-                            cx,
-                        )
-                    }))
-                    // 右键菜单（ADR-023）：遮罩与浮层最后挂载，盖在面板与搜索条之上
-                    .children(
-                        self.context_menu
-                            .and_then(|click| {
-                                let bounds = self.container_bounds.get();
-                                (bounds.size.width > px(0.)).then(|| {
-                                    render_context_menu(click - bounds.origin, bounds.size, cx)
-                                })
-                            })
-                            .into_iter()
-                            .flatten(),
-                    )
-                    // 容器 bounds 每帧写入：菜单的容器内定位与夹取按它换算
-                    .child(zhimaterm_base::ui::canvas::bounds_recorder(
-                        self.container_bounds.clone(),
-                    )),
-            )
-            // 统一状态底栏：常驻，按会话阶段显示连接状态/监控/结束原因；
-            // 右端是 SFTP 与转发两个开关（顶栏去掉后入口落在这里）。
-            // 只有远端格有状态底栏——本地默认 Shell 格的底栏只承载探针开关
-            // （见下方 render_probe_bar），WSL 本地格无底栏（ADR-016/028）
-            .children((!self.local).then(|| {
+            // 统一状态底栏：常驻，按会话阶段显示连接状态/监控/结束原因（ADR-016）
+            bar.push(
                 shell::render_status_bar(
-                    &tokens,
+                    tokens,
                     &{
                         if self.state.data().exited {
                             shell::StatusBar::Ended {
@@ -2572,21 +2564,54 @@ impl Render for TerminalView {
                     },
                     self.state.data().lang_status.as_ref(),
                     status_extras(
-                        sftp_toggle.map(|toggle| toggle.into_any_element()),
-                        history_toggle.map(|toggle| toggle.into_any_element()),
-                        log_toggle.map(|toggle| toggle.into_any_element()),
-                        forward_toggle.map(|toggle| toggle.into_any_element()),
+                        sftp_toggle,
+                        Some(history_toggle),
+                        Some(log_toggle),
+                        forward_toggle,
                     ),
                 )
-            }))
-            // 探针底栏（ADR-028）：本地默认 Shell 格的底栏，与远端底栏同位置，
-            // 右端一枚「进程」开关；WSL 格仍无底栏（ADR-016）
-            .children(self.probe_capable.then(|| self.render_probe_bar(cx)))
-            // 死会话的落焦锚点：零尺寸、不参与命中。track_focus 的元素会在
-            // 鼠标按下命中自己时自动聚焦并阻止祖先抢焦（gpui div 的行为），
-            // 锚点有面积就会抢走网格的点击聚焦、终端就打不了字；焦点派发
-            // 只需要它存在于派发树里（焦点路径的起点），不需要可见可点。
-            .child(div().absolute().size_0().track_focus(&self.dead_focus))
+                .into_any_element(),
+            );
+        }
+        // 探针底栏（ADR-028）：本地默认 Shell 格的底栏，与远端底栏同位置，
+        // 右端一枚「进程」开关；WSL 格仍无底栏（ADR-016）
+        if self.probe_capable {
+            bar.push(self.render_probe_bar(cx).into_any_element());
+        }
+        bar
+    }
+}
+
+/// 转发浮层的动作装配：三个回调都只捕获视图实体（不持借用），规则读写
+/// 与写回钩子全在 forward_hooks（ADR-038）。
+fn forward_overlay_actions(view: &Entity<TerminalView>) -> OverlayActions {
+    OverlayActions {
+        add: {
+            let view = view.clone();
+            std::rc::Rc::new(move |_, window, cx| {
+                let open = view.read(cx).forward_hooks.open_form.clone();
+                open(view.clone(), window, cx);
+            })
+        },
+        toggle_save: {
+            let view = view.clone();
+            std::rc::Rc::new(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.forward_save = !view.forward_save;
+                    cx.notify();
+                });
+            })
+        },
+        remove: {
+            let view = view.clone();
+            std::rc::Rc::new(move |id, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.remove_forward(id, cx);
+                    view.notify_forwards_changed(cx);
+                });
+                let _ = window;
+            })
+        },
     }
 }
 
