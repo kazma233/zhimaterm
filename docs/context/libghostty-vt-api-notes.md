@@ -2,7 +2,8 @@
 
 > **先读这段**：本文是 2026-11 把 ghostty 后端从 crates.io 封装切到仓内薄绑定
 > （ADR-051）时的一次性探索记录，**不是行为契约**——行为口径以 ADR-051 与契约
-> 测试为准。libghostty-vt 未到 1.0、C API 随 pin 变动；**扩充能力前必须二次确认**：
+> 测试为准。libghostty-vt 自 1.0（vt-1.0.0 tag）起承诺 C ABI 稳定，但小版本仍
+> 可能新增选项/枚举值；**扩充能力前必须二次确认**：
 > 对照当前 pin 的官方头文件（`vt.h` 与 `vt/` 子头，见 §1）与上游封装实现（§10），
 > 并用契约测试验证。标 ⚠️ 的条目只读过文档注释、未实测。
 
@@ -34,18 +35,18 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
 | terminal_set | TerminalOption | bool、usize、`ColorRgb`、`[ColorRgb; 256]`、`TerminalModeConfig`（模式设置）、回调函数指针、USERDATA |
 | render_state_get | RenderStateData | sized `RenderStateCursor`（光标全量）、迭代器句柄（ROW_ITERATOR 的出参就是句柄指针） |
 | render_state_row_get | RenderStateRowData | `ffi::Row`（u64）、迭代器句柄（CELLS） |
-| render_state_row_cells_get | RenderStateRowCellsData | `ffi::Cell`（u64）、sized `Style`、`GRAPHEMES_UTF8` 走 Buffer（§4） |
+| render_state_row_cells_get | RenderStateRowCellsData | `ffi::Cell`（u64）、`Style`（1.0 起固定 16 字节布局）、`GRAPHEMES_UTF8` 走 Buffer（§4） |
 | cell_get / row_get | CellData / RowData | bool（HAS_TEXT 等）、`CellWide::Type`（WIDE）、bool（WRAP） |
 
 ## 3. sized 结构协议
 
 - 一批结构**首字段 `size: usize`，必须写 `sizeof(Self)`**：C 侧以此做版本协商，
-  只读调用方已知的字段。用到：`GridRef`、`Style`（渲染路径）、`RenderStateCursor`、
-  `ClipboardWriteReply`。初始化用 `ghostty_vt_sys::sized!` 宏。
-- ⚠️ 不是所有结构都 sized：`DeviceAttributes`、`TerminalScrollbar`、
+  只读调用方已知的字段。用到：`RenderStateCursor`、`ClipboardWriteReply`。
+  初始化用 `ghostty_vt_sys::sized!` 宏。
+- 1.0 起 `GridRef`（node+x+y）与 `Style`（固定 16 字节）改为**冻结布局**，
+  无 size 字段，`default()` 初始化即可（头文件明说不会在未来版本改动）。
+- 不是所有结构都 sized：`DeviceAttributes`、`TerminalScrollbar`、
   `TerminalModeConfig`、`SizeReportSize`、`ColorRgb` 没有 size 字段。
-  grid_ref_style 的 `ffi::Style` 出参上游传 `default()` 而非 sized!（C 侧不校验
-  该路径），本仓跟随上游口径。
 - 出参读取模式：`MaybeUninit::zeroed()` + 成功返回后 `assume_init()`。
 
 ## 4. 两段式缓冲与结果码
@@ -84,7 +85,7 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
   下次 update 前有效。行/格迭代器是独立句柄，「装到快照/行」本身就是 tagged
   get：`render_state_get(ROW_ITERATOR, &mut 句柄)`、`row_get(CELLS, &mut 句柄)`。
 - 格迭代器 `select(x)` 定位列后 `raw_cell()/style()/graphemes_utf8()` 读该格。
-- `grid_ref` 是低频慢路径（vt.h 明说不能当渲染内核）：sized 出参，**下次终端
+- `grid_ref` 是低频慢路径（vt.h 明说不能当渲染内核）：固定布局出参，**下次终端
   更新即失效**（即取即用）。Point 坐标三态：Active（活动区，与回看偏移无关）、
   Viewport（视口）、History（历史区，y 从滚动区顶部数起）；vt.h 还有 Screen
   坐标（全屏含滚动区），本仓未用。
@@ -96,11 +97,12 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
   PREFIXES 表）。函数不改名（bindgen 会给 link_name 加 `\u{1}` 前缀，Apple
   链接器不支持，rust-bindgen#1221）。
 - 宏常量是 Var：`DA_*`（u16，conformance/机型/特性位）、`KITTY_KEY_*`（u8，
-  协议位）走 allowlist_var。
+  协议位）、`STYLE_UNDERLINE_SHIFT` 走 allowlist_var；`GHOSTTY_STYLE_FLAG_*`
+  是 cast 表达式，bindgen 不生成，位值在 vt.rs `style_flag` 按头文件位序展开。
 - `Mode` 是裸 u16：DEC 模式直接用编号，ANSI 模式第 15 位置 1（vt.rs 复刻上游
   编码；判定编码错，模式 set/get 会答错位）。
 
-## 8. 核心行为口径（pin 83fb956，实测或对照上游得出）
+## 8. 核心行为口径（pin vt-1.0.0，实测或对照上游得出）
 
 - mode 2027 字形簇定宽**默认开**（选 ghostty 的根因）；上游 `Terminal::new`
   还会显式 set_mode_default 加固一次，本仓 vt.rs 同。
@@ -130,6 +132,7 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
 
 - 上游安全封装：cargo registry 的 `ghostty-vt 0.8.0+ghostty.1.4.0-main.83fb956`
   （src/terminal.rs 1813 行、render.rs 872、screen.rs 458、style.rs 537）——
-  更新 pin 后此版本不再对应，须找新版本对照。
-- 本笔记基于 pin `83fb956`（ffi/ghostty-vt-sys/GHOSTTY.lock）。更新 pin 后
-  逐节复核，特别是 §2 的 tag 表与 §5 的回调表。
+  对应旧 pin 83fb956，尚无 vt-1.0.0 对应版本；对照时注意 1.0 的 ABI 改名
+  （formatter/tagged option 化、mode 宏重命名等）在该版本之后。
+- 本笔记基于 pin `vt-1.0.0`（ffi/ghostty-vt-sys/GHOSTTY.lock，commit 0fa3d57）。
+  更新 pin 后逐节复核，特别是 §2 的 tag 表与 §5 的回调表。

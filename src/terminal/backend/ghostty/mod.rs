@@ -435,12 +435,11 @@ fn optional_style_color(color: ffi::StyleColor) -> Option<CellColor> {
     }
 }
 
-fn map_cursor_shape(style: ffi::RenderStateCursorVisualStyle::Type) -> CursorKind {
+fn map_cursor_shape(style: ffi::CursorStyle::Type) -> CursorKind {
     match style {
-        ffi::RenderStateCursorVisualStyle::BAR => CursorKind::Beam,
-        ffi::RenderStateCursorVisualStyle::UNDERLINE => CursorKind::Underline,
-        ffi::RenderStateCursorVisualStyle::BLOCK
-        | ffi::RenderStateCursorVisualStyle::BLOCK_HOLLOW => CursorKind::Block,
+        ffi::CursorStyle::BAR => CursorKind::Beam,
+        ffi::CursorStyle::UNDERLINE => CursorKind::Underline,
+        ffi::CursorStyle::BLOCK | ffi::CursorStyle::BLOCK_HOLLOW => CursorKind::Block,
         _ => CursorKind::Block,
     }
 }
@@ -468,6 +467,8 @@ fn convert_cell_parts(
     let (width, spacer, leading_spacer) =
         wide_layout(vt::cell_wide(cell).unwrap_or(ffi::CellWide::NARROW));
     let (c, zerowidth) = split_cluster(text);
+    // 1.0 起样式属性打包进 flags 位掩码（见 vt::style_flag）
+    let flags = style.flags;
     GridCell {
         c,
         zerowidth,
@@ -476,13 +477,13 @@ fn convert_cell_parts(
         leading_spacer,
         fg: style_color(style.fg_color, NamedSlot::Foreground),
         bg: style_color(style.bg_color, NamedSlot::Background),
-        bold: style.bold,
-        dim: style.faint,
-        italic: style.italic,
-        inverse: style.inverse,
-        hidden: style.invisible,
-        strikethrough: style.strikethrough,
-        underline: underline_kind(style.underline),
+        bold: flags & vt::style_flag::BOLD != 0,
+        dim: flags & vt::style_flag::FAINT != 0,
+        italic: flags & vt::style_flag::ITALIC != 0,
+        inverse: flags & vt::style_flag::INVERSE != 0,
+        hidden: flags & vt::style_flag::INVISIBLE != 0,
+        strikethrough: flags & vt::style_flag::STRIKETHROUGH != 0,
+        underline: underline_kind(vt::style_flag::underline(flags)),
         underline_color: optional_style_color(style.underline_color),
         link,
     }

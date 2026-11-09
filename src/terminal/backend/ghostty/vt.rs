@@ -201,13 +201,18 @@ impl Terminal {
     pub(super) fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         let raw: ffi::TerminalScrollViewport = scroll.into();
         // SAFETY: 句柄独占；tagged union 按值传递。
-        unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_ptr(), raw) }
+        let result = unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_ptr(), raw) };
+        // 1.0 起返回 Result；失败仅 NULL 句柄或未知 tag，两者均不可达
+        // （tagged union 由本 enum 构造，绑定与库同源）。失败即绑定与库
+        // 错位，直接暴露。
+        assert_eq!(result, ffi::Result::SUCCESS, "scroll_viewport failed");
     }
 
     // ---------- 网格寻址（慢路径） ----------
 
     pub(super) fn grid_ref(&self, point: ffi::Point) -> VtResult<GridRef> {
-        let mut grid_ref = sized!(ffi::GridRef);
+        // 1.0 起 GridRef 是固定布局（node+x+y），不再是 size 协商结构
+        let mut grid_ref = ffi::GridRef::default();
         let result = unsafe {
             ffi::ghostty_terminal_grid_ref(self.inner.as_ptr(), point, &raw mut grid_ref)
         };
@@ -536,7 +541,8 @@ impl CellIterator {
     }
 
     pub(super) fn style(&self) -> VtResult<ffi::Style> {
-        let mut value = sized!(ffi::Style);
+        // Style 1.0 起固定 16 字节布局，无 size 字段
+        let mut value = ffi::Style::default();
         let result = unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.inner.as_ptr(),
@@ -952,13 +958,35 @@ pub(super) enum StyleColorRepr {
 /// （同一 sha256 pin），tag 集合封闭，实际不可达；上游此路会报
 /// InvalidValue 使整格按空白处理，这里简化为未设置色。
 pub(super) fn read_style_color(color: ffi::StyleColor) -> StyleColorRepr {
-    match color.tag {
+    // 1.0 起 tag 是裸 u8（不再是枚举字段），与 StyleColorTag 常量对齐比较
+    match u32::from(color.tag) {
         ffi::StyleColorTag::NONE => StyleColorRepr::None,
         // SAFETY: tag 为 PALETTE 时 union 活动字段是 palette
         ffi::StyleColorTag::PALETTE => StyleColorRepr::Palette(unsafe { color.value.palette }),
         // SAFETY: tag 为 RGB 时 union 活动字段是 rgb
         ffi::StyleColorTag::RGB => StyleColorRepr::Rgb(unsafe { color.value.rgb }),
         _ => StyleColorRepr::None,
+    }
+}
+
+/// `GhosttyStyle.flags` 的属性位（style.h：bit0-7 逐位属性、bit8-10 是
+/// GhosttySgrUnderline 值，位布局自 1.0 起冻结）。C 侧宏是 cast 表达式，
+/// bindgen 不生成，这里按头文件位序展开。
+pub(super) mod style_flag {
+    use super::ffi;
+
+    pub const BOLD: ffi::StyleFlags = 1 << 0;
+    pub const ITALIC: ffi::StyleFlags = 1 << 1;
+    pub const FAINT: ffi::StyleFlags = 1 << 2;
+    pub const INVERSE: ffi::StyleFlags = 1 << 4;
+    pub const INVISIBLE: ffi::StyleFlags = 1 << 5;
+    pub const STRIKETHROUGH: ffi::StyleFlags = 1 << 6;
+
+    /// 下划线值占 bit8-10（3 位，见 flags 文档表）。
+    pub fn underline(flags: ffi::StyleFlags) -> ffi::SgrUnderline::Type {
+        const SHIFT: ffi::StyleFlags = ffi::STYLE_UNDERLINE_SHIFT as ffi::StyleFlags;
+        const MASK: ffi::StyleFlags = 0x7 << SHIFT;
+        ((flags & MASK) >> SHIFT).into()
     }
 }
 
@@ -989,17 +1017,17 @@ mod tests {
     #[test]
     fn style_color_union_reads_by_tag() {
         let none = ffi::StyleColor {
-            tag: ffi::StyleColorTag::NONE,
+            tag: ffi::StyleColorTag::NONE as u8,
             value: ffi::StyleColorValue { palette: 200 },
         };
         assert_eq!(read_style_color(none), StyleColorRepr::None);
         let palette = ffi::StyleColor {
-            tag: ffi::StyleColorTag::PALETTE,
+            tag: ffi::StyleColorTag::PALETTE as u8,
             value: ffi::StyleColorValue { palette: 200 },
         };
         assert_eq!(read_style_color(palette), StyleColorRepr::Palette(200));
         let rgb = ffi::StyleColor {
-            tag: ffi::StyleColorTag::RGB,
+            tag: ffi::StyleColorTag::RGB as u8,
             value: ffi::StyleColorValue {
                 rgb: ffi::ColorRgb { r: 1, g: 2, b: 3 },
             },

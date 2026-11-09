@@ -101,12 +101,14 @@ const TYPES: &[&str] = &[
     "GhosttyPoint",
     "GhosttyStyle",
     "GhosttyStyleColor",
+    // 1.0 起 GhosttyStyleColor.tag 是裸 u8，枚举不再是字段依赖，显式放行
+    "GhosttyStyleColorTag",
     "GhosttySgrUnderline",
     // render state 路径
     "GhosttyRenderStateData",
     "GhosttyRenderStateRowData",
     "GhosttyRenderStateRowCellsData",
-    "GhosttyRenderStateCursorVisualStyle",
+    "GhosttyCursorStyle",
     "GhosttyRenderStateCursor",
     "GhosttyCell",
     "GhosttyCellData",
@@ -116,8 +118,15 @@ const TYPES: &[&str] = &[
 ];
 
 /// 直接引用的头文件宏常量（bindgen var）：DA 应答的 VT 级别/机型、
-/// kitty keyboard 协议位。
-const VARS: &[&str] = &["GHOSTTY_DA_.*", "GHOSTTY_KITTY_KEY_.*"];
+/// kitty keyboard 协议位、STYLE_UNDERLINE_SHIFT。GhosttyStyle 的 flags
+/// 位（1.0 起样式属性打包进位掩码）里只有 SHIFT 是纯字面量宏，能生成；
+/// FLAG_* / MASK / UNDERLINE 都是 cast 或函数式宏，bindgen 一律不生成，
+/// 位值在适配层 `vt.rs` 的 `style_flag` 按头文件位序手写。
+const VARS: &[&str] = &[
+    "GHOSTTY_DA_.*",
+    "GHOSTTY_KITTY_KEY_.*",
+    "GHOSTTY_STYLE_UNDERLINE_SHIFT",
+];
 
 fn main() {
     let manifest_dir =
@@ -191,7 +200,7 @@ const PREFIXES: &[(&str, &str)] = &[
     ("GhosttyTerminalOption", "GHOSTTY_TERMINAL_OPT"),
     (
         "GhosttyTerminalScrollViewportTag",
-        "GHOSTTY_SCROLL_VIEWPORT",
+        "GHOSTTY_TERMINAL_SCROLL_VIEWPORT",
     ),
     ("GhosttyStyleColorTag", "GHOSTTY_STYLE_COLOR"),
     ("GhosttyResult", "GHOSTTY_"),

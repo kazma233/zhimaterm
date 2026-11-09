@@ -246,8 +246,8 @@ fn download_failure(lock: &Lock, url: &str, error: &str) -> String {
          GHOSTTY_SOURCE_URL to a mirror of the tarball. The tarball is reproducible\n\
          from a Ghostty checkout with:\n\
          \n\
-         \x20 printf '{version}' > VERSION\n\
-         \x20 git archive --format=tgz --prefix={root}/ --add-file=VERSION \\\n\
+         \x20 printf '{version}' > LIB_VERSION\n\
+         \x20 git archive --format=tgz --prefix={root}/ --add-file=LIB_VERSION \\\n\
          \x20   --prefix={root}/ -o libghostty-vt-source.tar.gz {commit} \\\n\
          \x20   $(for d in images macos dist/doxygen dist/linux dist/macos dist/windows \\\n\
          \x20     flatpak snap po example test src/font/res src/crash/testdata \\\n\
@@ -265,7 +265,9 @@ fn build_tree(src: &Path, lock: &Lock, target: &str) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let zig = resolve_zig();
 
-    let version = fs::read_to_string(src.join("VERSION"))
+    // 源码包带 LIB_VERSION（checkout 没有，git 历史外才有版本），缺省回落
+    // 到 lock.version。
+    let version = fs::read_to_string(src.join("LIB_VERSION"))
         .map(|v| v.trim().to_owned())
         .unwrap_or_else(|_| lock.version.clone());
     let prefix = out_dir.join("zig-out");
