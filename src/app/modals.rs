@@ -173,7 +173,7 @@ impl ZhimaTermApp {
                 self.forwards_changed(target.as_ref(), cx);
             }
             Err(message) => {
-                self.mutate_forward_form(cx, |form| form.error = Some(message));
+                self.mutate_forward_form(cx, |form| form.set_error(Some(message)));
                 // 校验没过：焦点放到监听端口，用户接着改这个框
                 let focus = overlay_host(cx)
                     .read(cx)

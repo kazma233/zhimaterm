@@ -1,19 +1,22 @@
 //! 运行中新增转发规则的小表单（ADR-038）：浮层里点「＋ 规则」打开。
 //!
-//! 与设置表单同一物种：输入实体由表单自持，渲染经 [`Actions`] 回调回到外壳，
-//! 只采集规则，不碰会话（应用规则是外壳的职责）。ADR-044 起以 [`ForwardModal`]
-//! 接入统一浮层栈。规则落点经 [`ForwardTarget`] 能力接口注入——域只依赖这份
-//! 契约，不依赖具体会话视图类型（ADR-007 修订六）。
+//! 与设置表单同一物种：输入实体由表单自持（草稿本体在 `forward_draft`，
+//! 与连接表单的行内规则共用一份投影与校验），渲染经 [`Actions`] 回调回到
+//! 外壳，只采集规则，不碰会话（应用规则是外壳的职责）。ADR-044 起以
+//! [`ForwardModal`] 接入统一浮层栈。规则落点经 [`ForwardTarget`] 能力接口
+//! 注入——域只依赖这份契约，不依赖具体会话视图类型（ADR-007 修订六）。
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, Keystroke, Window, div, px};
+use gpui::{AnyElement, App, Keystroke, Window, div, px};
 
-use zhimaterm_base::ui::input::{self, TextInput};
+use zhimaterm_base::ui::input;
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView, Species};
 use zhimaterm_base::ui::{WindowAction, card, panel, ui_rems};
-use zhimaterm_session::{ForwardFlow, ForwardId, ForwardRule};
+use zhimaterm_session::{ForwardId, ForwardRule};
+
+use crate::forward_draft::{ForwardKind, ForwardRuleDraft};
 
 pub type AppAction = Rc<dyn Fn(&mut App)>;
 
@@ -36,131 +39,67 @@ pub struct Actions {
     pub toggle_bind: AppAction,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
-    Local,
-    Remote,
-    Socks,
-}
-
-impl Kind {
-    fn toggle(self) -> Self {
-        match self {
-            Self::Local => Self::Remote,
-            Self::Remote => Self::Socks,
-            Self::Socks => Self::Local,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Local => "本地转发",
-            Self::Remote => "远程转发",
-            Self::Socks => "SOCKS5",
-        }
-    }
-
-    /// 是否在本地监听（L 与 D 都有绑定地址选项）
-    fn binds_locally(self) -> bool {
-        !matches!(self, Self::Remote)
-    }
-}
-
+/// 运行中加规则的模态表单：一条共享草稿（GLOSSARY「转发规则草稿」）加
+/// 模态自己的错误位与焦点环——投影、校验、类型循环都在草稿里。
 pub struct ForwardForm {
-    kind: Kind,
-    all_interfaces: bool,
-    listen_port: Entity<TextInput>,
-    target_host: Entity<TextInput>,
-    target_port: Entity<TextInput>,
-    pub error: Option<String>,
+    pub(crate) draft: ForwardRuleDraft,
 }
 
 impl ForwardForm {
     pub fn new(font: gpui::Font, cx: &mut App) -> Self {
+        // 占位给示例值（连接表单的行内规则用位置语义当占位，见草稿构造）
         Self {
-            kind: Kind::Local,
-            all_interfaces: false,
-            listen_port: cx.new(|cx| TextInput::new(cx, "8080", false, font.clone())),
-            target_host: cx.new(|cx| TextInput::new(cx, "127.0.0.1", false, font.clone())),
-            target_port: cx.new(|cx| TextInput::new(cx, "5432", false, font)),
-            error: None,
+            draft: ForwardRuleDraft::new(
+                &font,
+                ForwardKind::Local,
+                false,
+                ("8080", ""),
+                ("127.0.0.1", ""),
+                ("5432", ""),
+                cx,
+            ),
         }
     }
 
     pub fn toggle_kind(&mut self) {
-        self.kind = self.kind.toggle();
+        self.draft.kind = self.draft.kind.toggle();
     }
 
     pub fn toggle_bind(&mut self) {
-        if self.kind.binds_locally() {
-            self.all_interfaces = !self.all_interfaces;
+        if self.draft.kind.binds_locally() {
+            self.draft.all_interfaces = !self.draft.all_interfaces;
         }
     }
 
-    /// 采集当前输入；不完整时返回给用户看的原因。
+    /// 采集当前输入；不完整时返回给用户看的原因（折算在草稿里）。
     pub fn rule(&self, id: ForwardId, cx: &App) -> Result<ForwardRule, String> {
-        let listen = parse_port(self.listen_port.read(cx).text(), "监听端口")?;
-        let bind_addr = if self.all_interfaces {
-            "0.0.0.0"
-        } else {
-            "127.0.0.1"
-        };
-        let flow = match self.kind {
-            Kind::Socks => ForwardFlow::Socks {
-                bind_addr: bind_addr.into(),
-                bind_port: listen,
-            },
-            Kind::Local | Kind::Remote => {
-                let target_port = parse_port(self.target_port.read(cx).text(), "目标端口")?;
-                let target_host = self.target_host.read(cx).text().trim().to_owned();
-                if target_host.is_empty() {
-                    return Err("请填写转发的目标主机".into());
-                }
-                if self.kind == Kind::Local {
-                    ForwardFlow::Local {
-                        bind_addr: bind_addr.into(),
-                        bind_port: listen,
-                        target_host,
-                        target_port,
-                    }
-                } else {
-                    ForwardFlow::Remote {
-                        remote_port: listen,
-                        target_host,
-                        target_port,
-                    }
-                }
-            }
-        };
-        Ok(ForwardRule { id, flow })
+        self.draft.rule(id, cx)
+    }
+
+    /// 应用失败的原因画在模态 footer；None = 清掉。
+    pub fn set_error(&mut self, error: Option<String>) {
+        self.draft.error = error;
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.draft.error.as_deref()
     }
 
     /// 表单当前焦点：应用失败时留给用户继续改监听端口。
     pub fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.listen_port.read(cx).focus_handle()
+        self.draft.listen_port.read(cx).focus_handle()
     }
 
     /// 表单里输入框的焦点环：按视觉顺序排（ADR-043）。模态内的 Tab 沿它移动，
     /// 走完一圈回到作用域根。SOCKS 没有目标行，目标框不在环里。
     pub fn focus_ring(&self, cx: &App) -> Vec<gpui::FocusHandle> {
-        let mut ring = vec![self.listen_port.read(cx).focus_handle()];
-        if self.kind != Kind::Socks {
-            ring.push(self.target_host.read(cx).focus_handle());
-            ring.push(self.target_port.read(cx).focus_handle());
+        let mut ring = vec![self.draft.listen_port.read(cx).focus_handle()];
+        if self.draft.kind != ForwardKind::Socks {
+            ring.push(self.draft.target_host.read(cx).focus_handle());
+            ring.push(self.draft.target_port.read(cx).focus_handle());
         }
         ring
     }
-}
-
-fn parse_port(text: &str, field: &str) -> Result<u16, String> {
-    let text = text.trim();
-    let port: u16 = text
-        .parse()
-        .map_err(|_| format!("{field}不是 1-65535 的数字：{text}"))?;
-    if port == 0 {
-        return Err(format!("{field} 不能为 0"));
-    }
-    Ok(port)
 }
 
 /// 新增转发规则模态（ADR-044 接入统一浮层栈）：表单自持输入，落点由外壳
@@ -201,15 +140,15 @@ impl ModalView for ForwardModal {
             .child(panel::chip(
                 &tokens,
                 "forward-form-kind",
-                form.kind.label(),
+                form.draft.kind.label(),
                 true,
                 {
                     let toggle = actions.toggle_kind.clone();
                     move |_, _, cx| toggle(cx)
                 },
             ));
-        if form.kind.binds_locally() {
-            let (label, risky) = if form.all_interfaces {
+        if form.draft.kind.binds_locally() {
+            let (label, risky) = if form.draft.all_interfaces {
                 ("对外网开放", true)
             } else {
                 ("仅本机", false)
@@ -220,7 +159,7 @@ impl ModalView for ForwardModal {
                     move |_, _, cx| toggle(cx)
                 }));
         }
-        listen_line = listen_line.child(div().w(px(96.)).child(form.listen_port.clone()));
+        listen_line = listen_line.child(div().w(px(96.)).child(form.draft.listen_port.clone()));
 
         let mut content = div()
             .flex()
@@ -240,7 +179,7 @@ impl ModalView for ForwardModal {
                     .border_1()
                     .border_color(gpui::rgb(tokens.border_divider))
                     .child(listen_line)
-                    .children((form.kind != Kind::Socks).then(|| {
+                    .children((form.draft.kind != ForwardKind::Socks).then(|| {
                         div()
                             .flex()
                             .items_center()
@@ -250,19 +189,19 @@ impl ModalView for ForwardModal {
                                 div()
                                     .flex_1()
                                     .min_w(px(80.))
-                                    .child(form.target_host.clone()),
+                                    .child(form.draft.target_host.clone()),
                             )
-                            .child(div().w(px(96.)).child(form.target_port.clone()))
+                            .child(div().w(px(96.)).child(form.draft.target_port.clone()))
                     })),
             )
             .child(input::field(
                 &tokens,
                 cx,
                 "监听端口（0–65535）",
-                &form.listen_port,
+                &form.draft.listen_port,
             ));
 
-        if form.kind == Kind::Socks {
+        if form.draft.kind == ForwardKind::Socks {
             content = content.child(card::label(
                 &tokens,
                 "SOCKS5（无认证）：客户端自带目标，域名由远端解析",
@@ -274,8 +213,7 @@ impl ModalView for ForwardModal {
     fn footer(&self, cx: &App) -> Option<AnyElement> {
         let tokens = zhimaterm_base::theme::tokens(cx);
         self.form
-            .error
-            .as_ref()
+            .error()
             .map(|error| panel::error_line(&tokens, error))
             .map(|line| line.into_any_element())
     }
@@ -319,5 +257,41 @@ impl ModalView for ForwardModal {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn font_for_test() -> gpui::Font {
+        zhimaterm_base::font::terminal_font("monospace")
+    }
+
+    #[gpui::test]
+    fn focus_ring_drops_targets_for_socks(cx: &mut gpui::TestAppContext) {
+        let mut form = cx.update(|cx| ForwardForm::new(font_for_test(), cx));
+        cx.update(|cx| {
+            assert_eq!(form.focus_ring(cx).len(), 3, "本地转发三框都在环里");
+        });
+        // L → R → D：切到 SOCKS 后目标框不在环里，再切回本地又回来
+        form.toggle_kind();
+        form.toggle_kind();
+        cx.update(|cx| {
+            assert_eq!(form.focus_ring(cx).len(), 1, "SOCKS 只有监听框");
+        });
+        form.toggle_kind();
+        cx.update(|cx| {
+            assert_eq!(form.focus_ring(cx).len(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn error_slot_round_trips_into_the_footer_source(cx: &mut gpui::TestAppContext) {
+        let mut form = cx.update(|cx| ForwardForm::new(font_for_test(), cx));
+        form.set_error(Some("监听端口不能为 0".into()));
+        assert_eq!(form.error(), Some("监听端口不能为 0"));
+        form.set_error(None);
+        assert_eq!(form.error(), None);
     }
 }

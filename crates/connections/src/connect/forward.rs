@@ -1,115 +1,16 @@
-//! 转发规则（ADR-011）：草稿模型、编辑动作与规则行渲染。
+//! 转发规则（ADR-011）：连接表单侧的编辑动作与规则行渲染。草稿本体
+//! （类型、输入框、投影与校验）在 [`crate::forward_draft`]，与运行中
+//! 加规则的模态共用一份；这里只保留连接表单自己的容器逻辑。
 
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Context, ElementId, Entity, Font, Window, div, px};
 
-use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::{panel, ui_rems};
 use zhimaterm_session::ForwardRule;
 
-use super::parse::parse_port;
+use crate::forward_draft::{ForwardKind, ForwardRuleDraft};
+
 use super::{ConnectForm, Field, FormError};
-
-/// 转发规则类型（ADR-011）：本地转发 / 远程转发。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum ForwardKind {
-    Local,
-    Remote,
-    Socks,
-}
-
-impl ForwardKind {
-    /// 循环切换转发类型（同一行的类型 chip 点击行为）：L → R → D → L。
-    fn toggle(self) -> Self {
-        match self {
-            Self::Local => Self::Remote,
-            Self::Remote => Self::Socks,
-            Self::Socks => Self::Local,
-        }
-    }
-}
-
-/// 一条转发规则的编辑草稿：三个窄输入框 + 类型与监听地址的开关。
-pub(super) struct ForwardRuleDraft {
-    pub(super) kind: ForwardKind,
-    /// 本地转发：是否监听全部网卡（默认只听 127.0.0.1，见 ADR-011）
-    pub(super) all_interfaces: bool,
-    pub(super) listen_port: Entity<TextInput>,
-    pub(super) target_host: Entity<TextInput>,
-    pub(super) target_port: Entity<TextInput>,
-    /// 这条规则的校验错误：画在规则盒子里，随编辑即时重算
-    pub(super) error: Option<String>,
-}
-
-impl ForwardRuleDraft {
-    /// 三个输入框都是空的：还没动笔的草稿，不预报错。
-    fn pristine(&self, cx: &App) -> bool {
-        self.listen_port.read(cx).text().trim().is_empty()
-            && self.target_host.read(cx).text().trim().is_empty()
-            && self.target_port.read(cx).text().trim().is_empty()
-    }
-
-    fn has_input(&self, id: gpui::EntityId) -> bool {
-        self.listen_port.entity_id() == id
-            || self.target_host.entity_id() == id
-            || self.target_port.entity_id() == id
-    }
-
-    /// 草稿当前值；输入不完整时返回 Err（原因给用户看）。
-    pub(super) fn rule(
-        &self,
-        id: zhimaterm_session::ForwardId,
-        cx: &App,
-    ) -> Result<ForwardRule, String> {
-        let listen = parse_port(
-            self.listen_port.read(cx).text(),
-            match self.kind {
-                ForwardKind::Local | ForwardKind::Socks => "本地端口",
-                ForwardKind::Remote => "远端端口",
-            },
-        )?;
-        let bind_addr = if self.all_interfaces {
-            "0.0.0.0"
-        } else {
-            "127.0.0.1"
-        };
-        // SOCKS 没有固定目标：目标由每条连接的握手请求决定
-        let flow = match self.kind {
-            ForwardKind::Socks => zhimaterm_session::ForwardFlow::Socks {
-                bind_addr: bind_addr.into(),
-                bind_port: listen,
-            },
-            ForwardKind::Local => {
-                let (target_host, target_port) = self.target(cx)?;
-                zhimaterm_session::ForwardFlow::Local {
-                    bind_addr: bind_addr.into(),
-                    bind_port: listen,
-                    target_host,
-                    target_port,
-                }
-            }
-            ForwardKind::Remote => {
-                let (target_host, target_port) = self.target(cx)?;
-                zhimaterm_session::ForwardFlow::Remote {
-                    remote_port: listen,
-                    target_host,
-                    target_port,
-                }
-            }
-        };
-        Ok(ForwardRule { id, flow })
-    }
-
-    /// 目标主机与端口（SOCKS 不使用）。
-    fn target(&self, cx: &App) -> Result<(String, u16), String> {
-        let target_port = parse_port(self.target_port.read(cx).text(), "目标端口")?;
-        let target_host = self.target_host.read(cx).text().trim().to_owned();
-        if target_host.is_empty() {
-            return Err("请填写转发的目标主机".into());
-        }
-        Ok((target_host, target_port))
-    }
-}
 
 /// 转发规则草稿的编辑动作（ADR-011）：一个枚举驱动四种编辑。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -166,8 +67,9 @@ impl ConnectForm {
         cx.notify();
     }
 
-    /// 建一条转发规则草稿：预填当前值。关联函数避免借用冲突：调用点正持有
-    /// `self.forwards` 的可变借用。
+    /// 建一条转发规则草稿：预填当前值，占位文案就是这一格的标签（规则行
+    /// 是"句法式"布局：前缀说明位置——监听 / 转发到——占位与它们对齐）。
+    /// 关联函数避免借用冲突：调用点正持有 `self.forwards` 的可变借用。
     pub(super) fn forward_draft(
         font: &Font,
         kind: ForwardKind,
@@ -177,22 +79,15 @@ impl ConnectForm {
         target_port: &str,
         cx: &mut Context<Self>,
     ) -> ForwardRuleDraft {
-        let make = |placeholder: &str, text: &str, cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                let mut input = TextInput::new(cx, placeholder, false, font.clone());
-                input.set_text(text, cx);
-                input
-            })
-        };
-        let draft = ForwardRuleDraft {
+        let draft = ForwardRuleDraft::new(
+            font,
             kind,
             all_interfaces,
-            // 规则行是"句法式"布局：前缀说明位置（监听 / 转发到），占位文案就是这一格的标签
-            listen_port: make("端口", listen, cx),
-            target_host: make("目标主机", target_host, cx),
-            target_port: make("端口", target_port, cx),
-            error: None,
-        };
+            ("端口", listen),
+            ("目标主机", target_host),
+            ("端口", target_port),
+            cx,
+        );
         // 三个输入框任一编辑都重算这条规则的错误；只记实体 id 不持引用，
         // 规则删掉后监听随之失效
         for input in [&draft.listen_port, &draft.target_host, &draft.target_port] {
@@ -238,11 +133,6 @@ pub(super) fn forward_rule_row(
             .child(text)
     };
 
-    let kind_label = match draft.kind {
-        ForwardKind::Local => "本地转发",
-        ForwardKind::Remote => "远程转发",
-        ForwardKind::Socks => "SOCKS5",
-    };
     let mut listen_line = div()
         .flex()
         .items_center()
@@ -251,7 +141,7 @@ pub(super) fn forward_rule_row(
         .child(panel::chip(
             tokens,
             ("forward-kind", index),
-            kind_label,
+            draft.kind.label(),
             true,
             {
                 let form = form.clone();

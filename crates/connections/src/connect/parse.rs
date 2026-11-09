@@ -1,20 +1,11 @@
-//! 连接表单的文本解析：端口、目标串（`[user@]host[:port]`）、字段合并与 `~` 展开。
-//! 纯函数，不接触表单与 gpui。
+//! 连接表单的文本解析：目标串（`[user@]host[:port]`）、字段合并与 `~` 展开。
+//! 纯函数，不接触表单与 gpui。端口解析在 `crate::forward_draft`（连接表单
+//! 与转发表单共用同一份）。
 
 use std::path::PathBuf;
 
 use super::TargetPart;
 
-pub(super) fn parse_port(text: &str, field: &str) -> Result<u16, String> {
-    let text = text.trim();
-    let port: u16 = text
-        .parse()
-        .map_err(|_| format!("{field}不是 1-65535 的数字：{text}"))?;
-    if port == 0 {
-        return Err(format!("{field} 不能为 0"));
-    }
-    Ok(port)
-}
 /// 主机字段里粘贴进来的目标串拆成三段：`[user@]host[:port]`。
 ///
 /// 允许粘贴是照 OpenSSH 的目标语法（`man ssh`：destination 写作 `[user@]hostname`
