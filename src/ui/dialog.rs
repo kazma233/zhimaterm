@@ -124,7 +124,7 @@ pub fn modal(dialog: Dialog, on_answer: OnAnswer) -> Box<dyn ModalView> {
 
 /// 呼出对话框：任意（非外壳）视图的事件回调里一行调用。
 pub fn open(dialog: Dialog, on_answer: OnAnswer, window: &mut Window, cx: &mut App) {
-    crate::app::overlay_open(modal(dialog, on_answer), window, cx);
+    crate::ui::overlay::overlay_open(modal(dialog, on_answer), window, cx);
 }
 
 struct DialogModal {
@@ -139,7 +139,7 @@ impl DialogModal {
         let input = self.dialog.input.clone();
         let on_answer = self.on_answer.clone();
         KeyHandling::Action(Rc::new(move |window, cx| {
-            crate::app::overlay_close_top(window, cx);
+            crate::ui::overlay::overlay_close_top(window, cx);
             on_answer(answer_of(confirmed, input.as_ref(), cx), window, cx);
         }))
     }
@@ -190,7 +190,7 @@ impl ModalView for DialogModal {
         let tokens = crate::theme::tokens(cx);
         let dispatch = |handling: KeyHandling| {
             move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                crate::app::overlay_dispatch(handling.clone(), window, cx)
+                crate::ui::overlay::overlay_dispatch(handling.clone(), window, cx)
             }
         };
         let confirm_button = if self.dialog.danger {

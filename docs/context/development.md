@@ -49,7 +49,9 @@ src/input.rs                   输入提取与语义类型：KeyInput、鼠标�
 src/sftp.rs                    SFTP 协议：SftpHandle 命令句柄、任务事件流、远端条目模型
 src/ui/                        自己写的 UI 组件（与终端无关，可被别处直接复用）；human_bytes/human_rate 是底栏与探针面板共用的字节/速率展示口径
 src/ui/input/                  文本输入组件：调色板、表单行助手（field，错误贴标签）与模块组装；core.rs 是编辑核心，ime.rs 是 IME 组合区状态机
-src/ui/overlay.rs              统一浮层栈：全窗口模态的唯一归属，栈序即 z 序（ADR-043/044）
+src/ui/overlay.rs              统一浮层栈：全窗口模态的唯一归属，栈序即 z 序（ADR-043/044）；
+                               栈实体挂窗口级 Global，overlay_open/close_top/dispatch 原语
+                               与入栈钩子（跨所有者互斥）都在这里（ADR-044 修订）
 src/ui/dialog.rs               通用确认/输入/密码对话框（ADR-044/048）
 src/ui/card.rs / panel.rs / menu.rs / select.rs / dock.rs   卡片四区、模态遮罩与按钮、右键菜单、收起式下拉、右缘停靠面板外壳
 src/ui/canvas.rs               组件底座：鼠标监听、输入法处理器、bounds 记录
@@ -113,7 +115,9 @@ src/views/shell.rs             外壳框架部件：状态底栏、会话栏、�
 
 ── 外壳 ──
 src/main.rs                    入口：开窗、应用菜单（⌘Q 退出）与退出策略
-src/app.rs                     应用外壳：左侧会话栏、标签与格的创建/分割/切换/关闭、窗口标题；全体格扇出收成 views() 单点（ADR-007 修订二）
+src/app.rs                     应用外壳：左侧会话栏、标签与格的创建/分割/切换/关闭、窗口标题；
+                               全体格扇出收成 views() 单点（ADR-007 修订二）；浮层栈的消费方
+                               （渲染装配、栈顶读取、入栈互斥钩子），栈服务在 ui::overlay
 
 ── 探针与测试 ──
 src/bin/                       探针二进制：pty_probe（Windows ConPTY e2e）、ssh_sftp_probe（SSH/SFTP 非阻塞探针）

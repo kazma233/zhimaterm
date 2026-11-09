@@ -10,12 +10,13 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, Keystroke, MouseButton, Window, div, px};
 
-use crate::app::{overlay_dispatch, update_app};
+use crate::app::update_app;
 use crate::session::{LangStatus, MonitorSample, TrustRequest};
 use crate::theme::UiTokens;
 use crate::ui::WindowAction;
 use crate::ui::input::TextInput;
 use crate::ui::overlay::KeyHandling;
+use crate::ui::overlay::overlay_dispatch;
 use crate::ui::panel;
 use crate::ui::ui_rems;
 use crate::ui::{human_bytes, human_rate};
@@ -438,7 +439,7 @@ impl crate::ui::overlay::ModalView for ShortcutsModal {
                     "shortcuts-close",
                     "关闭",
                     Some("esc"),
-                    |_, window, cx| crate::app::overlay_close_top(window, cx),
+                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),
@@ -612,7 +613,7 @@ impl crate::ui::overlay::ModalView for WslModal {
                     "wsl-cancel",
                     "取消",
                     Some("esc"),
-                    |_, window, cx| crate::app::overlay_close_top(window, cx),
+                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),

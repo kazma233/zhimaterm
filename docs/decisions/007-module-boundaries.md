@@ -156,3 +156,17 @@ views::panes` 的布局格式归属。历史 ADR 与文档中的 `src/pty`、`sr
 经 AppRoot global 写应用实体——下沉为窗口级服务需同步修订 ADR-043/044，属
 独立重构而非归位。`ui/terminal → theme` 的 token 定位同留阶段二（appearance
 归组时一并处理）。
+
+## 修订（2026-11-09，三）：浮层栈下沉完成
+
+上一条修订里「仍未修」的浮层栈项已落地，取代该段：栈状态从应用实体移到
+窗口级 Global（`OverlayRoot`），`overlay_open`/`overlay_close_top`/
+`overlay_dispatch` 原语住在 `ui::overlay`，`ui::dialog` 不再依赖 `crate::app`；
+入栈互斥经 `overlay_on_open` 钩子回锚定浮层的所有者（app）执行。详见
+ADR-044 2026-11-09 修订。app 的 `overlay_*` 方法保留为薄转发，栈渲染装配与
+栈顶读取经 `overlay_host(cx)`。
+
+**依赖核对结果**：`ui`、`recording`、`local`、`ssh` 均不再引用 `crate::app`；
+`views/*` 仅 `views/shell` 保留一处 `update_app`（WSL 选择后的开会话编排，
+属 ADR-044 决策 3 保留的回壳通道）。`ui`/`terminal → theme` 的 token 定位
+仍留阶段二（appearance 归组时一并处理）。

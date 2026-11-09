@@ -215,3 +215,30 @@ SFTP 面板重新加入**进行中任务区**——每条任务两行，任务�
 进度文本在下（树传输经进度事件带出正在处理的文件名）；取消链路此前已实现但
 无 UI 入口。已结束操作的预览与「操作历史 N」入口不回补：历史入口仍在底栏
 「历史」按钮，未读高亮语义不变。
+
+## 修订（2026-11-09）：栈状态下沉为窗口级服务
+
+决策 3 的「状态住 app、Global 只放应用实体句柄」被取代：`ui::dialog`
+（叶子组件）、`views/terminal_view`、`views/shell`、`recording/history`
+都要打开/关闭浮层，而它们的调用方向都经过 `crate::app`——叶子层反过来
+依赖外壳，是依赖图上的结构性反向。栈本身已住在 `ui::overlay`
+（决策 1 不变），只是状态位置与呼出通道放错了层。
+
+新归属：
+
+- 栈实体 `Entity<OverlayHost>` 挂窗口级 Global（`OverlayRoot`），应用启动
+  （单窗口）时 `overlay_init` 一次；测试环境各自初始化。
+- `overlay_open` / `overlay_close_top` / `overlay_dispatch` 原语在
+  `ui::overlay`，任意层直接调用，不再绕应用实体。写入单点仍是
+  `OverlayHost::open / close_top / drop_top`，原子边界不变。
+- 跨所有者的入栈互斥（主题下拉与侧栏右键菜单的「点外部收起」）经
+  `overlay_on_open` 钩子回各自所有者执行：钩子在每次入栈前广播，状态仍归
+  app，栈服务不感知锚定浮层的存在。行为与决策 3 时期一致。外壳自身的打开
+  路径走 `overlay_open_without_hooks` 并直接收起锚定浮层——它正处在本实体的
+  update 里，钩子回壳 update 会嵌套同一实体。
+- `crate::app::update_app` 保留为「编排动作回壳执行」通道（如 WSL 发行版
+  选择的开会话）：这类动作改的是应用状态，不属于栈服务。app 的
+  `overlay_open/close_top/dispatch` 方法退化为薄转发（内部调用点多，保留
+  单点名字），栈的渲染装配与栈顶读取经 `overlay_host(cx)` 消费。
+- 焦点语义（ADR-043）不变：入栈记打开前持有者、`close_top` 归还、
+  `drop_top` 不归还，仍由 `OverlayHost` 一次完成。

@@ -32,7 +32,7 @@ use crate::theme::picker::ThemePicker;
 use crate::ui::WindowAction;
 use crate::ui::dialog::{self, Dialog, DialogAnswer};
 use crate::ui::menu;
-use crate::ui::overlay::{KeyHandling, ModalView, OverlayHost};
+use crate::ui::overlay::{KeyHandling, ModalView, overlay_host};
 use crate::ui::{ACTION_ENTRY_HEIGHT, panel, ui_rems, vertical_divider};
 use crate::views::panes::{self, PaneTree};
 use crate::views::shell::{self, CloseTarget};
@@ -149,9 +149,6 @@ pub struct ZhimaTermApp {
     /// （忘掉/保存后列表要刷新），render 发生在本实体的 update 里，读同实体
     /// 会重入 panic——数据归属仍是这里，模态只读渲染。
     saved: Entity<SavedSources>,
-    /// 全窗口浮层栈（ADR-044）：业务模态与确认对话框的唯一归属，栈序即 z 序，
-    /// 焦点每层独立借还。呼出通道与键裁决经本文件的自由函数（`overlay_open` 等）。
-    overlay: OverlayHost,
     /// 主题选择器：开合状态与浮层锚点，渲染在 theme::picker（ADR-027）。
     /// 点击项切换但不收起，收起只由点击下拉之外触发——连续点几项比对
     /// 观感是主要用法。不属于模态：打开任何模态时收起它（等价「点外部」）。
@@ -173,29 +170,12 @@ pub struct ZhimaTermApp {
     workspace_error: Option<String>,
 }
 
-/// 浮层呼出通道（ADR-044 决策 3）：Global 只放应用实体句柄——浮层状态住
-/// 应用（唯一所有者），任意视图的事件回调经 `overlay_open` 等自由函数呼出
-/// 或回壳执行编排动作，写入全部收口在 [`ZhimaTermApp::overlay_open`] 一系。
+/// 编排动作回壳通道（ADR-044 决策 3 的回壳部分）：Global 只放应用实体句柄，
+/// 深层视图的编排动作（如 WSL 发行版选择的开会话）经 `update_app` 回壳执行。
+/// 浮层栈的呼出/关闭/键派发不在这里——栈是窗口级服务，原语在
+/// `ui::overlay`（ADR-044 修订），本实体只是栈的消费方。
 pub(crate) struct AppRoot(pub Entity<ZhimaTermApp>);
 impl gpui::Global for AppRoot {}
-
-/// 任意视图呼出浮层（ADR-044）。
-pub(crate) fn overlay_open(view: Box<dyn ModalView>, window: &mut Window, cx: &mut App) {
-    let root = cx.global::<AppRoot>().0.clone();
-    root.update(cx, |app, cx| app.overlay_open(view, window, cx));
-}
-
-/// 任意视图关掉栈顶浮层（焦点按栈层记录归还）。
-pub(crate) fn overlay_close_top(window: &mut Window, cx: &mut App) {
-    let root = cx.global::<AppRoot>().0.clone();
-    root.update(cx, |app, cx| app.overlay_close_top(window, cx));
-}
-
-/// 派发一层的键裁决/遮罩点击语义（键盘、遮罩、按钮共用同一通道）。
-pub(crate) fn overlay_dispatch(handling: KeyHandling, window: &mut Window, cx: &mut App) {
-    let root = cx.global::<AppRoot>().0.clone();
-    root.update(cx, |app, cx| app.overlay_dispatch(handling, window, cx));
-}
 
 /// 深层视图的编排动作回壳执行（如 WSL 发行版选择的开会话）。
 pub(crate) fn update_app<R>(
@@ -273,7 +253,6 @@ impl ZhimaTermApp {
                 store: saved_store,
                 error: saved_error,
             }),
-            overlay: OverlayHost::new(),
             theme_picker: ThemePicker::new(),
             #[cfg(windows)]
             wsl_entry_visible: !crate::local::wsl::list_distros().is_empty(),
@@ -283,7 +262,23 @@ impl ZhimaTermApp {
             layout_save_scheduled: false,
             workspace_error,
         };
-        // 浮层呼出通道（ADR-044）：任意视图经全局句柄呼出模态；状态仍归本实体
+        // 浮层栈（ADR-044 修订）建在窗口级 Global：任意层经 `ui::overlay` 的
+        // 原语呼出，本实体只是栈的消费方（读栈顶、装配渲染）。
+        crate::ui::overlay::overlay_init(cx);
+        // 入栈互斥（ADR-044 单点写入的联动）：任何层入栈都收起锚定浮层
+        // （主题下拉 + 侧栏右键菜单），等价两者的「点外部收起」。钩子经
+        // AppRoot 回到本实体执行——anchored 状态的所有者在这里。
+        crate::ui::overlay::overlay_on_open(
+            Rc::new(|_window, cx| {
+                let root = cx.global::<AppRoot>().0.clone();
+                root.update(cx, |app, cx| {
+                    app.dismiss_anchored();
+                    cx.notify();
+                });
+            }),
+            cx,
+        );
+        // 深层视图的编排动作回壳执行（如 WSL 发行版选择的开会话）
         cx.set_global(AppRoot(cx.entity()));
         // 布局恢复（ADR-037）：只恢复本地格，SSH 格在保存时已被裁掉。
         // 没有可恢复的标签时照旧开一个本地会话，窗口不会留成空的。
@@ -869,7 +864,11 @@ impl ZhimaTermApp {
     ) {
         // 出栈不归还焦点：关闭路径自己落焦点（丢掉打开前的持有者是对的——
         // 那个会话马上就要没了）
-        self.overlay.drop_top();
+        crate::ui::overlay::overlay_host(cx).update(cx, |host, cx| {
+            if host.drop_top() {
+                cx.notify();
+            }
+        });
         match target {
             CloseTarget::Pane { tab, pane } => self.close_pane(tab, pane, window, cx),
             CloseTarget::Tab(index) => self.close_session(index, window, cx),
@@ -991,8 +990,12 @@ impl ZhimaTermApp {
         self.sidebar_menu = None;
     }
 
-    /// 入栈一层（ADR-044 单点写入）：任何层入栈都收起主题下拉与侧栏右键菜单
-    /// （等价两者的「点外部收起」互斥），焦点交接与叠放规则在 [`OverlayHost::open`]。
+    /// 入栈一层（ADR-044 单点写入）：锚定浮层的互斥收起在本实体直接执行，
+    /// 焦点交接与叠放规则在 [`OverlayHost::open`]。
+    ///
+    /// 走不广播钩子的入口：栈服务的入栈钩子会 update 本实体，而这里正处在
+    /// 自身的 update 中，嵌套 update 同一实体会 panic。外部调用方（叶子组件、
+    /// 各视图）不经本方法，它们经钩子回到这里收起锚定浮层。
     fn overlay_open(
         &mut self,
         view: Box<dyn ModalView>,
@@ -1000,48 +1003,38 @@ impl ZhimaTermApp {
         cx: &mut Context<Self>,
     ) {
         self.dismiss_anchored();
-        self.overlay.open(view, window, cx);
-        cx.notify();
+        crate::ui::overlay::overlay_open_without_hooks(view, window, cx);
     }
 
     /// 出栈栈顶并归还焦点（关闭路径统一走这里，ADR-043 归还单点）。
     fn overlay_close_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.overlay.close_top(window, cx) {
-            cx.notify();
-        }
+        crate::ui::overlay::overlay_close_top(window, cx);
     }
 
     /// 执行一层给出的键裁决或遮罩点击语义（键盘、遮罩、按钮共用同一通道）。
-    /// Action 闭包多经 listener 包装（回调内对本实体再 update），而键盘路径
-    /// 已在本实体的 key_down listener（update）里——同步或 defer_in 执行都会
-    /// 嵌套 update 同一实体（defer_in 的回调跑在实体的 update 内，同样算嵌
-    /// 套）。推迟到下一帧：回调在 run loop 里执行，不在任何实体的 update 内，
-    /// 闭包里的 update 是合法的单层；对用户动作延迟一帧不可感。
+    /// Action 推迟到下一帧执行的原因与约束见 [`crate::ui::overlay::overlay_dispatch`]。
     fn overlay_dispatch(
         &mut self,
         handling: KeyHandling,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match handling {
-            KeyHandling::None => {}
-            KeyHandling::Close => self.overlay_close_top(window, cx),
-            KeyHandling::Action(action) => {
-                window.on_next_frame(move |window, cx| action(window, cx));
-            }
-        }
+        crate::ui::overlay::overlay_dispatch(handling, window, cx);
     }
 
     /// 栈顶模态的输入框焦点环：按视觉顺序排的输入框句柄。模态没有输入框
     /// 时是空环（快捷键参考、WSL 选择）。没有浮层时 None。
     fn modal_focus_ring(&self, cx: &App) -> Option<Vec<FocusHandle>> {
-        self.overlay.top_view().map(|view| view.focus_ring(cx))
+        overlay_host(cx)
+            .read(cx)
+            .top_view()
+            .map(|view| view.focus_ring(cx))
     }
 
     /// 栈顶浮层内的 Tab / ⇧Tab：焦点沿焦点环走一圈（作用域根 → 各输入框 →
     /// 回到作用域根）。没有浮层时不拦，Tab 仍发给终端里的前台程序。
     fn move_modal_focus(&mut self, backward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(scope) = self.overlay.top_scope().cloned() else {
+        let Some(scope) = overlay_host(cx).read(cx).top_scope().cloned() else {
             return;
         };
         let Some(ring) = self.modal_focus_ring(cx) else {
@@ -1062,59 +1055,67 @@ impl ZhimaTermApp {
     ///
     /// 这个查找兼作存活守卫：模态关闭后迟到的动作查不到表单即 no-op。
     /// 不要改成闭包捕获表单实体——那会让迟到动作写进已关闭的模态。
-    fn connect_form(&self) -> Option<&Entity<ConnectForm>> {
-        self.overlay
+    /// 返回实体句柄（克隆）而不是引用：调用方随后还要 update 表单，
+    /// 引用会把 cx 的借用焊死。
+    fn connect_form(&self, cx: &App) -> Option<Entity<ConnectForm>> {
+        overlay_host(cx)
+            .read(cx)
             .top_view()?
             .as_any()
             .downcast_ref::<ConnectModal>()
-            .map(|modal| &modal.form)
+            .map(|modal| modal.form.clone())
     }
 
     /// 切换连接弹窗的视图（ADR-048）：列表 ↔ 编辑。切完焦点回作用域根——
     /// 上一视图里的输入框已不在树上，不能让焦点留在看不见的框里。
     fn set_connect_view(&mut self, view: ConnectView, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(modal) = self
-            .overlay
-            .top_view_mut()
-            .and_then(|view| view.as_any_mut().downcast_mut::<ConnectModal>())
-        else {
-            return;
-        };
-        modal.view = view;
-        if let Some(scope) = self.overlay.top_scope().cloned() {
-            window.focus(&scope, cx);
-        }
-        cx.notify();
+        let host = overlay_host(cx);
+        host.update(cx, |host, cx| {
+            let Some(modal) = host
+                .top_view_mut()
+                .and_then(|view| view.as_any_mut().downcast_mut::<ConnectModal>())
+            else {
+                return;
+            };
+            modal.view = view;
+            if let Some(scope) = host.top_scope().cloned() {
+                window.focus(&scope, cx);
+            }
+            cx.notify();
+        });
     }
 
     /// 栈顶的设置表单（栈顶是设置模态时才有）。同 [`Self::connect_form`]：
-    /// 查找兼作存活守卫。
-    fn settings_form(&self) -> Option<&Entity<SettingsForm>> {
-        self.overlay
+    /// 查找兼作存活守卫，返回实体句柄。
+    fn settings_form(&self, cx: &App) -> Option<Entity<SettingsForm>> {
+        overlay_host(cx)
+            .read(cx)
             .top_view()?
             .as_any()
             .downcast_ref::<SettingsModal>()
-            .map(|modal| &modal.form)
+            .map(|modal| modal.form.clone())
     }
 
-    fn forward_form_mut(&mut self) -> Option<&mut crate::ssh::forward_form::ForwardForm> {
-        let view = self.overlay.top_view_mut()?;
-        view.as_any_mut()
-            .downcast_mut::<crate::ssh::forward_form::ForwardModal>()
-            .map(|modal| &mut modal.form)
-    }
-
-    /// 栈顶的转发表单与目标视图（栈顶是转发模态时才有）。
-    fn forward_modal(
+    /// 栈顶转发表单存在时对它做一次修改（toggle_kind 等）：修改在栈实体的
+    /// update 闭包内完成——跨 update 边界拿不到栈顶的可变引用。
+    fn mutate_forward_form(
         &mut self,
-    ) -> Option<(
-        &crate::ssh::forward_form::ForwardForm,
-        &Entity<TerminalView>,
-    )> {
-        let view = self.overlay.top_view_mut()?;
-        view.as_any_mut()
-            .downcast_mut::<crate::ssh::forward_form::ForwardModal>()
-            .map(|modal| (&modal.form, &modal.view))
+        cx: &mut Context<Self>,
+        mutate: impl FnOnce(&mut crate::ssh::forward_form::ForwardForm),
+    ) {
+        overlay_host(cx).update(cx, |host, cx| {
+            if let Some(form) = host
+                .top_view_mut()
+                .and_then(|view| {
+                    view.as_any_mut()
+                        .downcast_mut::<crate::ssh::forward_form::ForwardModal>()
+                })
+                .map(|modal| &mut modal.form)
+            {
+                mutate(form);
+                cx.notify();
+            }
+        });
     }
 
     /// 打开「添加转发规则」表单（ADR-038）：目标视图由点按钮的会话自带，
@@ -1139,20 +1140,25 @@ impl ZhimaTermApp {
     /// 校验并应用转发表单：id 接在该会话现有规则之后，下发到 worker 后
     /// 按「同时保存到连接」写回配置。
     fn apply_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (view, rule) = match self.forward_modal() {
-            Some((form, view)) => {
-                let next_id = view
-                    .read(cx)
-                    .forwards()
-                    .iter()
-                    .map(|rule| rule.id)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                let rule = form.rule(next_id, cx);
-                (view.clone(), rule)
-            }
-            None => return,
+        let host = overlay_host(cx);
+        let (view, rule) = {
+            let Some(modal) = host.read(cx).top_view().and_then(|view| {
+                view.as_any()
+                    .downcast_ref::<crate::ssh::forward_form::ForwardModal>()
+            }) else {
+                return;
+            };
+            let next_id = modal
+                .view
+                .read(cx)
+                .forwards()
+                .iter()
+                .map(|rule| rule.id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let rule = modal.form.rule(next_id, cx);
+            (modal.view.clone(), rule)
         };
         match rule {
             Ok(rule) => {
@@ -1161,12 +1167,17 @@ impl ZhimaTermApp {
                 self.forwards_changed(view, cx);
             }
             Err(message) => {
-                if let Some(form) = self.forward_form_mut() {
-                    form.error = Some(message);
-                }
+                self.mutate_forward_form(cx, |form| form.error = Some(message));
                 // 校验没过：焦点放到监听端口，用户接着改这个框
-                if let Some((form, _)) = self.forward_modal() {
-                    let focus = form.focus_handle(cx);
+                let focus = overlay_host(cx)
+                    .read(cx)
+                    .top_view()
+                    .and_then(|view| {
+                        view.as_any()
+                            .downcast_ref::<crate::ssh::forward_form::ForwardModal>()
+                    })
+                    .map(|modal| modal.form.focus_handle(cx));
+                if let Some(focus) = focus {
                     window.focus(&focus, cx);
                 }
                 cx.notify();
@@ -1283,7 +1294,7 @@ impl ZhimaTermApp {
     /// 主机字段粘贴串的展开（拆进「用户」「端口」）已由表单持有；失焦、回车提交
     /// 三个入口都从这里走（见 ADR-026）。
     fn expand_host_form(&mut self, cx: &mut Context<Self>) -> Result<(), connect::FormError> {
-        let Some(form) = self.connect_form() else {
+        let Some(form) = self.connect_form(cx) else {
             return Ok(());
         };
         form.update(cx, |form, cx| form.expand_host(cx))
@@ -1292,7 +1303,7 @@ impl ZhimaTermApp {
     /// 私钥文件的原生文件选择器：选中即把路径写回输入框（这一步不算"改连接"，
     /// 与手输路径等价，改动判定仍由基线比较负责）。
     fn pick_key_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.connect_form().is_none() {
+        if self.connect_form(cx).is_none() {
             return;
         }
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -1315,7 +1326,7 @@ impl ZhimaTermApp {
             let text = path.to_string_lossy().into_owned();
             // 期间表单可能已被关掉或换成另一条连接：拿不到表单就什么都不做
             let _ = this.update(cx, |app, cx| {
-                if let Some(form) = app.connect_form() {
+                if let Some(form) = app.connect_form(cx) {
                     form.update(cx, |form, cx| form.set_key_path(&text, cx));
                 }
             });
@@ -1325,7 +1336,7 @@ impl ZhimaTermApp {
 
     /// 表单错误统一显示在表单底部，不弹窗。
     fn fail_settings(&mut self, message: String, cx: &mut Context<Self>) {
-        if let Some(form) = self.settings_form() {
+        if let Some(form) = self.settings_form(cx) {
             form.update(cx, |form, cx| form.fail(message, cx));
         }
         cx.notify();
@@ -1334,7 +1345,7 @@ impl ZhimaTermApp {
     /// 应用字体设置：先换所有会话的终端字体与界面字体/字号，再尽力落盘。
     /// 落盘失败不回滚界面——设置不持久化只影响重启后的体验，明确报错即可。
     fn apply_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self.settings_form() else {
+        let Some(form) = self.settings_form(cx) else {
             return;
         };
         let edited = match form.update(cx, |form, cx| form.edited_settings(cx)) {
@@ -1429,7 +1440,7 @@ impl ZhimaTermApp {
     /// （回列表 / 连接）是否继续。保存失败就不往下走：静默跳过会让人以为已经
     /// 存好了，下次找不到才发现。
     fn persist_form(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(form) = self.connect_form().cloned() else {
+        let Some(form) = self.connect_form(cx) else {
             return false;
         };
         // 旧条目按编辑 id 取（ADR-018 修订）：新建保存后表单已转入编辑态，
@@ -1571,7 +1582,7 @@ impl ZhimaTermApp {
         let Some(saved) = self.saved_at(index, cx) else {
             return;
         };
-        let Some(form) = self.connect_form().cloned() else {
+        let Some(form) = self.connect_form(cx) else {
             return;
         };
         // 载入（含转发草稿重建与钥匙串回填）都在表单里，见 ADR-026
@@ -1582,7 +1593,7 @@ impl ZhimaTermApp {
 
     /// 列表底栏「新建连接」：空白表单进编辑视图，焦点落主机框。
     fn new_connect_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self.connect_form().cloned() else {
+        let Some(form) = self.connect_form(cx) else {
             return;
         };
         form.update(cx, |form, cx| form.reset_new(cx));
@@ -1628,7 +1639,7 @@ impl ZhimaTermApp {
 
     /// 表单错误交给表单显示（字段级贴标签旁、全局落底栏），不弹窗。
     fn fail_form(&mut self, error: connect::FormError, cx: &mut Context<Self>) {
-        if let Some(form) = self.connect_form() {
+        if let Some(form) = self.connect_form(cx) {
             form.update(cx, |form, cx| form.fail(error, cx));
         }
         cx.notify();
@@ -1641,7 +1652,7 @@ impl ZhimaTermApp {
         if let Err(message) = self.expand_host_form(cx) {
             return self.fail_form(message, cx);
         }
-        let Some(form) = self.connect_form() else {
+        let Some(form) = self.connect_form(cx) else {
             return;
         };
         // 连接确需密码（密码是唯一认证信息、框里空、这条记住了密码）才读钥匙串
@@ -1669,7 +1680,8 @@ impl ZhimaTermApp {
     ) {
         // 栈顶浮层在场时按键全归它（ADR-044）：Tab 走栈顶焦点环，其余按
         // 栈顶的键裁决；不认的键也不落到终端——焦点本就不在终端（ADR-043）。
-        if !self.overlay.is_empty() {
+        let host = overlay_host(cx);
+        if !host.read(cx).is_empty() {
             let key = &event.keystroke;
             // Tab/⇧Tab 走模态自己的焦点环（ADR-043）：输入框之间移动，走完
             // 一圈回到作用域根（platform/control/alt 组合的 Tab 不属于这里）
@@ -1682,7 +1694,7 @@ impl ZhimaTermApp {
                 cx.stop_propagation();
                 return;
             }
-            if let Some(view) = self.overlay.top_view() {
+            if let Some(view) = host.read(cx).top_view() {
                 let handling = view.key_action(key, cx);
                 if !matches!(handling, KeyHandling::None) {
                     self.overlay_dispatch(handling, window, cx);
@@ -2126,10 +2138,7 @@ fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> crate::ssh::forward_form
             let app = app.clone();
             Rc::new(move |cx| {
                 app.update(cx, |this, cx| {
-                    if let Some(form) = this.forward_form_mut() {
-                        form.toggle_kind();
-                    }
-                    cx.notify();
+                    this.mutate_forward_form(cx, |form| form.toggle_kind());
                 });
             })
         },
@@ -2137,10 +2146,7 @@ fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> crate::ssh::forward_form
             let app = app.clone();
             Rc::new(move |cx| {
                 app.update(cx, |this, cx| {
-                    if let Some(form) = this.forward_form_mut() {
-                        form.toggle_bind();
-                    }
-                    cx.notify();
+                    this.mutate_forward_form(cx, |form| form.toggle_bind());
                 });
             })
         },
@@ -2422,12 +2428,12 @@ impl Render for ZhimaTermApp {
             // handle_key_down 的浮层分支拦不到它；而模态拥有全部交互（ADR-043/044）——
             // 在它底下开会话会把焦点抢到新格，关会话会删标签或用关闭确认顶掉当前 Dialog
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
-                if this.overlay.is_empty() {
+                if overlay_host(cx).read(cx).is_empty() {
                     this.open_session(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
-                if !this.overlay.is_empty() {
+                if !overlay_host(cx).read(cx).is_empty() {
                     return;
                 }
                 // 多格标签：⌘W 先关聚焦格；只剩一格时才是关标签（ADR-014）。
@@ -2476,17 +2482,14 @@ impl Render for ZhimaTermApp {
             // 侧栏右键菜单的遮罩与浮层：在侧栏与终端区之上、浮层栈之下
             .children(sidebar_menu)
             // 浮层栈按栈序挂在根部末尾（ADR-044）：栈序即 z 序，遮罩、焦点壳
-            // 与卡片组装统一在栈层；键裁决/遮罩点击经同一通道派发回这里
+            // 与卡片组装统一在栈层；键裁决/遮罩点击经同一通道派发回栈服务
             .children({
-                let dispatch = {
-                    let app = cx.entity();
-                    Rc::new(
-                        move |handling: KeyHandling, window: &mut Window, cx: &mut App| {
-                            app.update(cx, |app, cx| app.overlay_dispatch(handling, window, cx));
-                        },
-                    )
-                };
-                self.overlay
+                let dispatch =
+                    Rc::new(|handling: KeyHandling, window: &mut Window, cx: &mut App| {
+                        crate::ui::overlay::overlay_dispatch(handling, window, cx);
+                    });
+                overlay_host(cx)
+                    .read(cx)
                     .render(&tokens, window, cx, dispatch)
                     .into_iter()
                     .map(|layer| layer.into_any_element())

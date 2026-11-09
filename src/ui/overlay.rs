@@ -5,14 +5,16 @@
 //! （确认对话框可盖在业务模态上）。物种、键语义与区域内容都由 [`ModalView`]
 //! 的实现自描述；遮罩、居中、焦点壳统一在这里，业务不碰。
 //!
-//! 呼出通道与外壳动作的回调入口在 `crate::app`（`overlay_open` 等）：浮层
-//! 状态住在外壳实体上，任意视图经全局句柄呼出（见 ADR-044 决策 3）。
+//! 呼出/关闭/键派发的原语也在这里（`overlay_open` 一系，ADR-044 修订）：
+//! 栈实体挂窗口级 Global，任意层（含叶子组件）直接调用；互斥收起等跨所有者
+//! 规则经 [`overlay_on_open`] 钩子回到各自的状态所有者执行。
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Div, FocusHandle, Keystroke, Window};
+use gpui::{AnyElement, App, Div, Entity, FocusHandle, Keystroke, Window};
 
 use crate::theme::UiTokens;
 use crate::ui::WindowAction;
@@ -252,6 +254,90 @@ impl OverlayHost {
     }
 }
 
+/// 入栈前广播钩子：跨所有者的互斥规则（app 收起主题下拉/侧栏菜单）用它
+/// 挂到栈服务上，栈服务不感知锚定浮层的存在。
+pub type OpenHook = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// 浮层栈的窗口级归属（ADR-044 修订）：栈本体是独立实体挂 Global，
+/// 原语（[`overlay_open`] 一系）对全仓可用——叶子组件（`ui::dialog`）与
+/// 各视图不再绕应用实体呼出。`on_open` 是入栈前广播钩子：跨所有者的互斥
+/// 规则由各自所有者注册，栈服务只负责按序回调。
+#[derive(Clone)]
+pub struct OverlayRoot {
+    host: Entity<OverlayHost>,
+    on_open: Rc<RefCell<Vec<OpenHook>>>,
+}
+
+impl gpui::Global for OverlayRoot {}
+
+/// 建栈并挂 Global：应用启动（单窗口）时一次，测试环境各自建各自的。
+pub fn overlay_init(cx: &mut App) -> Entity<OverlayHost> {
+    let host = cx.new(|_| OverlayHost::new());
+    cx.set_global(OverlayRoot {
+        host: host.clone(),
+        on_open: Rc::default(),
+    });
+    host
+}
+
+/// 注册入栈前钩子：钩子在每次 [`overlay_open`] 前按注册序执行。
+pub fn overlay_on_open(hook: OpenHook, cx: &mut App) {
+    cx.global::<OverlayRoot>().on_open.borrow_mut().push(hook);
+}
+
+/// 栈实体：外壳装配渲染与读栈顶（模态下钻、键拦截）用。
+pub fn overlay_host(cx: &App) -> Entity<OverlayHost> {
+    cx.global::<OverlayRoot>().host.clone()
+}
+
+/// 任意层呼出浮层：先广播入栈钩子（互斥收起），再入栈并通知栈实体重画。
+pub fn overlay_open(view: Box<dyn ModalView>, window: &mut Window, cx: &mut App) {
+    // 先取快照再回调：钩子里若再注册钩子，不能撞上正在 borrow 的列表
+    let hooks: Vec<OpenHook> = cx.global::<OverlayRoot>().on_open.borrow().clone();
+    for hook in hooks {
+        hook(window, cx);
+    }
+    open_layer(view, window, cx);
+}
+
+/// 同 [`overlay_open`]，但不广播入栈钩子：调用方已在打开前自行完成跨所有者
+/// 互斥。外壳内部调用走这条——外壳方法正处在自身 update 中，钩子回壳
+/// update 同一实体会嵌套 panic。
+pub fn overlay_open_without_hooks(view: Box<dyn ModalView>, window: &mut Window, cx: &mut App) {
+    open_layer(view, window, cx);
+}
+
+fn open_layer(view: Box<dyn ModalView>, window: &mut Window, cx: &mut App) {
+    overlay_host(cx).update(cx, |host, cx| {
+        host.open(view, window, cx);
+        cx.notify();
+    });
+}
+
+/// 任意视图关掉栈顶浮层（焦点按栈层记录归还）。
+pub fn overlay_close_top(window: &mut Window, cx: &mut App) {
+    let host = overlay_host(cx);
+    host.update(cx, |host, cx| {
+        if host.close_top(window, cx) {
+            cx.notify();
+        }
+    });
+}
+
+/// 派发一层给出的键裁决/遮罩点击语义（键盘、遮罩、按钮共用同一通道）。
+/// Action 推迟到下一帧执行：同步执行会嵌套 update 同一实体，推迟后闭包
+/// 在 run loop 里执行，闭包里的 update 是合法的单层；对用户动作延迟一帧
+/// 不可感。
+pub fn overlay_dispatch(handling: KeyHandling, window: &mut Window, cx: &mut App) {
+    match handling {
+        KeyHandling::None => {}
+        KeyHandling::Close => overlay_close_top(window, cx),
+        KeyHandling::Action(action) => {
+            window.on_next_frame(move |window, cx| action(window, cx));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +549,114 @@ mod tests {
                 Some(owner),
                 "drop_top 不归还焦点（交给后续路径）"
             );
+        });
+    }
+
+    /// 入栈钩子（ADR-044 修订的互斥联动）：每次 `overlay_open` 前按注册序
+    /// 广播，且广播时新层尚未入栈——跨所有者的收起规则因此能先于入栈执行。
+    #[gpui::test]
+    fn open_hooks_run_before_each_layer_is_pushed(cx: &mut gpui::TestAppContext) {
+        struct Blank;
+        impl Render for Blank {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+        let window = cx.add_window(|_window, _cx| Blank);
+        let _ = cx.update_window(window.into(), |_view, window, cx| {
+            overlay_init(cx);
+            let seen_empty = Rc::new(RefCell::new(Vec::new()));
+            let record = seen_empty.clone();
+            overlay_on_open(
+                Rc::new(move |_window, cx| {
+                    record
+                        .borrow_mut()
+                        .push(overlay_host(cx).read(cx).is_empty());
+                }),
+                cx,
+            );
+
+            overlay_open(
+                Box::new(Dummy {
+                    species: Species::Modal,
+                    id: 1,
+                }),
+                window,
+                cx,
+            );
+            overlay_open(
+                Box::new(Dummy {
+                    species: Species::Dialog,
+                    id: 2,
+                }),
+                window,
+                cx,
+            );
+
+            let seen = seen_empty.borrow();
+            assert_eq!(seen.len(), 2, "每次入栈广播一次钩子");
+            assert_eq!(seen.as_slice(), &[true, false], "钩子先于入栈执行");
+            drop(seen);
+            let host = overlay_host(cx);
+            assert_eq!(top_id(host.read(cx)), 2);
+
+            // 外壳内部入口不起钩子：调用方已自行完成互斥（避免嵌套 update）
+            overlay_open_without_hooks(
+                Box::new(Dummy {
+                    species: Species::Modal,
+                    id: 3,
+                }),
+                window,
+                cx,
+            );
+            assert_eq!(seen_empty.borrow().len(), 2, "内部入口不广播钩子");
+            assert_eq!(top_id(host.read(cx)), 3);
+        });
+    }
+
+    /// 键派发通道：`Close` 出栈并归还焦点，栈空时再关是 no-op（Esc 关闭
+    /// 走的就是这条路径，ADR-043/044）。
+    #[gpui::test]
+    fn dispatch_close_pops_the_top_layer(cx: &mut gpui::TestAppContext) {
+        struct Blank;
+        impl Render for Blank {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+        let window = cx.add_window(|_window, _cx| Blank);
+        let _ = cx.update_window(window.into(), |_view, window, cx| {
+            overlay_init(cx);
+            let owner = cx.focus_handle();
+            window.focus(&owner, cx);
+
+            overlay_open(
+                Box::new(Dummy {
+                    species: Species::Modal,
+                    id: 7,
+                }),
+                window,
+                cx,
+            );
+            overlay_dispatch(KeyHandling::Close, window, cx);
+            let host = overlay_host(cx);
+            assert!(host.read(cx).is_empty(), "Close 关掉栈顶");
+            assert_eq!(window.focused(cx), Some(owner), "关闭后焦点归还");
+
+            // 栈空时再来一次：no-op，不 panic
+            overlay_dispatch(KeyHandling::Close, window, cx);
+            assert!(host.read(cx).is_empty());
+            // None 不改变栈
+            overlay_dispatch(KeyHandling::None, window, cx);
+            assert!(host.read(cx).is_empty());
         });
     }
 }

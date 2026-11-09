@@ -190,7 +190,7 @@ impl ModalView for HistoryModal {
                     "session-history-close",
                     "关闭",
                     Some("esc"),
-                    |_, window, cx| crate::app::overlay_close_top(window, cx),
+                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),
@@ -294,7 +294,8 @@ impl ModalView for LoggingModal {
         let log_path = view.log_path();
 
         // 开关随状态换主次：未开启时「记录到文件」是主按钮，记录中主位让给
-        // 「暂停记录」的次按钮。切换走应用层 update，底栏按钮与模态一起重画
+        // 「暂停记录」的次按钮。切换直接更新会话视图实体：模态与底栏每次
+        // 渲染都读视图实体的记录状态，视图 notify 即重画（无需绕应用实体）。
         let toggle_view = self.view.clone();
         let toggle = if logging {
             panel::secondary_button(
@@ -302,11 +303,8 @@ impl ModalView for LoggingModal {
                 "session-log-toggle",
                 "暂停记录",
                 None,
-                move |_, window, cx| {
-                    crate::app::update_app(window, cx, |_, _, cx| {
-                        toggle_view.update(cx, |view, cx| view.toggle_logging(cx));
-                        cx.notify();
-                    });
+                move |_, _, cx| {
+                    toggle_view.update(cx, |view, cx| view.toggle_logging(cx));
                 },
             )
         } else {
@@ -315,11 +313,8 @@ impl ModalView for LoggingModal {
                 "session-log-toggle",
                 "记录到文件",
                 None,
-                move |_, window, cx| {
-                    crate::app::update_app(window, cx, |_, _, cx| {
-                        toggle_view.update(cx, |view, cx| view.toggle_logging(cx));
-                        cx.notify();
-                    });
+                move |_, _, cx| {
+                    toggle_view.update(cx, |view, cx| view.toggle_logging(cx));
                 },
             )
         };
@@ -345,7 +340,7 @@ impl ModalView for LoggingModal {
                     "session-log-close",
                     "关闭",
                     Some("esc"),
-                    |_, window, cx| crate::app::overlay_close_top(window, cx),
+                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),

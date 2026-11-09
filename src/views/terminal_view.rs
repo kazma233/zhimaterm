@@ -2154,7 +2154,7 @@ impl Render for TerminalView {
                             history.mark_seen();
                             cx.notify();
                         });
-                        crate::app::overlay_open(
+                        crate::ui::overlay::overlay_open(
                             Box::new(crate::recording::history::HistoryModal { history }),
                             window,
                             cx,
@@ -2186,7 +2186,7 @@ impl Render for TerminalView {
                 .text_size(ui_rems(10.))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(move |_, window, cx| {
-                    crate::app::overlay_open(
+                    crate::ui::overlay::overlay_open(
                         Box::new(crate::recording::history::LoggingModal { view: view.clone() }),
                         window,
                         cx,
