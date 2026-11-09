@@ -99,6 +99,10 @@ enum MonitorState {
 
 pub struct TerminalView {
     focus: FocusHandle,
+    /// 会话结束后的落焦容器（非输入）：死会话裸键要经焦点派发路径到达应用
+    /// 层，无焦点则派发不经过任何应用层节点（见 GLOSSARY「会话视图归约」
+    /// 与 docs/context/dead-session-key-focus-troubleshooting.md）。
+    dead_focus: FocusHandle,
     session: Session,
     /// 格尺寸与字体来自应用层：所有会话共用同一套度量
     metrics: CellMetrics,
@@ -293,11 +297,13 @@ impl TerminalView {
         // 持有，编码时才知道修饰键语义；历史值重复设置是幂等的
         session.set_params(params.runtime);
         let focus = cx.focus_handle();
+        let dead_focus = cx.focus_handle();
 
         Self::watch_events(events, 0, cx);
 
         let mut view = Self {
             focus,
+            dead_focus,
             session,
             metrics,
             font,
@@ -2057,11 +2063,13 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = zhimaterm_base::theme::tokens(cx);
         // 焦点裁决都在渲染时机做（事件循环拿不到 window）：重连后把焦点交回
-        // 终端（活会话要输入）；会话结束则 blur——焦点留在终端会喂 IME 管道。
-        // 一次性标志的消费在归约器（take_focus_action），这里只执行
+        // 终端（活会话要输入）；会话结束把焦点移出输入网格、落到格内非输入
+        // 容器——不能 blur 到无焦点（按键派发不经过应用层，死会话裸键全部
+        // 失灵），也不能留在网格（IME/文本管道活着，R 双发）。一次性标志的
+        // 消费在归约器（take_focus_action），这里只执行
         match self.state.take_focus_action(self.password_prompt.is_some()) {
             Some(FocusAction::Terminal) => window.focus(&self.focus, cx),
-            Some(FocusAction::Blur) => window.blur(cx),
+            Some(FocusAction::OffGrid) => window.focus(&self.dead_focus, cx),
             Some(FocusAction::Password) => {
                 if let Some(input) = self.password_prompt.clone() {
                     window.focus(&input.read(cx).focus_handle(), cx);
@@ -2574,6 +2582,11 @@ impl Render for TerminalView {
             // 探针底栏（ADR-028）：本地默认 Shell 格的底栏，与远端底栏同位置，
             // 右端一枚「进程」开关；WSL 格仍无底栏（ADR-016）
             .children(self.probe_capable.then(|| self.render_probe_bar(cx)))
+            // 死会话的落焦锚点：零尺寸、不参与命中。track_focus 的元素会在
+            // 鼠标按下命中自己时自动聚焦并阻止祖先抢焦（gpui div 的行为），
+            // 锚点有面积就会抢走网格的点击聚焦、终端就打不了字；焦点派发
+            // 只需要它存在于派发树里（焦点路径的起点），不需要可见可点。
+            .child(div().absolute().size_0().track_focus(&self.dead_focus))
     }
 }
 

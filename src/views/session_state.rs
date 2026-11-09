@@ -52,7 +52,7 @@ pub(crate) struct SessionViewStateData {
     pub password_focus_pending: bool,
     /// 重连后待把焦点交回终端（一次性）。
     pub terminal_focus_pending: bool,
-    /// 结束态待 blur（一次性）。
+    /// 结束态待把焦点移出输入网格（一次性）：落到格内非输入容器，不是无焦点。
     pub blur_pending: bool,
     /// 本地格正常退出是否自动关闭（随会话类型定型）。
     pub closes_on_shell_exit: bool,
@@ -96,15 +96,15 @@ impl SessionViewState {
     }
 
     /// 焦点的一次性裁决（渲染时机消费）。优先级：重连交回终端 > 结束
-    /// blur > 密码卡聚焦。`has_password_prompt`：密码卡实体尚不在时保留
-    /// 标志，等卡片建好再消费。
+    /// 离开输入网格 > 密码卡聚焦。`has_password_prompt`：密码卡实体尚不在时
+    /// 保留标志，等卡片建好再消费。
     pub(super) fn take_focus_action(&mut self, has_password_prompt: bool) -> Option<FocusAction> {
         if self.data.terminal_focus_pending {
             self.data.terminal_focus_pending = false;
             Some(FocusAction::Terminal)
         } else if self.data.blur_pending {
             self.data.blur_pending = false;
-            Some(FocusAction::Blur)
+            Some(FocusAction::OffGrid)
         } else if self.data.password_focus_pending && has_password_prompt {
             self.data.password_focus_pending = false;
             Some(FocusAction::Password)
@@ -127,9 +127,11 @@ impl SessionViewState {
 pub(crate) enum FocusAction {
     /// 重连成功：焦点交回终端网格（活会话要输入）。
     Terminal,
-    /// 会话结束：焦点离开网格——留在终端会喂 IME 管道，死会话的 Esc/Enter
-    /// 与 R 在那条管道上失灵（见 GLOSSARY「按键优先级」）。
-    Blur,
+    /// 会话结束：焦点离开输入网格，落到格内的非输入容器——不是 blur 到
+    /// 无焦点（无焦点时按键派发不经过应用层，死会话的 Esc/Enter/R 全部
+    /// 失灵），也不能留在网格（IME/文本管道活着，R 双发）。排障记录见
+    /// docs/context/dead-session-key-focus-troubleshooting.md。
+    OffGrid,
     /// 连接期密码卡聚焦。
     Password,
 }
@@ -419,8 +421,9 @@ pub(super) fn fold_signal(
     }
 }
 
-/// 结束态的共同落点：结束、必 blur（焦点留在终端会喂 IME 管道，死会话的
-/// Esc/Enter 失灵）、一次性聚焦标志作废。状态文案与重连裁决由调用方补。
+/// 结束态的共同落点：结束、焦点必离输入网格（OffGrid 落到格内非输入容器
+/// ——理由见 `FocusAction::OffGrid`）、一次性聚焦标志作废。状态文案与
+/// 重连裁决由调用方补。
 fn enter_ended(state: &mut SessionViewState, status: String) {
     state.data.exited = true;
     state.data.password_focus_pending = false;
@@ -730,10 +733,11 @@ mod tests {
         );
         assert!(state.data.exited);
         assert_eq!(state.data.status, "已取消连接");
-        assert!(
-            state.data.blur_pending,
-            "取消连接与 Failed/Exited 同为结束态：焦点必离网格，\
-             否则 IME 管道上的 Esc/Enter 失灵"
+        assert_eq!(
+            state.take_focus_action(false),
+            Some(FocusAction::OffGrid),
+            "取消连接与 Failed/Exited 同为结束态：焦点必离输入网格、\
+             落到非输入容器——落无焦点或留网格都会让死会话裸键失灵"
         );
         assert!(effects.contains(&SessionEffect::ClearPasswordPrompt));
     }

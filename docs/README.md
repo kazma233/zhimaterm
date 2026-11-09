@@ -77,6 +77,7 @@
 - [ssh-agent 图解](context/ssh-agent-explained.md)：面向不熟悉 SSH 内部的读者，讲清 agent 与转发在做什么。
 - [SSH 转发与跳板机入门](context/ssh-forward-vs-jump-host-primer.md)：本地/远程/动态转发的区别与跳板机选型。
 - [中文拼音输入排障](context/ime-pinyin-troubleshooting.md)：三层叠加假象的排查路径与可复用诊断方法（ADR-033）。
+- [死会话裸键失灵排障](context/dead-session-key-focus-troubleshooting.md)：blur 落点到「无焦点」导致按键派发不经过应用层的根因与 gpui 焦点派发事实。
 - [libghostty-vt C API 机制笔记](context/libghostty-vt-api-notes.md)：tagged get/set、sized 结构、两段式缓冲、回调协议等扩展 ghostty 后端前的依据（探索快照，用前二次确认）。
 
 ## 运行手册（`runbooks/`）
