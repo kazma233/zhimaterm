@@ -147,10 +147,7 @@ impl ZhimaTermApp {
             this.sidebar_menu = None;
             this.open_rename_dialog(index, window, cx);
         }));
-        let items = vec![menu::MenuItem {
-            label: "重命名".into(),
-            on_pick: rename,
-        }];
+        let items = vec![menu::MenuEntry::item("重命名", rename)];
         let app = cx.entity();
         vec![
             menu::context_menu_backdrop(move |_, cx| {

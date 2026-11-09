@@ -13,7 +13,7 @@ use gpui::prelude::*;
 use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, Pixels, Window, div, px};
 
 use crate::theme::UiTokens;
-use crate::ui::{CONTROL_HEIGHT, ui_rems};
+use crate::ui::{CONTROL_HEIGHT, popover_shadow, ui_rems};
 
 /// 按钮类元素统一带小手光标：能点的地方不该让指针保持箭头。
 const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
@@ -160,6 +160,7 @@ pub fn anchored_popover<Row: IntoElement>(
         .border_1()
         .border_color(gpui::rgb(tokens.border_default))
         .bg(gpui::rgb(tokens.bg_focus))
+        .shadow(popover_shadow(tokens))
         .flex()
         .flex_col()
         .gap(px(2.))

@@ -63,6 +63,7 @@ const DEFAULT_UI: UiTokens = UiTokens {
     danger: 0xe06c75,
     danger_soft: 0xe07a5f,
     overlay: 0x000000a8,
+    shadow_popover: 0x0000008c,
     search_highlight: 0xf5c45173,
     scroll_marker: 0xffb454ff,
     input_selection: 0x8bd5ca30,

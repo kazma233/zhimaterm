@@ -101,6 +101,8 @@ pub struct UiTokens {
     // —— 叠加（0xRRGGBBAA，alpha 在低字节）——
     /// 模态遮罩
     pub overlay: u32,
+    /// 浮层落影：右键菜单、下拉浮层这类悬浮小面板的投影色（纯黑调 alpha）
+    pub shadow_popover: u32,
     /// 搜索匹配高亮
     pub search_highlight: u32,
     /// 回看滚动位置标记
@@ -206,6 +208,8 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
         danger,
         danger_soft: mix(danger, warn, 0.65),
         overlay: with_alpha(0x000000, 0xa8),
+        // 落影是环境遮蔽：纯黑物理直觉；深色界面层级差小，落影要更重才读得出
+        shadow_popover: with_alpha(0x000000, if is_dark { 0x8c } else { 0x40 }),
         search_highlight: with_alpha(warn, 0x73),
         scroll_marker: with_alpha(mix(warn, danger, 0.5), 0xff),
         input_selection: with_alpha(accent, 0x30),
@@ -299,6 +303,11 @@ mod tests {
             ("danger", hand.danger, derived.danger),
             ("danger_soft", hand.danger_soft, derived.danger_soft),
             ("overlay", hand.overlay, derived.overlay),
+            (
+                "shadow_popover",
+                hand.shadow_popover,
+                derived.shadow_popover,
+            ),
             (
                 "input_selection",
                 hand.input_selection,

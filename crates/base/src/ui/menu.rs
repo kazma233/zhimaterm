@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use crate::theme::UiTokens;
+use crate::ui::popover_shadow;
 use crate::ui::ui_rems;
 
 /// 按钮类元素统一带小手光标：能点的地方不该让指针保持箭头。
@@ -22,6 +23,8 @@ const MENU_WIDTH: f32 = 120.0;
 /// 单条高度的估算值：文字行高加上下内边距。只用于「会不会顶出容器」的夹取，
 /// 实际行高由内容决定。
 const ITEM_HEIGHT: f32 = 27.0;
+/// 分隔线高度估算：1px 线 + 上下各 3px 外边距。
+const SEPARATOR_HEIGHT: f32 = 7.0;
 /// 浮层上下各 4px 的内边距合计。
 const MENU_PADDING: f32 = 8.0;
 
@@ -35,12 +38,33 @@ pub struct MenuItem {
     pub on_pick: MenuPick,
 }
 
+/// 菜单条目：条目或分隔线。分隔线只负责把相邻条目分组（同类动作聚在一起、
+/// 销毁性动作隔开），本身不响应点击。
+pub enum MenuEntry {
+    Item(MenuItem),
+    Separator,
+}
+
+impl MenuEntry {
+    /// 条目条目的快捷构造：调用方装配好回调后一行装出一条。
+    pub fn item(label: impl Into<String>, on_pick: MenuPick) -> Self {
+        Self::Item(MenuItem {
+            label: label.into(),
+            on_pick,
+        })
+    }
+}
+
 /// 整份菜单的估算尺寸：夹取定位用。
-fn menu_size(item_count: usize) -> Size<Pixels> {
-    size(
-        px(MENU_WIDTH),
-        px(MENU_PADDING + item_count as f32 * ITEM_HEIGHT),
-    )
+fn menu_size(entries: &[MenuEntry]) -> Size<Pixels> {
+    let height: f32 = entries
+        .iter()
+        .map(|entry| match entry {
+            MenuEntry::Item(_) => ITEM_HEIGHT,
+            MenuEntry::Separator => SEPARATOR_HEIGHT,
+        })
+        .sum();
+    size(px(MENU_WIDTH), px(MENU_PADDING + height))
 }
 
 /// 「指针处弹出」的定位夹取：右缘放不下靠左收，下缘放不下向上收；容器比菜单
@@ -85,14 +109,14 @@ pub fn context_menu(
     id: impl Into<ElementId>,
     click: Point<Pixels>,
     container: Size<Pixels>,
-    items: Vec<MenuItem>,
+    items: Vec<MenuEntry>,
 ) -> gpui::Stateful<gpui::Div> {
-    let position = clamped_menu_position(click, container, menu_size(items.len()));
+    let position = clamped_menu_position(click, container, menu_size(&items));
     let rows = items
         .into_iter()
         .enumerate()
-        .map(|(index, item)| {
-            div()
+        .map(|(index, entry)| match entry {
+            MenuEntry::Item(item) => div()
                 .id(("menu-item", index))
                 .flex_none()
                 .px(px(8.))
@@ -104,6 +128,14 @@ pub fn context_menu(
                 .hover(|style| style.bg(gpui::rgb(tokens.bg_row_hover)))
                 .on_click(move |event, window, cx| (item.on_pick)(event, window, cx))
                 .child(item.label)
+                .into_any_element(),
+            MenuEntry::Separator => div()
+                .flex_none()
+                .mx(px(6.))
+                .my(px(3.))
+                .h(px(1.))
+                .bg(gpui::rgb(tokens.border_divider))
+                .into_any_element(),
         })
         .collect::<Vec<_>>();
     div()
@@ -117,6 +149,7 @@ pub fn context_menu(
         .border_1()
         .border_color(gpui::rgb(tokens.border_default))
         .bg(gpui::rgb(tokens.bg_focus))
+        .shadow(popover_shadow(tokens))
         .flex()
         .flex_col()
         .occlude()
@@ -127,11 +160,29 @@ pub fn context_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::{ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, clamped_menu_position, menu_size};
-    use gpui::{point, px, size};
+    use std::rc::Rc;
+
+    use gpui::{App, ClickEvent, Window, point, px, size};
+
+    use super::{
+        ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, MenuEntry, MenuPick, SEPARATOR_HEIGHT,
+        clamped_menu_position, menu_size,
+    };
+
+    fn test_pick() -> MenuPick {
+        Rc::new(|_: &ClickEvent, _: &mut Window, _: &mut App| {})
+    }
+
+    fn three_item_entries() -> Vec<MenuEntry> {
+        vec![
+            MenuEntry::item("甲", test_pick()),
+            MenuEntry::item("乙", test_pick()),
+            MenuEntry::item("丙", test_pick()),
+        ]
+    }
 
     fn three_item_menu() -> gpui::Size<gpui::Pixels> {
-        size(px(MENU_WIDTH), px(MENU_PADDING + 3.0 * ITEM_HEIGHT))
+        menu_size(&three_item_entries())
     }
 
     #[test]
@@ -177,8 +228,22 @@ mod tests {
 
     #[test]
     fn menu_size_accounts_for_padding_and_rows() {
-        let size = menu_size(3);
+        let size = menu_size(&three_item_entries());
         assert_eq!(size.width, px(MENU_WIDTH));
         assert_eq!(size.height, px(MENU_PADDING + 3.0 * ITEM_HEIGHT));
+    }
+
+    #[test]
+    fn menu_size_accounts_for_separators() {
+        let entries = vec![
+            MenuEntry::item("甲", test_pick()),
+            MenuEntry::Separator,
+            MenuEntry::item("乙", test_pick()),
+        ];
+        let size = menu_size(&entries);
+        assert_eq!(
+            size.height,
+            px(MENU_PADDING + 2.0 * ITEM_HEIGHT + SEPARATOR_HEIGHT)
+        );
     }
 }

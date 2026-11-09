@@ -62,6 +62,16 @@ pub fn horizontal_divider(tokens: &crate::theme::UiTokens) -> gpui::Div {
         .bg(gpui::rgb(tokens.border_subtle))
 }
 
+/// 浮层落影：右键菜单、下拉浮层这类悬浮小面板共用的投影。悬浮面板盖在
+/// 内容上，靠影子读出层级；颜色走 `shadow_popover` token，深浅主题各自推导。
+pub fn popover_shadow(tokens: &crate::theme::UiTokens) -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow::new(px(0.), px(6.), gpui::rgba(tokens.shadow_popover).into())
+            .blur_radius(px(16.))
+            .spread_radius(px(-4.)),
+    ]
+}
+
 /// 宽度拖拽手柄贴容器哪一边。
 pub enum GripSide {
     Left,

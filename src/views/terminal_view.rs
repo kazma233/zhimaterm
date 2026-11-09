@@ -1806,18 +1806,11 @@ fn render_context_menu(
         this.open_search(window, cx);
     }));
     let items = vec![
-        menu::MenuItem {
-            label: "水平拆分".into(),
-            on_pick: split_right,
-        },
-        menu::MenuItem {
-            label: "垂直拆分".into(),
-            on_pick: split_down,
-        },
-        menu::MenuItem {
-            label: "搜索".into(),
-            on_pick: search,
-        },
+        menu::MenuEntry::item("水平拆分", split_right),
+        menu::MenuEntry::item("垂直拆分", split_down),
+        // 拆分是布局动作、搜索是内容动作：两类之间用分隔线隔开
+        menu::MenuEntry::Separator,
+        menu::MenuEntry::item("搜索", search),
     ];
     let entity = cx.entity();
     vec![

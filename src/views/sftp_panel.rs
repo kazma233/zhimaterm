@@ -1112,18 +1112,11 @@ impl SftpPanelView {
             panel.start_remove(cx);
         }));
         let items = vec![
-            menu::MenuItem {
-                label: "下载".into(),
-                on_pick: download,
-            },
-            menu::MenuItem {
-                label: "重命名".into(),
-                on_pick: rename,
-            },
-            menu::MenuItem {
-                label: "删除".into(),
-                on_pick: remove,
-            },
+            menu::MenuEntry::item("下载", download),
+            menu::MenuEntry::item("重命名", rename),
+            // 删除是销毁性动作：分隔线隔开，误触代价与上面两项不对称
+            menu::MenuEntry::Separator,
+            menu::MenuEntry::item("删除", remove),
         ];
         menu::context_menu(&tokens(cx), "sftp-context-menu", click, container, items)
     }
