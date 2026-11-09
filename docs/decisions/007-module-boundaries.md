@@ -335,3 +335,14 @@ crates/connections  zhimaterm-connections  SSH 连接管理域（原 zhimaterm-s
 - 代价：跨 crate 公开面略增（清单见上）；workspace 成员 5→7；Windows/Linux
   平台分支搬家后需在对应平台各过一次 `cargo check --all-targets`（本次在
   macOS 完成 fmt/clippy/test，跨平台检查待办）。
+
+## 修订（2026-11-10，十）：终端输入编码拆为子模块
+
+- 兑现 2026-10-28 修订点名的同型候选：按键（kitty/xterm）、粘贴、焦点与
+  鼠标上报的字节编码从 `terminal/lib.rs` 拆为子模块 `terminal::input`
+  （`MouseProtocol` 与编码辅助自由函数随行；`MouseDispatch` 是共享语义
+  类型，留在 lib.rs）。
+- 动机与 transcript 相同：键编码口径与 VT 渲染是两条变更轴，不再落进
+  同一个 3000 行文件评审。方法保持 `TerminalModel` 固有实现，
+  `encode_*`/`dispatch_mouse` 的 `pub` 不变，worker 零改动。
+- 纯搬移、零行为变化。
