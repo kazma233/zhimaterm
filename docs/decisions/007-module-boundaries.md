@@ -170,3 +170,21 @@ ADR-044 2026-11-09 修订。app 的 `overlay_*` 方法保留为薄转发，栈�
 `views/*` 仅 `views/shell` 保留一处 `update_app`（WSL 选择后的开会话编排，
 属 ADR-044 决策 3 保留的回壳通道）。`ui`/`terminal → theme` 的 token 定位
 仍留阶段二（appearance 归组时一并处理）。
+
+## 修订（2026-11-09，四）：connect 按变更轴拆子模块
+
+`ssh/connect` 单文件 3415 行，六条变更轴（表单字段、目标解析、认证持久化、
+转发规则、渲染、列表）交汇。按 `terminal::transcript` 的先例拆为子目录，
+方法仍是 `ConnectForm` 的固有实现，跨子模块只放开 `pub(super)`：
+
+- `mod.rs`：表单状态机与共享类型（`ConnectForm`、开关/段枚举、`Field`、
+  `FormError`、跳板输入集合）；对外 re-export 保持 `connect::ConnectModal`
+  等原路径不变。
+- `parse.rs`：纯文本解析（端口、目标串、字段合并、`~` 展开）。
+- `target.rs`：保存条目 → 会话目标（列表直连路径）。
+- `auth.rs`：认证装配（`form_auth`/`form_jump`）与保存计划 `SavePlan`。
+- `forward.rs`：转发规则草稿、编辑动作与规则行渲染（ADR-011）。
+- `view.rs`：连接弹窗两视图渲染与 `ModalView` 接入（含 `ModalActions`）。
+- `tests.rs`：全部单元测试与夹具。
+
+纯搬移、零行为变化；`cargo fmt`/clippy/tests 全绿。

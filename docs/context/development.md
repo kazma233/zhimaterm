@@ -95,7 +95,14 @@ src/session/transport/poll.rs  SSH 跨平台等待原语：fd+poll+自管道（U
 
 ── 领域层 ──
 src/ssh/                       SSH 连接管理业务域：只被外壳与共享视图消费，不引 views/app
-src/ssh/connect.rs             SSH 连接表单与列表弹窗：目标解析、认证信息、转发规则、保存计划（ADR-026/048）
+src/ssh/connect/               SSH 连接表单与列表弹窗（ADR-026/048），按变更轴拆子模块（ADR-007 修订四）：
+  mod.rs                       表单状态机与共享类型（ConnectForm、开关/段枚举、Field、FormError）
+  parse.rs                     文本解析：端口、目标串 `[user@]host[:port]`、字段合并、`~` 展开
+  target.rs                    保存的连接 → 会话目标（列表直连路径）
+  auth.rs                      认证装配（form_auth/form_jump）与保存计划 SavePlan
+  forward.rs                   转发规则草稿、编辑动作与规则行渲染（ADR-011）
+  view.rs                      连接弹窗：列表/编辑两视图渲染与 ModalView 接入
+  tests.rs                     单元测试与夹具
 src/ssh/connections.rs         保存的连接：按条目 id 读写与原子落盘（不含任何口令，ADR-048 修订）
 src/ssh/keychain.rs            OS 安全凭据存储：凭据按条目 id 挂钥匙串（ADR-018 修订）
 src/ssh/forward_form.rs        运行中新增转发规则的小表单（ADR-038）
