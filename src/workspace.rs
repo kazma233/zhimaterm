@@ -16,7 +16,50 @@ use anyhow::{Context, Result};
 use gpui::{Bounds, Pixels, WindowBounds, point, px, size};
 use serde::{Deserialize, Serialize};
 
-use crate::views::panes::{LayoutSpec, PaneId, SplitAxis};
+/// 格标识：树内唯一，由树在分割时分配。
+pub type PaneId = u64;
+
+/// 分割方向：并排（左右）或堆叠（上下）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SplitAxis {
+    /// 左右并排
+    SideBySide,
+    /// 上下堆叠
+    Stacked,
+}
+
+/// 布局节点的只读投影（ADR-037 持久化用）：只描述树形、方向与比例，
+/// 不暴露内部节点，也不携带任何会话信息。持久化格式的权威定义在这里
+/// （磁盘 schema 的所有者），运行时树（`views::panes::PaneTree`）引用它。
+#[derive(Clone, Debug, PartialEq)]
+pub enum LayoutSpec {
+    Leaf(PaneId),
+    Split {
+        axis: SplitAxis,
+        ratio: f32,
+        first: Box<LayoutSpec>,
+        second: Box<LayoutSpec>,
+    },
+}
+
+impl LayoutSpec {
+    /// 按树序收集叶标识（左/上在前）。
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        self.collect(&mut out);
+        out
+    }
+
+    fn collect(&self, out: &mut Vec<PaneId>) {
+        match self {
+            LayoutSpec::Leaf(pane) => out.push(*pane),
+            LayoutSpec::Split { first, second, .. } => {
+                first.collect(out);
+                second.collect(out);
+            }
+        }
+    }
+}
 
 /// 当前文件格式版本。读到更高版本视为不兼容：不猜测字段语义，回退空布局。
 /// v2 起本地格带会话编号与最后工作目录（ADR-039，回滚恢复按编号落文件）。
@@ -298,8 +341,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{SavedAxis, SavedNode, WORKSPACE_VERSION, WindowState, Workspace};
-    use crate::views::panes::{LayoutSpec, SplitAxis};
+    use super::{
+        LayoutSpec, SavedAxis, SavedNode, SplitAxis, WORKSPACE_VERSION, WindowState, Workspace,
+    };
     use gpui::{Bounds, WindowBounds, point, px, size};
 
     fn local(_pane: u64) -> Option<SavedNode> {

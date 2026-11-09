@@ -134,3 +134,25 @@
 settings` 常量循环；`ui/terminal → theme` 的 token 定位；`workspace →
 views::panes` 的布局格式归属。历史 ADR 与文档中的 `src/pty`、`src/probe` 等
 旧路径对应现 `src/local/pty`、`src/local/probe` 等，历史文档不改写。
+
+## 修订（2026-11-09，二）：类型所有权归位
+
+上一修订列出的遗留项中，三处已按「类型归所有者」修复，均为纯搬移、零行为
+变化：
+
+- `DEFAULT_SCROLLING_HISTORY` 从 `settings` 归位 `terminal`：它是终端模型的
+  默认参数（与 alacritty_terminal 上游默认一致），settings 的同名设置项缺省时
+  引用它（settings → terminal；原先 terminal 的测试引 settings，构成循环）。
+- `LayoutSpec`/`PaneId`/`SplitAxis` 从 `views::panes` 归位 `workspace`：布局树
+  的持久化投影（ADR-037）权威定义归磁盘 schema 的所有者，运行时树
+  （`views::panes::PaneTree`）反向引用——解掉 `workspace → views::panes`。
+- `CloseTarget` 从 `app` 归位 `views::shell`：关闭确认模态的数据类型随模态走，
+  外壳引用它装配目标。
+
+仍未修（规模重估后单独立项）：浮层栈三原语（`overlay_open`/`overlay_close_top`/
+`overlay_dispatch`）住在 `app`，而 `ui::dialog`（叶子层）、`views/shell`、
+`views/terminal_view`、`recording/history` 都直调。栈本体 `OverlayHost` 虽已在
+`ui::overlay`，但 `overlay_open` 联动 `dismiss_anchored`（ADR-044 单点写入）且
+经 AppRoot global 写应用实体——下沉为窗口级服务需同步修订 ADR-043/044，属
+独立重构而非归位。`ui/terminal → theme` 的 token 定位同留阶段二（appearance
+归组时一并处理）。

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::terminal::DEFAULT_SCROLLING_HISTORY;
 use crate::terminal::backend::BackendKind;
 
 /// 终端字号下限：再小连光标都看不清。
@@ -24,10 +25,8 @@ pub const MAX_UI_FONT_SIZE: f32 = 20.0;
 /// 滚动历史上限的下限：0 = 完全不留历史。
 pub const MIN_SCROLLING_HISTORY: usize = 0;
 /// 滚动历史上限的上限：80 列每行约 1.5–2 KB，100k 行最坏 150–200 MB，
-/// 是默认值的 10 倍，再放大约束不住内存。
+/// 是默认值的 10 倍，再放大约约束不住内存。
 pub const MAX_SCROLLING_HISTORY: usize = 100_000;
-/// 滚动历史默认行数：与 alacritty_terminal 上游默认一致。
-pub const DEFAULT_SCROLLING_HISTORY: usize = 10_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

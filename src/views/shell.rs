@@ -10,7 +10,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, Keystroke, MouseButton, Window, div, px};
 
-use crate::app::{CloseTarget, overlay_dispatch, update_app};
+use crate::app::{overlay_dispatch, update_app};
 use crate::session::{LangStatus, MonitorSample, TrustRequest};
 use crate::theme::UiTokens;
 use crate::ui::WindowAction;
@@ -19,6 +19,7 @@ use crate::ui::overlay::KeyHandling;
 use crate::ui::panel;
 use crate::ui::ui_rems;
 use crate::ui::{human_bytes, human_rate};
+use crate::workspace::PaneId;
 
 /// 底栏内容：同一根底栏按会话阶段切换显示——连接中、运行中的监控、
 /// 结束后的原因与出路。常驻不消失，避免布局跳动；只有远端会话有底栏，
@@ -1023,6 +1024,14 @@ pub fn render_sidebar_row(
                         })),
                 ),
         )
+}
+
+/// 待确认的关闭目标：一个格（分屏里的 ⌘W / 格内 ✕）或整个标签（侧栏 ✕）。
+/// 关闭确认模态的数据类型归这里，外壳（app）引用它装配目标。
+#[derive(Clone, Copy)]
+pub(crate) enum CloseTarget {
+    Pane { tab: usize, pane: PaneId },
+    Tab(usize),
 }
 
 /// 关闭会话的确认浮层（验收需求；ADR-044 起 Dialog 物种，可叠在业务模态上）：

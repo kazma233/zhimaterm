@@ -838,7 +838,7 @@ fn random_scripts_never_break_contract_invariants() {
                 *backend,
                 80,
                 24,
-                crate::settings::DEFAULT_SCROLLING_HISTORY,
+                crate::terminal::DEFAULT_SCROLLING_HISTORY,
             );
             let context = |step: usize| format!("{label} seed {seed} step {step}");
             for step in 0..STEPS {

@@ -26,6 +26,7 @@ use crate::settings::form::{CandidateLists, ModalActions, SettingsForm, Settings
 use crate::ssh::connect::{self, ConnectForm, ConnectModal, ConnectView};
 use crate::ssh::connections;
 use crate::ssh::connections::SavedSources;
+use crate::terminal::DEFAULT_SCROLLING_HISTORY;
 use crate::theme::picker;
 use crate::theme::picker::ThemePicker;
 use crate::ui::WindowAction;
@@ -33,11 +34,12 @@ use crate::ui::dialog::{self, Dialog, DialogAnswer};
 use crate::ui::menu;
 use crate::ui::overlay::{KeyHandling, ModalView, OverlayHost};
 use crate::ui::{ACTION_ENTRY_HEIGHT, panel, ui_rems, vertical_divider};
-use crate::views::panes::{self, PaneId, PaneTree, SplitAxis};
-use crate::views::shell;
+use crate::views::panes::{self, PaneTree};
+use crate::views::shell::{self, CloseTarget};
 use crate::views::terminal_keys::{DeadSessionKey, dead_session_key};
 use crate::views::terminal_view::TerminalView;
 use crate::workspace;
+use crate::workspace::{PaneId, SplitAxis};
 use gpui::App;
 
 /// 一次最多保留的标签数：侧边栏是多会话入口，这里只防住失控增长。
@@ -169,13 +171,6 @@ pub struct ZhimaTermApp {
     layout_save_scheduled: bool,
     /// 工作区读写失败的原因：显示在侧栏顶部，不弹窗
     workspace_error: Option<String>,
-}
-
-/// 待确认的关闭目标：一个格（分屏里的 ⌘W / 格内 ✕）或整个标签（侧栏 ✕）。
-#[derive(Clone, Copy)]
-pub(crate) enum CloseTarget {
-    Pane { tab: usize, pane: PaneId },
-    Tab(usize),
 }
 
 /// 浮层呼出通道（ADR-044 决策 3）：Global 只放应用实体句柄——浮层状态住
@@ -650,7 +645,7 @@ impl ZhimaTermApp {
                     .settings
                     .as_ref()
                     .map(|store| store.scrolling_history_or_default())
-                    .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY),
+                    .unwrap_or(DEFAULT_SCROLLING_HISTORY),
             },
             backend: self
                 .settings
@@ -1249,7 +1244,7 @@ impl ZhimaTermApp {
             ui_font_size: self.ui_font_size,
             scrolling_history: store
                 .map(|store| store.scrolling_history_or_default())
-                .unwrap_or(settings::DEFAULT_SCROLLING_HISTORY),
+                .unwrap_or(DEFAULT_SCROLLING_HISTORY),
             local_shell: store.and_then(|store| store.local_shell.clone()),
             local_workdir: store.and_then(|store| store.local_workdir.clone()),
             option_as_alt: store.map(|store| store.option_as_alt).unwrap_or(false),

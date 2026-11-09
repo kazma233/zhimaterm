@@ -20,13 +20,15 @@ mod transcript;
 use serde::{Deserialize, Serialize};
 
 use crate::input::{CellSide, KeyInput, MouseAction, MouseButton, MouseGesture, WheelDirection};
-#[cfg(test)]
-use crate::settings::DEFAULT_SCROLLING_HISTORY;
 use crate::theme::ColorScheme;
 use regex::Regex;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
+
+/// 滚动历史默认行数：与 alacritty_terminal 上游默认一致。终端模型的默认参数
+/// 归这里，settings 的同名设置项缺省时引用它（依赖方向 settings → terminal）。
+pub const DEFAULT_SCROLLING_HISTORY: usize = 10_000;
 
 use self::backend::{ColorSlot, GridCell, GridPoint, Rgb, RowBuffer, TerminalCore};
 use colors::{cursor_color, default_background, default_foreground, dim, query, resolve};

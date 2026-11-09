@@ -11,20 +11,10 @@ use gpui::{AnyElement, App, Entity, MouseButton, Window, canvas, div, px};
 
 use crate::ui::ui_rems;
 use crate::views::terminal_view::TerminalView;
+use crate::workspace::{LayoutSpec, PaneId, SplitAxis};
 
-/// 格标识：树内唯一，由树在分割时分配。
-pub type PaneId = u64;
 /// 分割节点标识：拖拽比例时用来定位是哪一条分割条。
 pub type SplitId = u64;
-
-/// 分割方向：并排（左右）或堆叠（上下）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SplitAxis {
-    /// 左右并排
-    SideBySide,
-    /// 上下堆叠
-    Stacked,
-}
 
 /// 像素矩形：布局与命中判定都用它，与 GPUI 的 Bounds 在渲染层互转。
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -62,38 +52,6 @@ pub struct PaneTree {
     focused: PaneId,
     next_pane: PaneId,
     next_split: SplitId,
-}
-
-/// 布局节点的只读投影（ADR-037 持久化用）：只描述树形、方向与比例，
-/// 不暴露内部节点，也不携带任何会话信息。
-#[derive(Clone, Debug, PartialEq)]
-pub enum LayoutSpec {
-    Leaf(PaneId),
-    Split {
-        axis: SplitAxis,
-        ratio: f32,
-        first: Box<LayoutSpec>,
-        second: Box<LayoutSpec>,
-    },
-}
-
-impl LayoutSpec {
-    /// 按树序收集叶标识（左/上在前）。
-    pub fn panes(&self) -> Vec<PaneId> {
-        let mut out = Vec::new();
-        self.collect(&mut out);
-        out
-    }
-
-    fn collect(&self, out: &mut Vec<PaneId>) {
-        match self {
-            LayoutSpec::Leaf(pane) => out.push(*pane),
-            LayoutSpec::Split { first, second, .. } => {
-                first.collect(out);
-                second.collect(out);
-            }
-        }
-    }
 }
 
 impl PaneTree {

@@ -125,7 +125,7 @@ fn replayed_fixtures_keep_our_snapshot_invariants() {
                 *backend,
                 80,
                 24,
-                crate::settings::DEFAULT_SCROLLING_HISTORY,
+                crate::terminal::DEFAULT_SCROLLING_HISTORY,
             );
             replay(&mut model, &bytes);
 
@@ -178,7 +178,7 @@ fn replays_external_recordings() {
                 *backend,
                 96,
                 30,
-                crate::settings::DEFAULT_SCROLLING_HISTORY,
+                crate::terminal::DEFAULT_SCROLLING_HISTORY,
             );
             replay(&mut model, &bytes);
 
