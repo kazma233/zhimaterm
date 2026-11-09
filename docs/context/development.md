@@ -105,7 +105,8 @@ src/ssh/connect/               SSH 连接表单与列表弹窗（ADR-026/048）�
   tests.rs                     单元测试与夹具
 src/ssh/connections.rs         保存的连接：按条目 id 读写与原子落盘（不含任何口令，ADR-048 修订）
 src/ssh/keychain.rs            OS 安全凭据存储：凭据按条目 id 挂钥匙串（ADR-018 修订）
-src/ssh/forward_form.rs        运行中新增转发规则的小表单（ADR-038）
+src/ssh/forward_form.rs        运行中新增转发规则的小表单（ADR-038）；规则落点经 ForwardTarget
+                               能力接口注入，域不依赖会话视图类型（ADR-007 修订六）
 src/settings/                  外观与终端设置：读写、校验、原子落盘；form.rs 是设置表单与设置模态
 src/theme/                     基础层（ADR-007 修订五）：配色方案、内置主题表、UI token 推导与进程级
                                主题状态（ADR-022）；只依赖 gpui，不引用 ui/views/session

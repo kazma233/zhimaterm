@@ -203,3 +203,19 @@ ADR-044 2026-11-09 修订。app 的 `overlay_*` 方法保留为薄转发，栈�
 同时修正本 ADR 2026-11-09 一修订里「appearance 归组」的设想：`settings` 依赖
 `terminal`（模型层），不能与 `theme`/`font` 放进同一目录层，否则又会形成
 叶子 → 领域反向边。`settings` 与 `workspace` 留在领域层。
+
+## 修订（2026-11-09，六）：forward_form 落点能力接口化
+
+`ssh::forward_form::ForwardModal` 原持 `Entity<TerminalView>`，把会话视图
+类型带进了领域层（域 → 视图的反向依赖）。按依赖倒置改为能力接口：
+
+- 域（`ssh::forward_form`）定义 `ForwardTarget` 契约：`rules`（当前规则）、
+  `add`（追加并下发）、`save_identity`（写回保存连接所需的身份，None 表示
+  不写回）。模态只持有 `Rc<dyn ForwardTarget>`。
+- 外壳（`app`）用 `ViewForwardTarget` 适配 `Entity<TerminalView>` 实现该
+  契约，视图类型只出现在外壳；表单的 apply/toggle 动作装配不变。
+- `forwards_changed` 改为消费能力接口（规则 + 身份快照），不再读视图实体；
+  删除规则后的写回回调同样经适配器。
+
+结果：`ssh` 域对 `views`/`app` 的引用为零。行为等价、纯接口重构；
+`cargo fmt`/clippy/tests 全绿。

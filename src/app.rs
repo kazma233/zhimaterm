@@ -671,7 +671,9 @@ impl ZhimaTermApp {
                 // 再读视图，否则外壳快照会对同一实体重入读取
                 let app = forwards_app.clone();
                 cx.defer(move |cx| {
-                    let _ = app.update(cx, |app, cx| app.forwards_changed(view, cx));
+                    let _ = app.update(cx, |app, cx| {
+                        app.forwards_changed(&ViewForwardTarget { view }, cx)
+                    });
                 });
             }),
             state_changed: Rc::new(move |_view, cx| {
@@ -1118,20 +1120,22 @@ impl ZhimaTermApp {
         });
     }
 
-    /// 打开「添加转发规则」表单（ADR-038）：目标视图由点按钮的会话自带，
-    /// 提交后规则作用在它上面。
+    /// 打开「添加转发规则」表单（ADR-038）：规则落点由点按钮的会话经
+    /// [`crate::ssh::forward_form::ForwardTarget`] 能力注入，域不见视图类型。
     fn open_forward_form(
         &mut self,
         view: Entity<TerminalView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let target: Rc<dyn crate::ssh::forward_form::ForwardTarget> =
+            Rc::new(ViewForwardTarget { view });
         let modal = crate::ssh::forward_form::ForwardModal {
             form: crate::ssh::forward_form::ForwardForm::new(
                 font::terminal_font(&self.font.family),
                 cx,
             ),
-            view,
+            target,
             actions: forward_modal_actions(cx),
         };
         self.overlay_open(Box::new(modal), window, cx);
@@ -1141,7 +1145,7 @@ impl ZhimaTermApp {
     /// 按「同时保存到连接」写回配置。
     fn apply_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let host = overlay_host(cx);
-        let (view, rule) = {
+        let (target, rule) = {
             let Some(modal) = host.read(cx).top_view().and_then(|view| {
                 view.as_any()
                     .downcast_ref::<crate::ssh::forward_form::ForwardModal>()
@@ -1149,22 +1153,21 @@ impl ZhimaTermApp {
                 return;
             };
             let next_id = modal
-                .view
-                .read(cx)
-                .forwards()
+                .target
+                .rules(cx)
                 .iter()
                 .map(|rule| rule.id)
                 .max()
                 .unwrap_or(0)
                 + 1;
             let rule = modal.form.rule(next_id, cx);
-            (modal.view.clone(), rule)
+            (modal.target.clone(), rule)
         };
         match rule {
             Ok(rule) => {
                 self.overlay_close_top(window, cx);
-                view.update(cx, |view, cx| view.add_forward(rule, cx));
-                self.forwards_changed(view, cx);
+                target.add(rule, cx);
+                self.forwards_changed(target.as_ref(), cx);
             }
             Err(message) => {
                 self.mutate_forward_form(cx, |form| form.error = Some(message));
@@ -1189,22 +1192,14 @@ impl ZhimaTermApp {
     /// 到连接」时，用当前规则表覆盖该条保存连接的转发配置。
     fn forwards_changed(
         &mut self,
-        view: Entity<crate::views::terminal_view::TerminalView>,
+        target: &dyn crate::ssh::forward_form::ForwardTarget,
         cx: &mut Context<Self>,
     ) {
-        if !view.read(cx).forward_save_enabled() {
-            return;
-        }
-        let Some((host, port, user)) = view.read(cx).ssh_identity() else {
+        let Some((host, port, user)) = target.save_identity(cx) else {
             return;
         };
-        let (host, user) = (host.to_owned(), user.to_owned());
-        let forwards: Vec<connections::SavedForward> = view
-            .read(cx)
-            .forwards()
-            .iter()
-            .map(saved_forward_of)
-            .collect();
+        let forwards: Vec<connections::SavedForward> =
+            target.rules(cx).iter().map(saved_forward_of).collect();
         self.saved.update(cx, |sources, _| {
             if let Some(store) = sources.store.as_mut()
                 && let Err(error) = store.replace_forwards(&host, port, &user, forwards)
@@ -2124,6 +2119,32 @@ fn modal_action(
 ) -> WindowAction {
     let listener = cx.listener(move |this, _: &(), window, cx| action(this, window, cx));
     Rc::new(move |window, cx| listener(&(), window, cx))
+}
+
+/// 转发表单落点的外壳实现（ADR-007 修订六）：把会话视图实体适配成 ssh 域
+/// 定义的 [`crate::ssh::forward_form::ForwardTarget`] 能力。视图类型只出现在
+/// 外壳，域不反向依赖 `views`。
+struct ViewForwardTarget {
+    view: Entity<TerminalView>,
+}
+
+impl crate::ssh::forward_form::ForwardTarget for ViewForwardTarget {
+    fn rules(&self, cx: &App) -> Vec<crate::session::ForwardRule> {
+        self.view.read(cx).forwards().to_vec()
+    }
+
+    fn add(&self, rule: crate::session::ForwardRule, cx: &mut App) {
+        self.view.update(cx, |view, cx| view.add_forward(rule, cx));
+    }
+
+    fn save_identity(&self, cx: &App) -> Option<(String, u16, String)> {
+        let view = self.view.read(cx);
+        if !view.forward_save_enabled() {
+            return None;
+        }
+        view.ssh_identity()
+            .map(|(host, port, user)| (host.to_owned(), port, user.to_owned()))
+    }
 }
 
 /// 设置模态的交互装配：渲染层触发的每个动作都回到这里定义的应用方法。

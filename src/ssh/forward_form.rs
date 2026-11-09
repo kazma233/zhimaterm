@@ -2,7 +2,8 @@
 //!
 //! 与设置表单同一物种：输入实体由表单自持，渲染经 [`Actions`] 回调回到外壳，
 //! 只采集规则，不碰会话（应用规则是外壳的职责）。ADR-044 起以 [`ForwardModal`]
-//! 接入统一浮层栈，目标会话视图随模态携带。
+//! 接入统一浮层栈。规则落点经 [`ForwardTarget`] 能力接口注入——域只依赖这份
+//! 契约，不依赖具体会话视图类型（ADR-007 修订六）。
 
 use std::rc::Rc;
 
@@ -15,6 +16,17 @@ use crate::ui::overlay::{KeyHandling, ModalView, Species};
 use crate::ui::{WindowAction, card, panel, ui_rems};
 
 pub type AppAction = Rc<dyn Fn(&mut App)>;
+
+/// 转发表单的落点能力（依赖倒置，ADR-007 修订六）：外壳按点「＋ 规则」的
+/// 会话实现，域只看到规则读写与写回身份，不接触会话视图实体。
+pub trait ForwardTarget {
+    /// 会话当前的转发规则（新规则的 id 接在最大 id 之后）。
+    fn rules(&self, cx: &App) -> Vec<ForwardRule>;
+    /// 追加一条规则并立即下发到 worker。
+    fn add(&self, rule: ForwardRule, cx: &mut App);
+    /// 写回保存连接所需的会话身份；None = 本会话不写回（未勾选或非 SSH）。
+    fn save_identity(&self, cx: &App) -> Option<(String, u16, String)>;
+}
 
 pub struct Actions {
     pub apply: WindowAction,
@@ -151,11 +163,11 @@ fn parse_port(text: &str, field: &str) -> Result<u16, String> {
     Ok(port)
 }
 
-/// 新增转发规则模态（ADR-044 接入统一浮层栈）：表单自持输入，目标视图由
-/// 点「＋ 规则」的会话自带，提交（外壳的 `apply`）后规则作用在它上面。
+/// 新增转发规则模态（ADR-044 接入统一浮层栈）：表单自持输入，落点由外壳
+/// 以 [`ForwardTarget`] 能力注入，提交（外壳的 `apply`）后规则作用在它上面。
 pub struct ForwardModal {
     pub form: ForwardForm,
-    pub view: Entity<crate::views::terminal_view::TerminalView>,
+    pub target: Rc<dyn ForwardTarget>,
     pub actions: Actions,
 }
 
