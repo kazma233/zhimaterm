@@ -18,6 +18,7 @@ use gpui::{
 };
 
 use crate::views::grid;
+use crate::views::session_state::{FocusAction, SessionEffect, SessionSignal, fold_signal};
 use crate::views::shell;
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
 use zhimaterm_base::input::{
@@ -29,9 +30,8 @@ use zhimaterm_base::ui::input::{ImeComposition, TextInput};
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::ui_rems;
 use zhimaterm_runtime::session::{
-    self, CommandError, ConnectFacts, ControlEvent, ForwardEvent, LocalShell, MonitorEvent,
-    MonitorSample, PointerShape, RuntimeParams, Session, SessionConfig, SessionEvent,
-    SessionTarget, StartupSize, TickOutcome,
+    self, CommandError, ControlEvent, ForwardEvent, LocalShell, MonitorEvent, MonitorSample,
+    PointerShape, RuntimeParams, Session, SessionConfig, SessionEvent, SessionTarget, StartupSize,
 };
 use zhimaterm_terminal::backend::BackendKind;
 use zhimaterm_terminal::{SearchDirection, TerminalSnapshot};
@@ -367,6 +367,7 @@ impl TerminalView {
     /// 侧边栏用的名字：前台程序设置的标题优先，否则用显示编号。
     pub fn label(&self) -> String {
         self.state
+            .data()
             .title
             .clone()
             .unwrap_or_else(|| format!("会话 {}", self.display_number))
@@ -388,7 +389,7 @@ impl TerminalView {
 
     /// 响铃标记是否待确认（侧栏行据此点亮）。
     pub fn bell_pending(&self) -> bool {
-        self.state.bell_pending
+        self.state.data().bell_pending
     }
 
     /// 探针底栏（ADR-028）：本地默认 Shell 格渲染，与远端状态底栏同位置同款
@@ -455,7 +456,7 @@ impl TerminalView {
     pub fn needs_close_confirmation(&self) -> bool {
         close_needs_confirmation(
             self.local,
-            self.state.exited,
+            self.state.data().exited,
             self.alt_screen(),
             self.foreground_busy(),
         )
@@ -466,7 +467,7 @@ impl TerminalView {
     pub fn close_confirmation_reason(&self) -> Option<&'static str> {
         if !close_needs_confirmation(
             self.local,
-            self.state.exited,
+            self.state.data().exited,
             self.alt_screen(),
             self.foreground_busy(),
         ) {
@@ -495,20 +496,20 @@ impl TerminalView {
 
     /// 日志已失效（ADR-017）：侧栏行据此点亮「⚠ 日志」；与响铃不同，不做看清即清。
     pub fn log_warning(&self) -> bool {
-        self.state.log_warning
+        self.state.data().log_warning
     }
 
     /// 清掉响铃标记：用户看过这一格（切到该标签或点进去）之后调用。
     pub fn clear_bell(&mut self, cx: &mut Context<Self>) {
-        if self.state.bell_pending {
-            self.state.bell_pending = false;
+        if self.state.data().bell_pending {
+            fold_signal(&mut self.state, SessionSignal::BellSeen, Instant::now());
             cx.notify();
         }
     }
 
     /// 前台程序设置的标题，用于窗口标题。
     pub fn title(&self) -> Option<&str> {
-        self.state.title.as_deref()
+        self.state.data().title.as_deref()
     }
 
     /// 会话来源（`LOCAL` / `user@host:port`）：侧栏行的第二行显示它。
@@ -517,12 +518,12 @@ impl TerminalView {
     }
 
     pub fn is_exited(&self) -> bool {
-        self.state.exited
+        self.state.data().exited
     }
 
     /// 正常结束（用户 exit 或前端进程退出）：应用据此关闭 tab。
     pub fn ended(&self) -> bool {
-        self.state.ended
+        self.state.data().ended
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -634,53 +635,44 @@ impl TerminalView {
     /// 返回是否还需要继续每秒走。
     fn tick_second(&mut self, cx: &mut Context<Self>) -> bool {
         // 裁决全在重连计划（GLOSSARY）：这里只转述连接期事实、消费决定
-        let outcome = self.state.planner.tick(
-            Instant::now(),
-            ConnectFacts {
-                connecting: self.connecting(),
+        let connecting = self.connecting();
+        let effects = fold_signal(
+            &mut self.state,
+            SessionSignal::Tick {
+                connecting,
                 local: self.local,
-                trust_pending: self.state.trust_request.is_some(),
                 started_at: self.connecting_started,
             },
+            Instant::now(),
         );
-        match outcome {
-            // 自动重连到点：发起后失败与否由 Exited/Failed 事件重新裁决
-            TickOutcome::Fire => {
-                self.start_reconnect(cx);
-                return true;
-            }
-            TickOutcome::WatchdogFired(schedule) => {
-                self.state.exited = true;
-                self.state.status = "连接超时：服务器长时间无响应".to_owned();
-                crate::views::session_state::apply_schedule(&mut self.state, schedule);
-                cx.notify();
-            }
-            TickOutcome::Idle => {
-                // 连接秒表与重连倒计时都按秒重画：倒计时不重画会钉死在首次秒数
-                if self.connecting() || self.state.planner.has_plan() {
-                    cx.notify();
-                }
-            }
+        self.apply_session_effects(effects, cx);
+        let keep = self.connecting() || self.state.data().planner.has_plan();
+        if keep {
+            // 连接秒表与重连倒计时都按秒重画：倒计时不重画会钉死在首次秒数
+            cx.notify();
         }
-        self.connecting() || self.state.planner.has_plan()
+        keep
     }
 
     /// 连接中：还没有首帧快照且未到结束态。
     fn connecting(&self) -> bool {
-        self.snapshot.is_none() && !self.state.exited
+        self.snapshot.is_none() && !self.state.data().exited
     }
 
     /// 用户按 Esc：取消自动重连计划（手动 R 与关闭不受影响）。
     pub fn cancel_auto_reconnect(&mut self, cx: &mut Context<Self>) {
-        if self.state.planner.user_cancel() {
-            self.state.status.push_str("（已取消自动重连）");
-            cx.notify();
-        }
+        fold_signal(
+            &mut self.state,
+            SessionSignal::ReconnectCancelled,
+            Instant::now(),
+        );
+        cx.notify();
     }
 
     /// 底栏倒计时数据：计划存在时折算剩余秒数与第几次尝试。
     fn auto_reconnect_display(&self) -> Option<shell::AutoReconnect> {
         self.state
+            .data()
             .planner
             .display(Instant::now())
             .map(|state| shell::AutoReconnect {
@@ -692,14 +684,14 @@ impl TerminalView {
 
     /// 会话结束后是否提供原地重连（只有 SSH 会话）。
     pub fn can_reconnect(&self) -> bool {
-        self.state.reconnect_target.is_some()
+        self.state.data().reconnect_target.is_some()
     }
 
     /// 分屏新格要用的会话目标（ADR-014）：跟随本格的类型——SSH 格用同一目标
     /// （凭据只在内存里，随新格独立持有），本地格开同一 shell（WSL 格即同一
     /// 发行版，ADR-021）。
     pub fn split_target(&self) -> SessionTarget {
-        match &self.state.reconnect_target {
+        match &self.state.data().reconnect_target {
             Some(target) => SessionTarget::Ssh(target.clone()),
             None => SessionTarget::Local {
                 shell: self.local_shell.clone(),
@@ -713,7 +705,11 @@ impl TerminalView {
     /// 出口），失败亮起
     pub fn set_logging(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let ok = zhimaterm_runtime::recording::recorder::set_logging(self.pane, enabled);
-        self.state.log_warning = !ok;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::LoggingToggled { ok },
+            Instant::now(),
+        );
         cx.notify();
     }
 
@@ -732,19 +728,27 @@ impl TerminalView {
     }
 
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        self.state.planner.user_manual();
+        fold_signal(
+            &mut self.state,
+            SessionSignal::ReconnectUserInitiated,
+            Instant::now(),
+        );
         self.start_reconnect(cx);
     }
 
     /// 原地重连的共用实现：丢弃残余状态，用保存的目标重新建立会话。
     /// 初始网格用默认尺寸，连接期间的 resize 会作为初始尺寸补上。
     fn start_reconnect(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.state.reconnect_target.clone() else {
+        let Some(target) = self.state.data().reconnect_target.clone() else {
             return;
         };
         self.snapshot = None;
         // 重连后输入该回到终端；会话复活，撤销待 blur（状态复位单点在归约器）
-        self.state.begin_reconnect();
+        fold_signal(
+            &mut self.state,
+            SessionSignal::ReconnectStarting,
+            Instant::now(),
+        );
         self.password_prompt = None;
         self.monitor = MonitorState::None;
         self.connecting_started = Instant::now();
@@ -771,7 +775,7 @@ impl TerminalView {
     /// 工作区持久化投影（ADR-037）：SSH 格不持久化（重启后必须显式重连），
     /// 本地格只记形态——Shell 与工作目录恢复时取当前设置。
     pub fn workspace_leaf(&self) -> Option<crate::workspace::SavedNode> {
-        if self.state.reconnect_target.is_some() {
+        if self.state.data().reconnect_target.is_some() {
             return None;
         }
         match &self.local_shell {
@@ -781,6 +785,7 @@ impl TerminalView {
                     label_number: self.display_number,
                     cwd: self
                         .state
+                        .data()
                         .cwd
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
@@ -798,7 +803,11 @@ impl TerminalView {
     /// 恢复时记下保存的工作目录：worker 上报真实值之前，工作区快照继续
     /// 沿用它，避免恢复过程中的落盘把 cwd 抹掉（ADR-039）。
     pub fn set_remembered_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
-        self.state.cwd = cwd;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::RememberedCwd(cwd),
+            Instant::now(),
+        );
     }
 
     /// 会话编号（ADR-039：回滚文件键与工作区叶编号）。
@@ -821,6 +830,7 @@ impl TerminalView {
     /// 当前转发规则（含运行中增删）。本地格没有转发，返回空表。
     pub fn forwards(&self) -> &[zhimaterm_runtime::session::ForwardRule] {
         self.state
+            .data()
             .reconnect_target
             .as_ref()
             .map(|target| target.forwards.as_slice())
@@ -834,6 +844,7 @@ impl TerminalView {
     /// SSH 连接身份（host/port/user）：写回保存的连接时用来定位条目。
     pub fn ssh_identity(&self) -> Option<(&str, u16, &str)> {
         self.state
+            .data()
             .reconnect_target
             .as_ref()
             .map(|target| (target.host.as_str(), target.port, target.user.as_str()))
@@ -845,9 +856,11 @@ impl TerminalView {
         rule: zhimaterm_runtime::session::ForwardRule,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = self.state.reconnect_target.as_mut() {
-            target.forwards.push(rule.clone());
-        }
+        fold_signal(
+            &mut self.state,
+            SessionSignal::ForwardRuleAdded(rule.clone()),
+            Instant::now(),
+        );
         self.forward_states.push(ForwardRuleState {
             id: rule.id,
             label: rule.label(),
@@ -870,9 +883,11 @@ impl TerminalView {
         id: zhimaterm_runtime::session::ForwardId,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = self.state.reconnect_target.as_mut() {
-            target.forwards.retain(|rule| rule.id != id);
-        }
+        fold_signal(
+            &mut self.state,
+            SessionSignal::ForwardRuleRemoved(id),
+            Instant::now(),
+        );
         self.forward_states.retain(|state| state.id != id);
         let _ = self.session.remove_forward(id);
         cx.notify();
@@ -1001,18 +1016,22 @@ impl TerminalView {
 
     /// 执行归约器产出的副作用（GLOSSARY「会话视图归约」）：写剪贴板、
     /// 建输入框、调会话句柄、启动时钟与通知外壳。
-    fn apply_session_effects(
-        &mut self,
-        effects: Vec<crate::views::session_state::SessionEffect>,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::views::session_state::SessionEffect;
+    fn apply_session_effects(&mut self, effects: Vec<SessionEffect>, cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
                 SessionEffect::CopyToClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
-                SessionEffect::Receipt(text) => self.report_receipt(text),
+                SessionEffect::Receipt(text) => {
+                    // 本地格没有底栏（ADR-016）：回执只在远端格进状态文案
+                    if !self.local {
+                        fold_signal(
+                            &mut self.state,
+                            SessionSignal::Receipt(text),
+                            Instant::now(),
+                        );
+                    }
+                }
                 SessionEffect::AnswerPassword(password) => {
                     self.session.answer_password(Some(password));
                 }
@@ -1028,6 +1047,7 @@ impl TerminalView {
                     }
                 }
                 SessionEffect::EnsureClock => self.ensure_clock(cx),
+                SessionEffect::StartReconnect => self.start_reconnect(cx),
                 SessionEffect::PersistCwd => {
                     let changed = self.forward_hooks.state_changed.clone();
                     changed(cx.entity(), cx);
@@ -1135,7 +1155,7 @@ impl TerminalView {
         // 守卫顺序（菜单 → 搜索 → 死会话 → 焦点 → 连接中）在纯函数里，见
         // `terminal_keys::route_key`；这里只执行动作
         let route = route_key(
-            &self.state,
+            self.state.data(),
             self.context_menu.is_some(),
             self.search_open,
             self.focus.is_focused(window),
@@ -1165,9 +1185,13 @@ impl TerminalView {
             KeyRoute::Consumed | KeyRoute::NotFocused => {}
             // 连接中 Ctrl+C：立即进入结束态，后台连接按自身预算自然收尾
             KeyRoute::CancelConnecting => {
-                self.state.exited = true;
                 self.generation += 1;
-                self.state.status = "已取消连接".to_owned();
+                let effects = fold_signal(
+                    &mut self.state,
+                    SessionSignal::ConnectingCancelled,
+                    Instant::now(),
+                );
+                self.apply_session_effects(effects, cx);
                 cx.notify();
             }
             KeyRoute::Terminal => {
@@ -1198,7 +1222,11 @@ impl TerminalView {
         let focus = input.read(cx).focus_handle();
         self.search_input = Some(input);
         self.search_open = true;
-        self.state.search_feedback = None;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::SearchFeedbackCleared,
+            Instant::now(),
+        );
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -1210,7 +1238,11 @@ impl TerminalView {
         }
         self.search_input = None;
         self.search_open = false;
-        self.state.search_feedback = None;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::SearchFeedbackCleared,
+            Instant::now(),
+        );
         self.session.clear_search();
         self.focus.focus(window, cx);
         cx.notify();
@@ -1222,7 +1254,11 @@ impl TerminalView {
             return;
         };
         if pattern.is_empty() {
-            self.state.search_feedback = None;
+            fold_signal(
+                &mut self.state,
+                SessionSignal::SearchFeedbackCleared,
+                Instant::now(),
+            );
             self.session.clear_search();
         } else {
             self.session
@@ -1262,7 +1298,7 @@ impl TerminalView {
     /// 复制快捷键派发的动作（绑定见 `input::app_key_bindings`）。
     /// 结束态与连接中没有可复制的内容，与按键路径迁移前的行为一致。
     fn copy_selection(&mut self) {
-        if self.state.exited || self.snapshot.is_none() {
+        if self.state.data().exited || self.snapshot.is_none() {
             return;
         }
         self.session.copy_selection();
@@ -1270,7 +1306,7 @@ impl TerminalView {
 
     /// 粘贴快捷键派发的动作。是否需要 bracketed paste 包裹由 worker 决定。
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.state.exited || self.snapshot.is_none() {
+        if self.state.data().exited || self.snapshot.is_none() {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -1278,23 +1314,15 @@ impl TerminalView {
         }
     }
 
-    /// 操作回执：本地格不产生（本地格没有底栏，见 ADR-016），远端格写进底栏。
-    /// 回执只是告知动作已发生，不影响动作本身。
-    fn report_receipt(&mut self, text: String) {
-        if !self.local {
-            self.state.status = text;
-        }
-    }
-
     fn write_or_report(&mut self, result: Result<(), CommandError>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => cx.stop_propagation(),
-            Err(CommandError::QueueFull) => {
-                self.state.status = "命令队列已满，这次输入被丢弃".into();
-                cx.notify();
-            }
-            Err(CommandError::Closed) => {
-                self.state.status = "会话已结束，无法再输入".into();
+            Err(error) => {
+                fold_signal(
+                    &mut self.state,
+                    SessionSignal::CommandRejected(error),
+                    Instant::now(),
+                );
                 cx.notify();
             }
         }
@@ -1382,7 +1410,11 @@ impl TerminalView {
     fn answer_trust(&mut self, accept: bool, cx: &mut Context<Self>) {
         self.session.trust_host(accept);
         // 不写状态文案：连接中由底栏按秒数现算；拒绝的原因由会话的 Failed 给出
-        self.state.trust_request = None;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::TrustAnswered,
+            Instant::now(),
+        );
         cx.notify();
     }
 
@@ -1392,7 +1424,11 @@ impl TerminalView {
     fn answer_password(&mut self, password: Option<String>, cx: &mut Context<Self>) {
         self.session.answer_password(password);
         self.password_prompt = None;
-        self.state.password_focus_pending = false;
+        fold_signal(
+            &mut self.state,
+            SessionSignal::PasswordPromptDismissed,
+            Instant::now(),
+        );
         cx.notify();
     }
 
@@ -1430,7 +1466,7 @@ impl TerminalView {
     ) {
         // 已结束的格不接管焦点：终端 focus handle 挂着 IME 输入处理器，点了它
         // 按键就被 IME 吃掉，R/Enter 的应用层拦截收不到（死会话不收字）
-        if !self.state.exited {
+        if !self.state.data().exited {
             self.focus.focus(window, cx);
         }
         self.clear_bell(cx);
@@ -1450,7 +1486,14 @@ impl TerminalView {
             && let Some(link) = self.link_at(column, row)
         {
             cx.open_url(&link);
-            self.report_receipt(format!("已打开链接：{link}"));
+            // 本地格没有底栏（ADR-016）：回执只在远端格进状态文案
+            if !self.local {
+                fold_signal(
+                    &mut self.state,
+                    SessionSignal::Receipt(format!("已打开链接：{link}")),
+                    Instant::now(),
+                );
+            }
             cx.notify();
             return;
         }
@@ -1550,7 +1593,7 @@ impl EntityInputHandler for TerminalView {
         // 后仍可能残留（帧末只增不清），平台会把按键继续路由到这里——守卫必须
         // 有，且不能只是吞掉：死会话判定与 keydown 同源（terminal_keys），
         // 否则按键两边都不处理，R 重连对用户彻底失灵
-        if self.state.exited {
+        if self.state.data().exited {
             if crate::views::terminal_keys::dead_session_text(self.can_reconnect(), text)
                 == crate::views::terminal_keys::DeadSessionKey::Reconnect
             {
@@ -2024,18 +2067,17 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = zhimaterm_base::theme::tokens(cx);
         // 焦点裁决都在渲染时机做（事件循环拿不到 window）：重连后把焦点交回
-        // 终端（活会话要输入）；会话结束则 blur——焦点留在终端会喂 IME 管道
-        if self.state.terminal_focus_pending {
-            self.state.terminal_focus_pending = false;
-            window.focus(&self.focus, cx);
-        } else if self.state.blur_pending {
-            self.state.blur_pending = false;
-            window.blur(cx);
-        } else if self.state.password_focus_pending
-            && let Some(input) = self.password_prompt.clone()
-        {
-            self.state.password_focus_pending = false;
-            window.focus(&input.read(cx).focus_handle(), cx);
+        // 终端（活会话要输入）；会话结束则 blur——焦点留在终端会喂 IME 管道。
+        // 一次性标志的消费在归约器（take_focus_action），这里只执行
+        match self.state.take_focus_action(self.password_prompt.is_some()) {
+            Some(FocusAction::Terminal) => window.focus(&self.focus, cx),
+            Some(FocusAction::Blur) => window.blur(cx),
+            Some(FocusAction::Password) => {
+                if let Some(input) = self.password_prompt.clone() {
+                    window.focus(&input.read(cx).focus_handle(), cx);
+                }
+            }
+            None => {}
         }
         // 焦点上报：GPUI 在窗口激活状态变化时会强制刷新一帧，因此在这里读取不会漏掉变化
         let active = window.is_window_active();
@@ -2083,7 +2125,7 @@ impl Render for TerminalView {
         let cursor = if self.hovered_link.is_some() {
             gpui::CursorStyle::PointingHand
         } else {
-            match self.state.pointer {
+            match self.state.data().pointer {
                 PointerShape::Arrow => gpui::CursorStyle::Arrow,
                 PointerShape::Text => gpui::CursorStyle::IBeam,
             }
@@ -2375,16 +2417,16 @@ impl Render for TerminalView {
                             .children(
                                 center_notice(
                                     self.local,
-                                    self.state.exited,
+                                    self.state.data().exited,
                                     self.snapshot.is_some(),
-                                    &self.state.status,
+                                    &self.state.data().status,
                                 )
                                 .map(|(text, hint)| render_center_notice(&tokens, text, hint)),
                             )
                             // 信任确认浮层必须挂在终端网格之后：后挂的子元素画在上层，
                             // 否则定格画面（不透明背景）会把确认框盖住——用户看不见
                             // 确认入口，连接就停在等待里，看起来像卡死
-                            .children(self.state.trust_request.clone().map(|request| {
+                            .children(self.state.data().trust_request.clone().map(|request| {
                                 let app = cx.entity();
                                 shell::render_trust_prompt(&tokens, &request, move |accept, cx| {
                                     app.update(cx, |view, cx| view.answer_trust(accept, cx));
@@ -2465,7 +2507,7 @@ impl Render for TerminalView {
                         render_search_bar(
                             self.search_input.as_ref(),
                             self.search_regex,
-                            self.state.search_feedback.as_deref(),
+                            self.state.data().search_feedback.as_deref(),
                             cx,
                         )
                     }))
@@ -2494,9 +2536,9 @@ impl Render for TerminalView {
                 shell::render_status_bar(
                     &tokens,
                     &{
-                        if self.state.exited {
+                        if self.state.data().exited {
                             shell::StatusBar::Ended {
-                                status: &self.state.status,
+                                status: &self.state.data().status,
                                 can_reconnect: self.can_reconnect(),
                                 auto_reconnect: self.auto_reconnect_display(),
                             }
@@ -2526,11 +2568,13 @@ impl Render for TerminalView {
                                 MonitorState::Failed(reason) => {
                                     shell::StatusBar::MonitorUnavailable(reason)
                                 }
-                                MonitorState::None => shell::StatusBar::Notice(&self.state.status),
+                                MonitorState::None => {
+                                    shell::StatusBar::Notice(&self.state.data().status)
+                                }
                             }
                         }
                     },
-                    self.state.lang_status.as_ref(),
+                    self.state.data().lang_status.as_ref(),
                     status_extras(
                         sftp_toggle.map(|toggle| toggle.into_any_element()),
                         history_toggle.map(|toggle| toggle.into_any_element()),

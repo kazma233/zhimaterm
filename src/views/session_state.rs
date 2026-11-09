@@ -1,20 +1,29 @@
-//! 会话视图归约（GLOSSARY「会话视图归约」）：控制事件 × 视图状态 → 效果清单。
+//! 会话视图归约（GLOSSARY「会话视图归约」）：输入 × 视图状态 → 效果清单。
 //!
 //! 这里只有纯数据与纯决策：不持有 gpui 实体、句柄或画面帧，也不执行任何
-//! 副作用。视图把事件喂进来，按返回的效果清单去写剪贴板、建输入框、调会话
-//! 句柄；钥匙串读取以查找闭包传入（测试给假实现，生产读系统钥匙串）。
+//! 副作用。两种输入：控制事件（worker 侧报告的事）走 `reduce`，视图信号
+//! （视图侧发生的事）走 `fold_signal`；视图按返回的效果清单去写剪贴板、
+//! 建输入框、调会话句柄，钥匙串读取以查找闭包传入（测试给假实现，生产读
+//! 系统钥匙串）。状态字段（含重连计划）只在本模块可写：`data()` 只给只读
+//! 引用，折算是唯一写者。
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use zhimaterm_runtime::session::{
-    ControlEvent, LangStatus, PointerShape, ReconnectPlanner, ScheduleOutcome, SessionExit,
-    SshTarget, TrustRequest,
+    CommandError, ConnectFacts, ControlEvent, ForwardId, ForwardRule, LangStatus, PointerShape,
+    ReconnectPlanner, ScheduleOutcome, SessionExit, SshTarget, TickOutcome, TrustRequest,
 };
 use zhimaterm_terminal::SearchOutcome;
 
 /// 事件可写、渲染只读的纯数据子集。实体句柄、画面帧与时钟留在视图。
 pub(crate) struct SessionViewState {
+    data: SessionViewStateData,
+}
+
+/// `SessionViewState` 的只读投影：字段公开，但只能经 `data()` 拿共享引用，
+/// 写不出去——写入只发生在 session_state 的折算入口。
+pub(crate) struct SessionViewStateData {
     /// 底栏状态文案（本地格不显示，回执由视图按 `local` 决定去留）。
     pub status: String,
     /// 前台程序设置的标题；None = 用默认标题。
@@ -58,40 +67,112 @@ impl SessionViewState {
         // 只有 SSH 会话可原地重连（重连计划，GLOSSARY）
         let planner = ReconnectPlanner::new(reconnect_target.is_some());
         Self {
-            status: String::new(),
-            title: None,
-            pointer: PointerShape::Text,
-            exited: false,
-            ended: false,
-            bell_pending: false,
-            trust_request: None,
-            lang_status: None,
-            log_warning: false,
-            cwd: None,
-            planner,
-            password_auto_filled: false,
-            password_focus_pending: false,
-            terminal_focus_pending: false,
-            blur_pending: false,
-            closes_on_shell_exit,
-            reconnect_target,
-            search_feedback: None,
+            data: SessionViewStateData {
+                status: String::new(),
+                title: None,
+                pointer: PointerShape::Text,
+                exited: false,
+                ended: false,
+                bell_pending: false,
+                trust_request: None,
+                lang_status: None,
+                log_warning: false,
+                cwd: None,
+                planner,
+                password_auto_filled: false,
+                password_focus_pending: false,
+                terminal_focus_pending: false,
+                blur_pending: false,
+                closes_on_shell_exit,
+                reconnect_target,
+                search_feedback: None,
+            },
         }
     }
 
-    /// 重连开始：清掉上一轮的事件态，焦点交回终端（重连计划另行重置）。
-    pub(super) fn begin_reconnect(&mut self) {
-        self.exited = false;
-        self.ended = false;
-        self.title = None;
-        self.trust_request = None;
-        self.password_focus_pending = false;
-        self.terminal_focus_pending = true;
-        self.blur_pending = false;
-        self.password_auto_filled = false;
-        self.lang_status = None;
-        self.status.clear();
+    /// 状态的只读投影：渲染与裁决从这里读；写入只有折算入口。
+    pub(crate) fn data(&self) -> &SessionViewStateData {
+        &self.data
     }
+
+    /// 焦点的一次性裁决（渲染时机消费）。优先级：重连交回终端 > 结束
+    /// blur > 密码卡聚焦。`has_password_prompt`：密码卡实体尚不在时保留
+    /// 标志，等卡片建好再消费。
+    pub(super) fn take_focus_action(&mut self, has_password_prompt: bool) -> Option<FocusAction> {
+        if self.data.terminal_focus_pending {
+            self.data.terminal_focus_pending = false;
+            Some(FocusAction::Terminal)
+        } else if self.data.blur_pending {
+            self.data.blur_pending = false;
+            Some(FocusAction::Blur)
+        } else if self.data.password_focus_pending && has_password_prompt {
+            self.data.password_focus_pending = false;
+            Some(FocusAction::Password)
+        } else {
+            None
+        }
+    }
+
+    /// 测试构造：直接进入已结束态（terminal_keys 死会话裁决的场景）。
+    #[cfg(test)]
+    pub(crate) fn test_ended(reconnect_target: Option<SshTarget>) -> Self {
+        let mut state = Self::new(reconnect_target, false);
+        state.data.exited = true;
+        state
+    }
+}
+
+/// `take_focus_action` 的产物，由视图在渲染时机执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusAction {
+    /// 重连成功：焦点交回终端网格（活会话要输入）。
+    Terminal,
+    /// 会话结束：焦点离开网格——留在终端会喂 IME 管道，死会话的 Esc/Enter
+    /// 与 R 在那条管道上失灵（见 GLOSSARY「按键优先级」）。
+    Blur,
+    /// 连接期密码卡聚焦。
+    Password,
+}
+
+/// 视图信号（GLOSSARY「会话视图归约」）：视图侧发生的、要折进会话视图
+/// 状态的激励，与 worker 侧的控制事件相对，不进 runtime 协议。
+pub(crate) enum SessionSignal {
+    /// 每秒时钟到点：自动重连到点、看门狗与倒计时由重连计划裁决。
+    /// 视图侧事实（快照、计时器、会话类型）随载荷传入。
+    Tick {
+        connecting: bool,
+        local: bool,
+        started_at: Instant,
+    },
+    /// 连接中用户 Ctrl+C：立即进入结束态，后台连接按自身预算自然收尾。
+    ConnectingCancelled,
+    /// 响铃已看过（切到该标签或点进该格）。
+    BellSeen,
+    /// 信任弹窗已答复（接受或拒绝都算）：等待答复的请求撤下。
+    TrustAnswered,
+    /// 密码卡已收起（答复或取消）：一次性聚焦标志作废。
+    PasswordPromptDismissed,
+    /// 搜索上下文变化（打开/关闭/清空）：旧反馈文案作废。
+    SearchFeedbackCleared,
+    /// 底栏操作回执进状态文案（本地格由视图丢弃，不折进来）。
+    Receipt(String),
+    /// 输入通道写失败：命令队列已满或会话已结束。
+    CommandRejected(CommandError),
+    /// 日志开关的结果（I/O 在记录门面，视图只折结果）。
+    LoggingToggled { ok: bool },
+    /// 恢复时预填保存的工作目录（ADR-039）：worker 上报真实值前的占位，
+    /// 不触发落盘效果。
+    RememberedCwd(Option<PathBuf>),
+    /// 手动重连（R 键）：取消自动计划、尝试计数归零（ADR-013 的 R 语义）。
+    ReconnectUserInitiated,
+    /// 重连建立中（手动与自动共用）：清上一轮事件态，焦点预定交回终端。
+    ReconnectStarting,
+    /// 用户按 Esc 取消自动重连计划（没有计划则无事发生）。
+    ReconnectCancelled,
+    /// 运行中新增转发规则（ADR-038）：同步进重连用的目标副本。
+    ForwardRuleAdded(ForwardRule),
+    /// 运行中移除转发规则（ADR-038）：从目标副本摘除。
+    ForwardRuleRemoved(ForwardId),
 }
 
 /// 归约产出的副作用：由视图执行（写剪贴板、建实体、调会话句柄等）。
@@ -111,6 +192,8 @@ pub(super) enum SessionEffect {
     CloseSftpPanel,
     /// 拉起每秒时钟（自动重连倒计时）。
     EnsureClock,
+    /// 自动重连到点：发起重连（视图执行；手动 R 走视图自己的入口）。
+    StartReconnect,
     /// 工作目录变化：通知外壳随工作区落盘。
     PersistCwd,
 }
@@ -128,11 +211,11 @@ pub(super) fn reduce(
     match event {
         ControlEvent::Started => {
             // 运行中不写状态文案：底栏只留给连接过程、瞬时反馈与结束原因
-            state.status.clear();
+            state.data.status.clear();
             // 认证成功过：断线自动重连的资格与新一轮满额尝试（ADR-013）；
             // 已存凭据的自动应答也重新武装，下次断线回退可再试它
-            state.planner.started();
-            state.password_auto_filled = false;
+            state.data.planner.started();
+            state.data.password_auto_filled = false;
             Vec::new()
         }
         ControlEvent::SelectionCopied(text) => match text {
@@ -147,21 +230,21 @@ pub(super) fn reduce(
         },
         ControlEvent::Title(title) => {
             // 空串来自 ResetTitle：回到默认标题
-            state.title = (!title.is_empty()).then_some(title);
+            state.data.title = (!title.is_empty()).then_some(title);
             Vec::new()
         }
         // 响铃不进状态文案：只在侧栏行上点亮标记，看过后清掉
         ControlEvent::Bell => {
-            state.bell_pending = true;
+            state.data.bell_pending = true;
             Vec::new()
         }
         ControlEvent::Pointer(shape) => {
-            state.pointer = shape;
+            state.data.pointer = shape;
             Vec::new()
         }
         ControlEvent::TrustRequired(request) => {
-            state.status = format!("首次连接 {}，需要确认主机密钥", request.host);
-            state.trust_request = Some(request);
+            state.data.status = format!("首次连接 {}，需要确认主机密钥", request.host);
+            state.data.trust_request = Some(request);
             Vec::new()
         }
         ControlEvent::PasswordRequired(account) => {
@@ -170,9 +253,10 @@ pub(super) fn reduce(
             // 或没有才真正问用户；自动应答占一次尝试额度，不会循环。只应答
             // 目标自己的询问：身份比对一致才按目标凭据键取，跳板的询问直接
             // 落到人工输入，不把目标的密码发给跳板机
-            if !state.password_auto_filled {
-                state.password_auto_filled = true;
+            if !state.data.password_auto_filled {
+                state.data.password_auto_filled = true;
                 let stored = state
+                    .data
                     .reconnect_target
                     .as_ref()
                     .and_then(|target| {
@@ -188,12 +272,12 @@ pub(super) fn reduce(
                     return vec![SessionEffect::AnswerPassword(password)];
                 }
             }
-            state.status = "连接需要密码".to_owned();
-            state.password_focus_pending = true;
+            state.data.status = "连接需要密码".to_owned();
+            state.data.password_focus_pending = true;
             vec![SessionEffect::ShowPasswordPrompt]
         }
         ControlEvent::LangStatus(status) => {
-            state.lang_status = Some(status);
+            state.data.lang_status = Some(status);
             Vec::new()
         }
         ControlEvent::ClipboardStore(text) => {
@@ -205,33 +289,26 @@ pub(super) fn reduce(
             ]
         }
         ControlEvent::SearchResult(outcome) => {
-            state.search_feedback = feedback_for(outcome);
+            state.data.search_feedback = feedback_for(outcome);
             Vec::new()
         }
         ControlEvent::LoggingStopped(reason) => {
-            state.log_warning = true;
+            state.data.log_warning = true;
             vec![SessionEffect::Receipt(format!("会话日志已停写：{reason}"))]
         }
         ControlEvent::CwdChanged(cwd) => {
-            if state.cwd.as_deref() == Some(cwd.as_path()) {
+            if state.data.cwd.as_deref() == Some(cwd.as_path()) {
                 return Vec::new();
             }
-            state.cwd = Some(cwd);
+            state.data.cwd = Some(cwd);
             vec![SessionEffect::PersistCwd]
         }
         ControlEvent::Exited(exit) => session_ended(state, exit, now),
         ControlEvent::Failed(status) => {
-            state.exited = true;
-            state.password_focus_pending = false;
-            state.blur_pending = true;
-            state.status = status;
+            let mut effects = connect_aborted(state, status);
             // 连接/认证失败不自动重试（防爆破），但重连途中的自动尝试继续
             // 按退避推进：资格（认证成功过）只在重连语境下成立
-            let schedule = state.planner.connect_failed(now);
-            let mut effects = vec![
-                SessionEffect::CloseSftpPanel,
-                SessionEffect::ClearPasswordPrompt,
-            ];
+            let schedule = state.data.planner.connect_failed(now);
             if apply_schedule(state, schedule) {
                 effects.push(SessionEffect::EnsureClock);
             }
@@ -246,21 +323,133 @@ pub(super) fn reduce(
     }
 }
 
+/// 把一条视图信号折进状态，返回视图要执行的副作用。状态（含重连计划）
+/// 的写入只经这里与 `reduce`。
+pub(super) fn fold_signal(
+    state: &mut SessionViewState,
+    signal: SessionSignal,
+    now: Instant,
+) -> Vec<SessionEffect> {
+    match signal {
+        SessionSignal::Tick {
+            connecting,
+            local,
+            started_at,
+        } => match state.data.planner.tick(
+            now,
+            ConnectFacts {
+                connecting,
+                local,
+                trust_pending: state.data.trust_request.is_some(),
+                started_at,
+            },
+        ) {
+            TickOutcome::Fire => vec![SessionEffect::StartReconnect],
+            TickOutcome::WatchdogFired(schedule) => {
+                let mut effects = connect_aborted(state, "连接超时：服务器长时间无响应".to_owned());
+                if apply_schedule(state, schedule) {
+                    effects.push(SessionEffect::EnsureClock);
+                }
+                effects
+            }
+            TickOutcome::Idle => Vec::new(),
+        },
+        SessionSignal::ConnectingCancelled => connect_aborted(state, "已取消连接".to_owned()),
+        SessionSignal::BellSeen => {
+            state.data.bell_pending = false;
+            Vec::new()
+        }
+        SessionSignal::TrustAnswered => {
+            state.data.trust_request = None;
+            Vec::new()
+        }
+        SessionSignal::PasswordPromptDismissed => {
+            state.data.password_focus_pending = false;
+            Vec::new()
+        }
+        SessionSignal::SearchFeedbackCleared => {
+            state.data.search_feedback = None;
+            Vec::new()
+        }
+        SessionSignal::Receipt(text) => {
+            state.data.status = text;
+            Vec::new()
+        }
+        SessionSignal::CommandRejected(error) => {
+            state.data.status = match error {
+                CommandError::QueueFull => "命令队列已满，这次输入被丢弃".to_owned(),
+                CommandError::Closed => "会话已结束，无法再输入".to_owned(),
+            };
+            Vec::new()
+        }
+        SessionSignal::LoggingToggled { ok } => {
+            state.data.log_warning = !ok;
+            Vec::new()
+        }
+        SessionSignal::RememberedCwd(cwd) => {
+            state.data.cwd = cwd;
+            Vec::new()
+        }
+        SessionSignal::ReconnectUserInitiated => {
+            state.data.planner.user_manual();
+            Vec::new()
+        }
+        SessionSignal::ReconnectStarting => {
+            begin_reconnect(state);
+            Vec::new()
+        }
+        SessionSignal::ReconnectCancelled => {
+            if state.data.planner.user_cancel() {
+                state.data.status.push_str("（已取消自动重连）");
+            }
+            Vec::new()
+        }
+        SessionSignal::ForwardRuleAdded(rule) => {
+            if let Some(target) = state.data.reconnect_target.as_mut() {
+                target.forwards.push(rule);
+            }
+            Vec::new()
+        }
+        SessionSignal::ForwardRuleRemoved(id) => {
+            if let Some(target) = state.data.reconnect_target.as_mut() {
+                target.forwards.retain(|rule| rule.id != id);
+            }
+            Vec::new()
+        }
+    }
+}
+
+/// 结束态的共同落点：结束、必 blur（焦点留在终端会喂 IME 管道，死会话的
+/// Esc/Enter 失灵）、一次性聚焦标志作废。状态文案与重连裁决由调用方补。
+fn enter_ended(state: &mut SessionViewState, status: String) {
+    state.data.exited = true;
+    state.data.password_focus_pending = false;
+    state.data.blur_pending = true;
+    state.data.status = status;
+}
+
+/// 连接期夭折（用户取消 / 看门狗超时 / 连接失败）：同一条结束规则，面板
+/// 与密码卡一并收起——自动重连途中面板可能还开着。
+fn connect_aborted(state: &mut SessionViewState, status: String) -> Vec<SessionEffect> {
+    enter_ended(state, status);
+    vec![
+        SessionEffect::CloseSftpPanel,
+        SessionEffect::ClearPasswordPrompt,
+    ]
+}
+
 /// 会话终态的共同收尾：结束态、blur、自动重连计划。
 fn session_ended(
     state: &mut SessionViewState,
     exit: SessionExit,
     now: Instant,
 ) -> Vec<SessionEffect> {
-    state.exited = true;
-    state.password_focus_pending = false;
-    state.blur_pending = true;
-    if state.closes_on_shell_exit {
-        state.ended = true;
+    enter_ended(state, exit.description);
+    if state.data.closes_on_shell_exit {
+        state.data.ended = true;
     }
-    state.status = exit.description;
     // 只认意外断线：用户主动结束停在结束态，R/Enter 由用户选
-    let schedule = state.planner.exited(exit.reason, now);
+    let schedule = state.data.planner.exited(exit.reason, now);
     let mut effects = vec![
         SessionEffect::CloseSftpPanel,
         SessionEffect::ClearPasswordPrompt,
@@ -271,14 +460,29 @@ fn session_ended(
     effects
 }
 
-/// 计划结果落到状态；返回是否需要拉起倒计时时钟。视图的看门狗 tick
-/// 也走这里（不是控制事件，但落状态的规则同一份）。
-pub(super) fn apply_schedule(state: &mut SessionViewState, outcome: ScheduleOutcome) -> bool {
+/// 重连开始：清掉上一轮的事件态，焦点交回终端（重连计划由调用方重置）。
+fn begin_reconnect(state: &mut SessionViewState) {
+    let data = &mut state.data;
+    data.exited = false;
+    data.ended = false;
+    data.title = None;
+    data.trust_request = None;
+    data.password_focus_pending = false;
+    data.terminal_focus_pending = true;
+    data.blur_pending = false;
+    data.password_auto_filled = false;
+    data.lang_status = None;
+    data.status.clear();
+}
+
+/// 计划结果落到状态；返回是否需要拉起倒计时时钟。看门狗 tick 与控制
+/// 事件的落状态规则是同一份，都在这里。
+fn apply_schedule(state: &mut SessionViewState, outcome: ScheduleOutcome) -> bool {
     match outcome {
         ScheduleOutcome::Planned => true,
         ScheduleOutcome::Ineligible => false,
         ScheduleOutcome::Exhausted => {
-            state.status.push_str(&format!(
+            state.data.status.push_str(&format!(
                 "（自动重连已用尽 {} 次，可按 R 手动重试）",
                 ReconnectPlanner::MAX_ATTEMPTS
             ));
@@ -298,6 +502,7 @@ fn feedback_for(outcome: SearchOutcome) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use zhimaterm_runtime::session::{ExitReason, PasswordAccount, SshAuth};
 
     fn no_store(_: &str) -> Option<String> {
@@ -337,34 +542,36 @@ mod tests {
             Instant::now(),
             &no_store,
         );
-        assert_eq!(state.title.as_deref(), Some("vim"));
+        assert_eq!(state.data.title.as_deref(), Some("vim"));
         reduce(
             &mut state,
             ControlEvent::Title(String::new()),
             Instant::now(),
             &no_store,
         );
-        assert_eq!(state.title, None);
+        assert_eq!(state.data.title, None);
 
         reduce(&mut state, ControlEvent::Bell, Instant::now(), &no_store);
-        assert!(state.bell_pending);
+        assert!(state.data.bell_pending);
+        fold_signal(&mut state, SessionSignal::BellSeen, Instant::now());
+        assert!(!state.data.bell_pending);
         reduce(
             &mut state,
             ControlEvent::Pointer(PointerShape::Arrow),
             Instant::now(),
             &no_store,
         );
-        assert_eq!(state.pointer, PointerShape::Arrow);
+        assert_eq!(state.data.pointer, PointerShape::Arrow);
     }
 
     #[test]
     fn started_clears_status_and_rearms_the_stored_credential() {
         let mut state = ssh_state(None);
-        state.status = "连接中".into();
-        state.password_auto_filled = true;
+        state.data.status = "连接中".into();
+        state.data.password_auto_filled = true;
         reduce(&mut state, ControlEvent::Started, Instant::now(), &no_store);
-        assert!(state.status.is_empty());
-        assert!(!state.password_auto_filled);
+        assert!(state.data.status.is_empty());
+        assert!(!state.data.password_auto_filled);
     }
 
     #[test]
@@ -376,10 +583,10 @@ mod tests {
             Instant::now(),
             &no_store,
         );
-        assert!(state.exited);
-        assert!(state.ended, "本地 shell 正常退出要自动关格");
-        assert!(state.blur_pending, "结束即 blur，按键才能到应用层");
-        assert_eq!(state.status, "shell 已退出");
+        assert!(state.data.exited);
+        assert!(state.data.ended, "本地 shell 正常退出要自动关格");
+        assert!(state.data.blur_pending, "结束即 blur，按键才能到应用层");
+        assert_eq!(state.data.status, "shell 已退出");
         assert!(effects.contains(&SessionEffect::CloseSftpPanel));
         assert!(effects.contains(&SessionEffect::ClearPasswordPrompt));
     }
@@ -394,7 +601,10 @@ mod tests {
             Instant::now(),
             &no_store,
         );
-        assert!(!state.ended, "SSH 不自动关格：SFTP 可能还在用（ADR-005）");
+        assert!(
+            !state.data.ended,
+            "SSH 不自动关格：SFTP 可能还在用（ADR-005）"
+        );
         assert!(
             effects.contains(&SessionEffect::EnsureClock),
             "意外断线要拉起倒计时时钟"
@@ -410,7 +620,7 @@ mod tests {
             Instant::now(),
             &no_store,
         );
-        assert!(state.exited);
+        assert!(state.data.exited);
         assert!(!effects.contains(&SessionEffect::EnsureClock));
     }
 
@@ -433,8 +643,8 @@ mod tests {
             effects,
             vec![SessionEffect::AnswerPassword("secret".into())]
         );
-        assert!(state.password_auto_filled);
-        assert!(!state.password_focus_pending, "自动应答不弹卡");
+        assert!(state.data.password_auto_filled);
+        assert!(!state.data.password_focus_pending, "自动应答不弹卡");
 
         // 同一次连接里再次走到密码路：不再自动应答，交给用户
         let effects = reduce(
@@ -444,8 +654,8 @@ mod tests {
             &store,
         );
         assert_eq!(effects, vec![SessionEffect::ShowPasswordPrompt]);
-        assert_eq!(state.status, "连接需要密码");
-        assert!(state.password_focus_pending);
+        assert_eq!(state.data.status, "连接需要密码");
+        assert!(state.data.password_focus_pending);
     }
 
     #[test]
@@ -469,7 +679,7 @@ mod tests {
             "跳板的询问不能拿目标的凭据应答"
         );
         assert!(
-            state.password_auto_filled,
+            state.data.password_auto_filled,
             "自动应答机会已用掉（与既有口径一致）"
         );
     }
@@ -502,10 +712,110 @@ mod tests {
             Instant::now(),
             &no_store,
         );
-        assert!(state.log_warning);
+        assert!(state.data.log_warning);
         assert_eq!(
             effects,
             vec![SessionEffect::Receipt("会话日志已停写：磁盘已满".into())]
         );
+    }
+
+    #[test]
+    fn cancelled_connection_blurs_and_clears_prompts() {
+        let mut state = ssh_state(None);
+        state.data.password_focus_pending = true;
+        let effects = fold_signal(
+            &mut state,
+            SessionSignal::ConnectingCancelled,
+            Instant::now(),
+        );
+        assert!(state.data.exited);
+        assert_eq!(state.data.status, "已取消连接");
+        assert!(
+            state.data.blur_pending,
+            "取消连接与 Failed/Exited 同为结束态：焦点必离网格，\
+             否则 IME 管道上的 Esc/Enter 失灵"
+        );
+        assert!(effects.contains(&SessionEffect::ClearPasswordPrompt));
+    }
+
+    #[test]
+    fn watchdog_timeout_blurs_like_any_other_end() {
+        let mut state = ssh_state(None);
+        let effects = fold_signal(
+            &mut state,
+            SessionSignal::Tick {
+                connecting: true,
+                local: false,
+                started_at: Instant::now() - Duration::from_secs(600),
+            },
+            Instant::now(),
+        );
+        assert!(state.data.exited);
+        assert_eq!(state.data.status, "连接超时：服务器长时间无响应");
+        assert!(state.data.blur_pending, "结束必 blur，与路径无关");
+        assert!(effects.contains(&SessionEffect::CloseSftpPanel));
+    }
+
+    #[test]
+    fn reconnect_signals_reset_view_state_and_rearm_focus() {
+        let mut state = SessionViewState::test_ended(Some(ssh_target(None)));
+        fold_signal(
+            &mut state,
+            SessionSignal::ReconnectUserInitiated,
+            Instant::now(),
+        );
+        fold_signal(&mut state, SessionSignal::ReconnectStarting, Instant::now());
+        assert!(!state.data.exited, "重连开始即回到进行态");
+        assert!(!state.data.blur_pending);
+        assert!(state.data.terminal_focus_pending, "重连后焦点预定交回终端");
+        assert_eq!(state.take_focus_action(false), Some(FocusAction::Terminal));
+    }
+
+    #[test]
+    fn cancelling_the_auto_reconnect_plan_appends_to_the_status() {
+        let mut state = ssh_state(None);
+        reduce(&mut state, ControlEvent::Started, Instant::now(), &no_store);
+        reduce(
+            &mut state,
+            ControlEvent::Exited(exit("连接被重置", ExitReason::ConnectionLost)),
+            Instant::now(),
+            &no_store,
+        );
+        fold_signal(
+            &mut state,
+            SessionSignal::ReconnectCancelled,
+            Instant::now(),
+        );
+        assert!(state.data.status.contains("（已取消自动重连）"));
+        // 没有计划再取消：文案不动
+        fold_signal(
+            &mut state,
+            SessionSignal::ReconnectCancelled,
+            Instant::now(),
+        );
+        assert_eq!(state.data.status.matches("（已取消自动重连）").count(), 1);
+    }
+
+    #[test]
+    fn command_rejection_and_receipt_write_the_status() {
+        let mut state = ssh_state(None);
+        fold_signal(
+            &mut state,
+            SessionSignal::CommandRejected(CommandError::QueueFull),
+            Instant::now(),
+        );
+        assert_eq!(state.data.status, "命令队列已满，这次输入被丢弃");
+        fold_signal(
+            &mut state,
+            SessionSignal::Receipt("已复制 3 字符".into()),
+            Instant::now(),
+        );
+        assert_eq!(state.data.status, "已复制 3 字符");
+        fold_signal(
+            &mut state,
+            SessionSignal::SearchFeedbackCleared,
+            Instant::now(),
+        );
+        assert_eq!(state.data.search_feedback, None);
     }
 }

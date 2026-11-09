@@ -7,7 +7,9 @@
 
 use gpui::Keystroke;
 
+#[cfg(test)]
 use crate::views::session_state::SessionViewState;
+use crate::views::session_state::SessionViewStateData;
 use zhimaterm_base::ui::overlay::bare_key;
 use zhimaterm_terminal::SearchDirection;
 
@@ -69,7 +71,7 @@ pub(crate) enum KeyRoute {
 /// 一条按键在会话视图里的归属。守卫顺序与旧实现逐条对应：菜单 → 搜索 →
 /// 死会话 → 焦点 → 连接中。
 pub(crate) fn route_key(
-    state: &SessionViewState,
+    state: &SessionViewStateData,
     context_menu_open: bool,
     search_open: bool,
     focused: bool,
@@ -147,19 +149,18 @@ mod tests {
     }
 
     fn dead_state(can_reconnect: bool) -> SessionViewState {
-        let mut state = live_state();
-        state.exited = true;
-        state.reconnect_target = can_reconnect.then(|| zhimaterm_runtime::session::SshTarget {
-            host: "example.com".into(),
-            port: 22,
-            user: "deploy".into(),
-            auth: zhimaterm_runtime::session::SshAuth::agent_only(),
-            forward_agent: false,
-            forwards: Vec::new(),
-            jump: None,
-            credential_id: None,
-        });
-        state
+        SessionViewState::test_ended(
+            can_reconnect.then(|| zhimaterm_runtime::session::SshTarget {
+                host: "example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+                auth: zhimaterm_runtime::session::SshAuth::agent_only(),
+                forward_agent: false,
+                forwards: Vec::new(),
+                jump: None,
+                credential_id: None,
+            }),
+        )
     }
 
     #[test]
@@ -247,17 +248,17 @@ mod tests {
 
         // 菜单 Esc 最高优先：即使搜索开着、会话已结束也先收菜单
         assert_eq!(
-            route_key(&dead, true, true, true, false, &plain("escape")),
+            route_key(dead.data(), true, true, true, false, &plain("escape")),
             KeyRoute::CloseContextMenu
         );
         // 搜索 Esc/Enter 先于死会话裁决
         assert_eq!(
-            route_key(&dead, false, true, true, false, &plain("escape")),
+            route_key(dead.data(), false, true, true, false, &plain("escape")),
             KeyRoute::CloseSearch
         );
         assert_eq!(
             route_key(
-                &live,
+                live.data(),
                 false,
                 true,
                 false,
@@ -274,25 +275,32 @@ mod tests {
         );
         // 死会话：可重连的 R 走重连，其余键被吞
         assert_eq!(
-            route_key(&dead, false, false, true, false, &plain("r")),
+            route_key(dead.data(), false, false, true, false, &plain("r")),
             KeyRoute::Reconnect
         );
         assert_eq!(
-            route_key(&dead, false, false, true, false, &plain("x")),
+            route_key(dead.data(), false, false, true, false, &plain("x")),
             KeyRoute::Consumed
         );
         assert_eq!(
-            route_key(&dead_state(false), false, false, true, false, &plain("r")),
+            route_key(
+                dead_state(false).data(),
+                false,
+                false,
+                true,
+                false,
+                &plain("r")
+            ),
             KeyRoute::Consumed
         );
         // 焦点在别处：不消费；连接中 Ctrl+C 取消，其余吞掉
         assert_eq!(
-            route_key(&live, false, false, false, false, &plain("a")),
+            route_key(live.data(), false, false, false, false, &plain("a")),
             KeyRoute::NotFocused
         );
         assert_eq!(
             route_key(
-                &live,
+                live.data(),
                 false,
                 false,
                 true,
@@ -308,12 +316,12 @@ mod tests {
             KeyRoute::CancelConnecting
         );
         assert_eq!(
-            route_key(&live, false, false, true, true, &plain("a")),
+            route_key(live.data(), false, false, true, true, &plain("a")),
             KeyRoute::Consumed
         );
         // 活会话、聚焦、有画面：进 PTY
         assert_eq!(
-            route_key(&live, false, false, true, false, &plain("a")),
+            route_key(live.data(), false, false, true, false, &plain("a")),
             KeyRoute::Terminal
         );
     }
