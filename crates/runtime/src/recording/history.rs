@@ -17,7 +17,7 @@ use gpui::{AnyElement, App, Entity, Window, div, px};
 use crate::sftp::TaskId;
 use zhimaterm_base::theme::UiTokens;
 use zhimaterm_base::ui::overlay::ModalView;
-use zhimaterm_base::ui::{panel, ui_rems};
+use zhimaterm_base::ui::{card, panel, ui_rems};
 
 /// 历史最多保留的条数。
 pub const HISTORY_KEEP: usize = 200;
@@ -147,11 +147,31 @@ impl ModalView for HistoryModal {
         Some("操作记录".into())
     }
 
+    /// 卡片头把保留规则和标题放同一行：规则不占内容与动作区，空列表时
+    /// 也不会和空状态文案挤在一起。
+    fn card(&self, window: &Window, cx: &App) -> gpui::Div {
+        let palette = zhimaterm_base::theme::tokens(cx);
+        card::Card::new(&palette)
+            .header(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(card::title(&palette, "操作记录"))
+                    .child(card::label(&palette, "只保留本次会话，关闭后清空")),
+            )
+            .content(self.content(window, cx))
+            .actions(self.actions(cx))
+            .build()
+    }
+
     fn content(&self, _window: &Window, cx: &App) -> AnyElement {
         let palette = zhimaterm_base::theme::tokens(cx);
-        let mut content = div().flex().flex_col().gap(px(10.));
-
         let history = self.history.read(cx);
+        if history.is_empty() {
+            return empty_state(&palette).into_any_element();
+        }
+
         let mut list = div()
             .id("session-history-list")
             .flex()
@@ -159,32 +179,10 @@ impl ModalView for HistoryModal {
             .gap(px(8.))
             .max_h(px(320.))
             .overflow_y_scroll();
-        if history.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(ui_rems(12.))
-                    .text_color(gpui::rgb(palette.fg_muted))
-                    .child("本次会话还没有已结束的操作"),
-            );
-        }
         for task in history.entries() {
             list = list.child(history_row(&palette, task));
         }
-        content = content.child(list);
-        content.into_any_element()
-    }
-
-    fn footer(&self, _cx: &App) -> Option<AnyElement> {
-        let palette = zhimaterm_base::theme::tokens(_cx);
-        Some(
-            div()
-                .text_size(ui_rems(10.))
-                .text_color(gpui::rgb(palette.fg_muted))
-                .child(format!(
-                    "操作最多保留最近 {HISTORY_KEEP} 条，关闭会话即清空"
-                ))
-                .into_any_element(),
-        )
+        list.into_any_element()
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
@@ -212,6 +210,29 @@ impl ModalView for HistoryModal {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+/// 空状态：居中给出「还没有记录」与来源提示，让空白内容区读起来是有意
+/// 为之，而不是列表没加载出来。
+fn empty_state(palette: &UiTokens) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .min_h(px(140.))
+        .text_center()
+        .child(
+            div()
+                .text_size(ui_rems(12.))
+                .text_color(gpui::rgb(palette.fg_secondary))
+                .child("还没有操作记录"),
+        )
+        .child(note_block(
+            palette,
+            "SFTP 上传、下载、删除等操作结束后会记录在这里",
+        ))
 }
 
 /// 记录模态的会话能力（依赖倒置，ADR-007 修订七）：视图侧实现，域不依赖
@@ -244,105 +265,65 @@ impl ModalView for LoggingModal {
         let log_path = self.target.log_path(cx);
 
         let mut content = div().flex().flex_col().gap(px(10.));
-        // 状态行：记录中给主色，未开启用弱色
+        // 状态信息单独成组：字段名 + 值，值按语义取色（记录中给主色）。
+        // 有文件但没在写是「已暂停」，不是「未开启」——暂停再开续写同一文件
+        let status = if logging {
+            "记录中"
+        } else if log_path.is_some() {
+            "已暂停"
+        } else {
+            "未开启"
+        };
+        // 日志持续追加，文件名就是外部查看器打开的那份实时内容
+        let file_name = log_path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "尚未生成".to_owned());
         content = content.child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(ui_rems(12.))
-                        .text_color(gpui::rgb(if logging {
-                            palette.accent
-                        } else {
-                            palette.fg_muted
-                        }))
-                        .child(if logging {
-                            "记录中"
-                        } else {
-                            "未开启记录"
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(ui_rems(10.))
-                        .text_color(gpui::rgb(palette.fg_muted))
-                        .child("终端输出逐行写入本地文件"),
-                ),
+                .flex_col()
+                .gap(px(4.))
+                .child(info_row(
+                    &palette,
+                    "当前状态",
+                    status,
+                    if logging {
+                        palette.accent
+                    } else {
+                        palette.fg_muted
+                    },
+                ))
+                .child(info_row(
+                    &palette,
+                    "记录文件",
+                    &file_name,
+                    if log_path.is_some() {
+                        palette.fg_secondary
+                    } else {
+                        palette.fg_muted
+                    },
+                )),
         );
-        // 文件名：日志持续追加，外部查看器看到的才是实时内容
-        content = content.child(match log_path {
-            Some(path) => div()
-                .min_w(px(0.))
-                .text_size(ui_rems(11.))
-                .text_color(gpui::rgb(palette.fg_secondary))
-                .child(
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                ),
-            None => div()
-                .text_size(ui_rems(11.))
-                .text_color(gpui::rgb(palette.fg_muted))
-                .child("开启后输出会写进配置目录 logs/ 下的本地文件"),
-        });
+        // 开关与「打开」是内容操作：它们作用于上面这个会话日志，跟浮层
+        // 语义的「关闭」分开，关闭留在卡片底部动作区
+        content = content.child(logging_operations(
+            &palette,
+            logging,
+            log_path.as_deref(),
+            self.target.clone(),
+        ));
+        // 旁注区：行为边界用弱色斜体小字写在操作下方，读起来是注释而不是
+        // 正文状态，不抢视线
+        content = content.child(note_block(&palette, &logging_note(log_path.as_deref())));
         content.into_any_element()
-    }
-
-    fn footer(&self, _cx: &App) -> Option<AnyElement> {
-        let palette = zhimaterm_base::theme::tokens(_cx);
-        Some(
-            div()
-                .text_size(ui_rems(10.))
-                .text_color(gpui::rgb(palette.fg_muted))
-                .child("不写进设置，只作用于本格本会话；暂停再开仍写同一文件")
-                .into_any_element(),
-        )
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
         let palette = zhimaterm_base::theme::tokens(cx);
-        let logging = self.target.enabled(cx);
-        let log_path = self.target.log_path(cx);
-
-        // 开关随状态换主次：未开启时「记录到文件」是主按钮，记录中主位让给
-        // 「暂停记录」的次按钮。切换直接更新会话视图实体：模态与底栏每次
-        // 渲染都读视图实体的记录状态，视图 notify 即重画（无需绕应用实体）。
-        let toggle_target = self.target.clone();
-        let toggle = if logging {
-            panel::secondary_button(
-                &palette,
-                "session-log-toggle",
-                "暂停记录",
-                None,
-                move |_, _, cx| toggle_target.toggle(cx),
-            )
-        } else {
-            panel::primary_button(
-                &palette,
-                "session-log-toggle",
-                "记录到文件",
-                None,
-                move |_, _, cx| toggle_target.toggle(cx),
-            )
-        };
-        // 「打开」与开关同属操作，跟 toggle 一起靠左
-        let mut operations = vec![toggle.into_any_element()];
-        if let Some(path) = log_path {
-            operations.push(
-                panel::secondary_button(
-                    &palette,
-                    "session-log-open",
-                    "打开",
-                    None,
-                    move |_, _, _| open_log(&path),
-                )
-                .into_any_element(),
-            );
-        }
         panel::dialog_actions(
-            operations,
+            [],
             Some(
                 panel::secondary_button(
                     &palette,
@@ -364,6 +345,99 @@ impl ModalView for LoggingModal {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+/// 记录开关与「打开」：属于内容操作，紧贴状态与文件名；卡片底部动作区
+/// 只留浮层语义的关闭。
+fn logging_operations(
+    palette: &UiTokens,
+    enabled: bool,
+    log_path: Option<&std::path::Path>,
+    target: Rc<dyn LoggingTarget>,
+) -> gpui::Div {
+    // 开关随状态换主次与文案：没开始过是「记录到文件」主按钮，记录中主位
+    // 让给「暂停记录」的次按钮，暂停后是「继续记录」（续写同一文件）。
+    // 切换直接更新会话视图实体：模态与底栏每次渲染都读视图实体的记录
+    // 状态，视图 notify 即重画（无需绕应用实体）。
+    let label = if enabled {
+        "暂停记录"
+    } else if log_path.is_some() {
+        "继续记录"
+    } else {
+        "记录到文件"
+    };
+    let toggle = if enabled {
+        panel::secondary_button(
+            palette,
+            "session-log-toggle",
+            label,
+            None,
+            move |_, _, cx| target.toggle(cx),
+        )
+    } else {
+        panel::primary_button(
+            palette,
+            "session-log-toggle",
+            label,
+            None,
+            move |_, _, cx| target.toggle(cx),
+        )
+    };
+    let mut operations = div().flex().items_center().gap(px(8.)).child(toggle);
+    if let Some(path) = log_path {
+        let path = path.to_path_buf();
+        operations = operations.child(panel::secondary_button(
+            palette,
+            "session-log-open",
+            "打开",
+            None,
+            move |_, _, _| open_log(&path),
+        ));
+    }
+    operations
+}
+
+/// 状态信息行：字段名用弱色小字，值按语义取色（状态给主色/弱色，文件名
+/// 给次要文字色）。
+fn info_row(palette: &UiTokens, label: &str, value: &str, value_color: u32) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_none()
+                .text_size(ui_rems(10.))
+                .text_color(gpui::rgb(palette.fg_muted))
+                .child(format!("{label}：")),
+        )
+        .child(
+            div()
+                .min_w(px(0.))
+                .text_size(ui_rems(11.))
+                .text_color(gpui::rgb(value_color))
+                .child(value.to_owned()),
+        )
+}
+
+/// 记录模态的旁注：写到哪里、暂停再开怎么写。文件位置提示只在还没落过
+/// 文件时出现（已有文件名就不必再说会写到哪）。
+fn logging_note(log_path: Option<&std::path::Path>) -> String {
+    if log_path.is_none() {
+        "开启后，终端输出逐行写入配置目录 logs/ 下的文件；暂停再开仍写同一文件。".to_owned()
+    } else {
+        "终端输出逐行写入该文件；暂停再开仍写同一文件。".to_owned()
+    }
+}
+
+/// 旁注：说明文字用弱色斜体小字写成一段，宽度不够时自然折行，读起来是
+/// 注释而不是正文状态。
+fn note_block(palette: &UiTokens, text: &str) -> gpui::Div {
+    div()
+        .text_size(ui_rems(10.))
+        .text_color(gpui::rgb(palette.fg_muted))
+        .italic()
+        .child(text.to_owned())
 }
 
 /// 用系统默认程序打开会话日志文件。打开失败只静默：浮层回调里没有落错误
@@ -481,6 +555,20 @@ mod tests {
             .unwrap();
         assert_eq!(finished_time(Some(finished)), "14:32:05");
         assert_eq!(finished_time(None), "");
+    }
+
+    /// 文件位置提示只在还没有文件时出现；旁注是一段连续文字，换行交给
+    /// 布局按宽度折，不预排成多行。
+    #[test]
+    fn logging_note_drops_location_hint_once_a_file_exists() {
+        assert_eq!(
+            logging_note(None),
+            "开启后，终端输出逐行写入配置目录 logs/ 下的文件；暂停再开仍写同一文件。"
+        );
+        assert_eq!(
+            logging_note(Some(std::path::Path::new("/tmp/a.log"))),
+            "终端输出逐行写入该文件；暂停再开仍写同一文件。"
+        );
     }
 
     /// 未读标记驱动底栏「历史」高亮：落一条就亮，打开模态即视为已读；
