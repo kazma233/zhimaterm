@@ -8,7 +8,7 @@
 
 - 开发运行：`cargo run --bin zhimaterm`——启动可交互的本地终端（左侧栏多会话，支持的全部交互见功能行为说明）。
 - 安装到当前用户：`task install`（先构建 release，再按平台做桌面集成：Linux 装进 `~/.local`、macOS 组装 .app 到 `~/Applications`、Windows 注册开始菜单）；卸载 `task uninstall`。
-- `cargo run -p zhimaterm-runtime --bin zhimaterm-ssh-sftp-probe`：验证单条 SSH session 中非阻塞 Shell 与 SFTP 的交替推进。该命令只使用 SSH Agent，且要求显式设置 `ZHIMATERM_SSH_ADDR`、`ZHIMATERM_SSH_USER` 和 `ZHIMATERM_SSH_HOST_KEY_SHA256`。不会读取、保存或打印密码、私钥或 `known_hosts`。
+- `cargo run -p zhimaterm-session --bin zhimaterm-ssh-sftp-probe`：验证单条 SSH session 中非阻塞 Shell 与 SFTP 的交替推进。该命令只使用 SSH Agent，且要求显式设置 `ZHIMATERM_SSH_ADDR`、`ZHIMATERM_SSH_USER` 和 `ZHIMATERM_SSH_HOST_KEY_SHA256`。不会读取、保存或打印密码、私钥或 `known_hosts`。
 - 构建依赖：ghostty 终端后端（[ADR-051](../decisions/051-ghostty-vt-backend.md)）经仓内
   `ffi/ghostty-vt-sys`（workspace 成员）用 Zig 编译 vendored 的 libghostty-vt，需要 Zig 0.17.x
   （PATH 或 `ZIG` 环境变量，自行安装）；首次构建联网下载 `GHOSTTY.lock` 固定的源码包
@@ -53,23 +53,29 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
     构建不需要 bindgen/libclang。
   - `regex`：搜索；`serde`/`serde_json`：转录格式；`smol`：回放与异步等待；
     `unicode-width`：组合文本按 wcwidth 折算占格。
-- `zhimaterm-runtime`
-  - `gpui`：本地探针面板、会话留痕模态与 `SessionConfig::pane` 的实体 id。
+- `zhimaterm-local`
+  - `gpui`：本地探针面板；`anyhow`：错误链；`smol`：探针的事件通道。
+  - Unix `libc`：PTY 与 cwd 采集。
+  - Windows `windows-registry`：WSL 发行版枚举（ADR-021）；`windows-sys` 的
+    Console/ToolHelp/PEB 等 feature：ConPTY 调用、进程探针，同时服务
+    `pty_probe` 探针二进制（`src/bin/`）。
+  - dev `gpui`（`test-support`）。
+- `zhimaterm-recording`
+  - `gpui`：留痕模态视图与 `EntityId`；`anyhow`：错误链；`chrono`：输出
+    日志时间戳与任务的结束时刻。
+  - dev `gpui`（`test-support`）：记录器单测。
+- `zhimaterm-session`
+  - `gpui`：`SessionConfig::pane` 的实体 id。
   - `ssh2`（`vendored-openssl`、`openssl-on-win32`）与 `libssh2-sys`：SSH
-    传输（ADR-004）；与根包探针同一版本。
-  - `smol`：通道与等待；`anyhow`：错误链；`chrono`：输出日志与任务时间；
-    `regex`：远端监控解析；`serde_json`：回滚与记录格式。
-  - Unix `libc`：PTY 与 cwd 采集；`socket2`：监听 socket 在 bind 前设
+    传输（ADR-004）；与探针同一版本。
+  - `smol`：通道与等待；`anyhow`：错误链；`chrono`/`serde_json`：回滚格式。
+  - Unix `libc`：`poll.rs` 的多路等待；`socket2`：监听 socket 在 bind 前设
     `SO_REUSEADDR`（ADR-038，运行中删规则后同端口重建不被 TIME_WAIT 挡住；
     Windows 不设，避免端口劫持）。
-  - Windows `windows-registry`：WSL 发行版枚举（ADR-021）；`windows-sys` 的
-    Console/ToolHelp/PEB 等 feature：ConPTY 调用、进程探针与 perf 验收的
-    子进程计数，同时服务 `pty_probe`。
-  - `src/bin/` 的两个探针二进制也归本 crate：`ssh_sftp_probe` 按 `#[path]`
-    复用 `poll.rs` 并直接链接 `ssh2`/`libssh2-sys`（Unix 上 `poll.rs` 用
-    `libc`），`pty_probe` 用 `windows-sys` 的 Console API。
-  - dev `gpui`（`test-support`）：记录器单测。
-- `zhimaterm-ssh`
+  - `src/bin/ssh_sftp_probe.rs` 探针归本 crate，按 `#[path]` 复用
+    `poll.rs` 并直接链接 `ssh2`/`libssh2-sys`。
+  - dev `gpui`（`test-support`）。
+- `zhimaterm-connections`
   - `keyring`（`apple-native`、`windows-native`、`sync-secret-service`）：
     OS 安全凭据存储；`uuid` v4：保存连接的条目 id（ADR-018 修订，凭据按 id
     挂钥匙串，条目身份不参与）。
@@ -101,8 +107,8 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
   否则 `#[cfg(test)]` 里的代码不参与编译与 lint。改了 `#[cfg]` 分支的代码，还需在对应
   平台上过一遍 `cargo check --all-targets`。
 - 测试分层：小型单元测试随模块内联（`#[cfg(test)] mod tests`，不需要外部环境，`cargo test` 直接跑）；
-  **依赖真实 PTY/sshd 的重量级用例集中在 [`crates/runtime/src/tests/`](../../crates/runtime/src/tests/)**，全部 `#[ignore]` 门控：
-  - 会话端到端：`cargo test -p zhimaterm-runtime --lib "tests::session_e2e::ssh" -- --ignored --test-threads=1`（先按 [runbooks/ssh-e2e](../runbooks/ssh-e2e.md) 起 sshd）。
+  **依赖真实 PTY/sshd 的重量级用例集中在 [`crates/session/src/tests/`](../../crates/session/src/tests/)**，全部 `#[ignore]` 门控：
+  - 会话端到端：`cargo test -p zhimaterm-session --lib "tests::session_e2e::ssh" -- --ignored --test-threads=1`（先按 [runbooks/ssh-e2e](../runbooks/ssh-e2e.md) 起 sshd）。
   - WSL 会话端到端：`set ZHIMATERM_WSL_DISTRO=<发行版名> && cargo test wsl_session -- --ignored`（验证进入指定发行版、落在 Linux home、退出即收，ADR-021）。
   - 性能验收：见 [runbooks/perf-acceptance](../runbooks/perf-acceptance.md)（必须 `--release`）。
 - 录制流回归：`crates/terminal/src/replay.rs` 按真实读取节奏回放字节流，检查我们自己那层的不变量（快照的段宽自洽、连续快照一致、回看不越界、选区可复制）。默认跑文件内的确定性语料；外部录制（例如 `alacritty_terminal` 自带的 `tests/ref/*/alacritty.recording`）用：
@@ -115,22 +121,26 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
 
 ## 模块划分
 
-见 ADR-007（2026-11-09 修订八）：强制的分层边界落在 workspace crate，根包只留
-外壳与视图。后面的组可以使用前面的组，反向即违规；跨 crate 的反向引用由
-Cargo 依赖图直接拒绝。
+见 ADR-007（2026-11-09 修订九）：强制的分层边界落在 workspace crate，根包只留
+外壳与视图。依赖只允许自上而下，跨 crate 的反向引用由 Cargo 依赖图直接拒绝。
 
 ### crate 总览
 
 ```
-crates/base       zhimaterm-base       叶子与基础层
-crates/terminal   zhimaterm-terminal   终端模型（零 gpui 直接引用）
-crates/runtime    zhimaterm-runtime    会话、SFTP、本地终端、会话留痕、重量级测试与探针
-crates/ssh        zhimaterm-ssh        SSH 连接管理业务域
-src/              根包：设置、工作区、视图、外壳、入口与探针
+crates/base         zhimaterm-base         叶子与基础层
+crates/terminal     zhimaterm-terminal     终端模型（零 gpui 直接引用）
+crates/local        zhimaterm-local        本地终端域（PTY/Shell/WSL/探针）
+crates/recording    zhimaterm-recording    会话留痕域
+crates/session      zhimaterm-session      会话域：内核、传输（SSH 协议/SFTP）、重量级测试与探针
+crates/connections  zhimaterm-connections  SSH 连接管理域（不实现 SSH 协议）
+src/                根包：设置、工作区、视图、外壳与入口
 ```
 
-依赖边：`根包 → zhimaterm-ssh → zhimaterm-runtime → zhimaterm-terminal →
-zhimaterm-base`（根包另可用全部四层）。
+依赖边：`根包 → connections → session → terminal → base`；`session → local`
+与 `session → recording`（两者只依赖 base，机制保持叶子地位）；根包另可用
+全部 crate。SSH 协议本体（libssh2 会话、认证、pump）在
+`zhimaterm-session` 的 `transport::ssh`，连接的表单/保存/钥匙串在
+`zhimaterm-connections`。
 
 ### 基础层（`crates/base/src/`）
 
@@ -163,42 +173,53 @@ colors.rs                  VT 颜色 → RGB 与颜色查询
 replay.rs                  录制流回归
 ```
 
-### 运行时层（`crates/runtime/src/`）
+### 本地终端域（`crates/local/src/`）
 
 ```
-sftp.rs                    SFTP 协议：SftpHandle 命令句柄、任务事件流、远端条目模型
-local/shells.rs            系统 Shell 候选列表（/etc/shells 或 PATH 探测，ADR-036）
-local/pty/                 自研本地 PTY（ADR-025）：ConPTY/openpty、MSVCRT 引用与退出唤醒
-local/cwd.rs               本地 shell 工作目录采集（Linux /proc、macOS lsof，ADR-039）
-local/peb.rs               Windows 跨进程读 PEB：他人 cwd 与完整 argv（#[cfg(windows)]）
-local/wsl.rs               WSL 发行版枚举与启动命令（ADR-021）
-local/probe/               本地进程探针（ADR-028）：三平台采集与结束进程、树构建/过滤/端口合并
-local/probe_panel.rs       本地进程探针面板（ADR-028）
-recording/output_log.rs    会话输出日志：文件分配、首尾标记与故障停写（ADR-017）
-recording/recorder.rs      全局记录门面（ADR-045），worker 与视图都只依赖它（叶子地位）
-recording/history.rs       会话留痕的两个全屏模态（ADR-044）；记录开关经 LoggingTarget 注入
-session/mod.rs             会话协议：命令/事件、目标（本地/SSH）、句柄
-session/worker.rs          会话 worker：与后端无关的循环、终端模型与回收
-session/reconnect.rs       重连计划（ADR-013 修订）的纯状态机
-session/scrollback.rs      本地格回滚持久化：版本化 JSONL 与旧格式回退、文件命名契约（ADR-039/040）
-session/transport/         传输后端：本地 PTY、SSH 多路复用 pump、跳板桥、端口转发、agent 转发、远端监控
-session/transport/ssh/     SSH 传输（libssh2，ADR-004 修订拆分）：连接装配、认证、pump
-session/transport/local.rs 本地 PTY 传输（默认/用户指定 Shell 与 WSL 发行版的子进程命令）
-session/transport/jump.rs  跳板机回环桥（ADR-020）
-session/transport/sftp_task.rs SFTP 任务引擎（上传/下载/递归删除状态机 + RemoteFs 抽象）
-session/transport/forward.rs 端口转发：非阻塞监听、SOCKS5 握手、通道↔socket 桥接（ADR-011/038）
-session/transport/agent_forward.rs agent 转发：libssh2 回调的 FFI 与裸通道包装（ADR-012）
-session/transport/monitor.rs 远端监控采集：exec 通道脚本、计数器差值（CPU/内存/磁盘/网速）
-session/transport/poll.rs  SSH 跨平台等待原语：fd+poll（Unix）/ RawSocket+WSAPoll（Windows）；
+shells.rs                  系统 Shell 候选列表（/etc/shells 或 PATH 探测，ADR-036）
+pty/                       自研本地 PTY（ADR-025）：ConPTY/openpty、MSVCRT 引用与退出唤醒
+cwd.rs                     本地 shell 工作目录采集（Linux /proc、macOS lsof，ADR-039）
+peb.rs                     Windows 跨进程读 PEB：他人 cwd 与完整 argv（#[cfg(windows)]）
+wsl.rs                     WSL 发行版枚举与启动命令（ADR-021）
+probe/                     本地进程探针（ADR-028）：三平台采集与结束进程、树构建/过滤/端口合并
+probe_panel.rs             本地进程探针面板（ADR-028）
+bin/pty_probe.rs           Windows ConPTY e2e 探针（ADR-025）
+```
+
+### 会话留痕域（`crates/recording/src/`）
+
+```
+output_log.rs              会话输出日志：文件分配、首尾标记与故障停写（ADR-017）
+recorder.rs                全局记录门面（ADR-045），worker 与视图都只依赖它（叶子地位）
+history.rs                 任务/操作的数据模型与两个全屏模态（ADR-044）；SFTP 任务的
+                           进度/终态由写入方折算成本域投影类型，记录开关经 LoggingTarget 注入
+```
+
+### 会话域（`crates/session/src/`）
+
+```
+lib.rs                     会话协议：命令/事件、目标（本地/SSH）、句柄
+worker.rs                  会话 worker：与后端无关的循环、终端模型与回收
+reconnect.rs               重连计划（ADR-013 修订）的纯状态机
+scrollback.rs              本地格回滚持久化：版本化 JSONL 与旧格式回退、文件命名契约（ADR-039/040）
+sftp.rs                    SFTP 契约：SftpHandle 命令句柄、任务事件流、远端条目模型
+transport/                 传输后端：本地 PTY、SSH 多路复用 pump、跳板桥、端口转发、agent 转发、远端监控
+transport/ssh/             SSH 传输（libssh2，ADR-004 修订拆分）：连接装配、认证、pump
+transport/local.rs         本地 PTY 传输（默认/用户指定 Shell 与 WSL 发行版的子进程命令）
+transport/jump.rs          跳板机回环桥（ADR-020）
+transport/sftp_task.rs     SFTP 任务引擎（上传/下载/递归删除状态机 + RemoteFs 抽象）
+transport/forward.rs       端口转发：非阻塞监听、SOCKS5 握手、通道↔socket 桥接（ADR-011/038）
+transport/agent_forward.rs agent 转发：libssh2 回调的 FFI 与裸通道包装（ADR-012）
+transport/monitor.rs       远端监控采集：exec 通道脚本、计数器差值（CPU/内存/磁盘/网速）
+transport/poll.rs          SSH 跨平台等待原语：fd+poll（Unix）/ RawSocket+WSAPoll（Windows）；
                            保持 std+libc 自包含，探针二进制按 `#[path]` 复用
 tests/support.rs           会话测试共享驱动层：spawn/wait/type_line 的唯一实现
 tests/session_e2e.rs       会话端到端：输入、选区、查询应答、SSH/SFTP 全链路（门控）
 tests/perf_acceptance.rs   阶段 4 性能与资源验收（门控，见 runbooks/perf-acceptance.md）
 bin/ssh_sftp_probe.rs      SSH/SFTP 非阻塞探针（诊断工具，按 `#[path]` 复用 poll.rs）
-bin/pty_probe.rs           Windows ConPTY e2e 探针（ADR-025）
 ```
 
-### SSH 领域（`crates/ssh/src/`）
+### SSH 连接管理域（`crates/connections/src/`）
 
 ```
 connect/                   SSH 连接表单与列表弹窗（ADR-026/048），按变更轴拆子模块（ADR-007 修订四）：

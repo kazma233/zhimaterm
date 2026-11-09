@@ -33,8 +33,8 @@ use crate::views::theme_picker::ThemePicker;
 use crate::workspace::{self, PaneId};
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView};
-use zhimaterm_ssh::connections;
-use zhimaterm_ssh::connections::SavedSources;
+use zhimaterm_connections::connections;
+use zhimaterm_connections::connections::SavedSources;
 
 use self::sessions::REAP_INTERVAL_MS;
 
@@ -215,7 +215,7 @@ impl ZhimaTermApp {
             }),
             theme_picker: ThemePicker::new(),
             #[cfg(windows)]
-            wsl_entry_visible: !zhimaterm_runtime::local::wsl::list_distros().is_empty(),
+            wsl_entry_visible: !zhimaterm_local::wsl::list_distros().is_empty(),
             last_window: Some(workspace::Workspace::saved_window(window.window_bounds())),
             bounds_save_generation: 0,
             bounds_save_scheduled: false,

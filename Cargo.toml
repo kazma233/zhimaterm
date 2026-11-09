@@ -8,14 +8,24 @@ license = "MIT"
 default-run = "zhimaterm"
 
 [workspace]
-members = ["ffi/ghostty-vt-sys", "crates/base", "crates/terminal", "crates/runtime", "crates/ssh"]
+members = [
+    "ffi/ghostty-vt-sys",
+    "crates/base",
+    "crates/terminal",
+    "crates/local",
+    "crates/recording",
+    "crates/session",
+    "crates/connections",
+]
 resolver = "3"
 
 [dependencies]
 zhimaterm-base = { path = "crates/base" }
 zhimaterm-terminal = { path = "crates/terminal" }
-zhimaterm-runtime = { path = "crates/runtime" }
-zhimaterm-ssh = { path = "crates/ssh" }
+zhimaterm-local = { path = "crates/local" }
+zhimaterm-recording = { path = "crates/recording" }
+zhimaterm-session = { path = "crates/session" }
+zhimaterm-connections = { path = "crates/connections" }
 anyhow = "1"
 chrono = "0.4"
 gpui = { package = "gpui-pre", version = "=0.3.10" }

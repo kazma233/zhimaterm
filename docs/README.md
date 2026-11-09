@@ -45,7 +45,7 @@
 - [ADR-022：主题系统](decisions/022-theme-system.md)：配色方案与 UI token 的推导模型、内嵌主题表与切换交互。
 - [ADR-023：右键上下文菜单](decisions/023-context-menus.md)：右键留给本地菜单不转发前台程序、SFTP 条目操作入口。
 - [ADR-024：按钮基础组件与点击语义](decisions/024-button-click-semantics.md)：松开在按钮内才触发、命中区即按钮盒子。
-- [ADR-025：自研本地 PTY 替换 portable-pty](decisions/025-selfhost-pty.md)：`crates/runtime/src/local/pty` 的语义基线、与 portable-pty 0.9.0 的差异和验证记录。
+- [ADR-025：自研本地 PTY 替换 portable-pty](decisions/025-selfhost-pty.md)：`crates/local/src/pty` 的语义基线、与 portable-pty 0.9.0 的差异和验证记录。
 - [ADR-026：连接表单深化](decisions/026-connect-form-deepening.md)：自持建造与类型化出口（编辑态基线已按 ADR-048 移除）。
 - [ADR-027：侧栏浮层与选择器类 UI 的归属](decisions/027-popover-species-ownership.md)：锚定浮层、主题选择器与实体化边界。
 - [ADR-028：本地进程探针与右侧边栏](decisions/028-local-probe-sidebar.md)：本地默认 Shell 格的进程树与 LISTEN 端口采集、三平台口径与面板生命周期。

@@ -10,7 +10,7 @@ use crate::views::panes::PaneTree;
 use crate::views::shell::{self, CloseTarget};
 use crate::views::terminal_view::TerminalView;
 use crate::workspace::{PaneId, SplitAxis};
-use zhimaterm_runtime::session::{LocalShell, SessionTarget, file_for};
+use zhimaterm_session::{LocalShell, SessionTarget, file_for};
 use zhimaterm_terminal::DEFAULT_SCROLLING_HISTORY;
 
 use super::modals::{ViewForwardTarget, modal_action};
@@ -51,7 +51,7 @@ impl ZhimaTermApp {
     /// 即使只有一个发行版也由用户选定后再开。零发行版时入口不渲染，这里到不了。
     #[cfg(windows)]
     pub(super) fn open_wsl_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let distros = zhimaterm_runtime::local::wsl::list_distros();
+        let distros = zhimaterm_local::wsl::list_distros();
         if !distros.is_empty() {
             // 开会话是外壳的编排动作，经回调注入模态（ADR-007 修订七）
             let on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)> = Rc::new(|name, window, cx| {
@@ -124,7 +124,7 @@ impl ZhimaTermApp {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         // 本地格的回滚文件按会话编号命名（ADR-039），SSH 不持久化；命名
-        // 契约（构造/解析）单点在 session::scrollback
+        // 契约（构造/解析）单点在 zhimaterm-session 的 scrollback
         let scrollback = matches!(target, SessionTarget::Local { .. })
             .then(|| file_for(number))
             .flatten();
@@ -133,7 +133,7 @@ impl ZhimaTermApp {
         // 会话固有参数从设置取一次：后端随格定型（ADR-050），运行中改设置
         // 只影响新格
         let params = crate::views::terminal_view::SessionParams {
-            runtime: zhimaterm_runtime::session::RuntimeParams {
+            runtime: zhimaterm_session::RuntimeParams {
                 option_as_alt: self
                     .settings
                     .as_ref()

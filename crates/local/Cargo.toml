@@ -1,0 +1,39 @@
+[package]
+name = "zhimaterm-local"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "ZhimaTerm 本地终端域：自研 PTY、Shell 候选、工作目录与进程采集、WSL 与探针面板"
+
+[dependencies]
+zhimaterm-base = { path = "../base" }
+anyhow = "1"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+smol = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "=0.6.1"
+windows-sys = { version = "=0.61.2", features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+
+[[bin]]
+name = "zhimaterm-pty-probe"
+path = "src/bin/pty_probe.rs"

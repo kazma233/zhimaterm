@@ -7,7 +7,7 @@ use gpui::{App, Context, Window};
 
 use crate::views::panes::PaneTree;
 use crate::workspace;
-use zhimaterm_runtime::session::{LocalShell, SessionTarget, session_number_of};
+use zhimaterm_session::{LocalShell, SessionTarget, session_number_of};
 
 use super::{MAX_SESSIONS, Tab, ZhimaTermApp};
 

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use zhimaterm_runtime::session::{
+use zhimaterm_session::{
     CommandError, ConnectFacts, ControlEvent, ForwardId, ForwardRule, LangStatus, PointerShape,
     ReconnectPlanner, ScheduleOutcome, SessionExit, SshTarget, TickOutcome, TrustRequest,
 };
@@ -503,7 +503,7 @@ fn feedback_for(outcome: SearchOutcome) -> Option<String> {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use zhimaterm_runtime::session::{ExitReason, PasswordAccount, SshAuth};
+    use zhimaterm_session::{ExitReason, PasswordAccount, SshAuth};
 
     fn no_store(_: &str) -> Option<String> {
         None

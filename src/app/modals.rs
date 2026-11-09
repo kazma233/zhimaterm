@@ -14,9 +14,9 @@ use zhimaterm_base::font::{self, CellMetrics, FontConfig};
 use zhimaterm_base::ui::WindowAction;
 use zhimaterm_base::ui::dialog::{self, Dialog, DialogAnswer};
 use zhimaterm_base::ui::overlay::overlay_host;
-use zhimaterm_runtime::session::SessionTarget;
-use zhimaterm_ssh::connect::{self, ConnectForm, ConnectModal, ConnectView};
-use zhimaterm_ssh::connections;
+use zhimaterm_connections::connect::{self, ConnectForm, ConnectModal, ConnectView};
+use zhimaterm_connections::connections;
+use zhimaterm_session::SessionTarget;
 use zhimaterm_terminal::DEFAULT_SCROLLING_HISTORY;
 
 use super::{ZhimaTermApp, update_app};
@@ -106,14 +106,14 @@ impl ZhimaTermApp {
     fn mutate_forward_form(
         &mut self,
         cx: &mut Context<Self>,
-        mutate: impl FnOnce(&mut zhimaterm_ssh::forward_form::ForwardForm),
+        mutate: impl FnOnce(&mut zhimaterm_connections::forward_form::ForwardForm),
     ) {
         overlay_host(cx).update(cx, |host, cx| {
             if let Some(form) = host
                 .top_view_mut()
                 .and_then(|view| {
                     view.as_any_mut()
-                        .downcast_mut::<zhimaterm_ssh::forward_form::ForwardModal>()
+                        .downcast_mut::<zhimaterm_connections::forward_form::ForwardModal>()
                 })
                 .map(|modal| &mut modal.form)
             {
@@ -124,17 +124,17 @@ impl ZhimaTermApp {
     }
 
     /// 打开「添加转发规则」表单（ADR-038）：规则落点由点按钮的会话经
-    /// [`zhimaterm_ssh::forward_form::ForwardTarget`] 能力注入，域不见视图类型。
+    /// [`zhimaterm_connections::forward_form::ForwardTarget`] 能力注入，域不见视图类型。
     pub(super) fn open_forward_form(
         &mut self,
         view: Entity<TerminalView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target: Rc<dyn zhimaterm_ssh::forward_form::ForwardTarget> =
+        let target: Rc<dyn zhimaterm_connections::forward_form::ForwardTarget> =
             Rc::new(ViewForwardTarget { view });
-        let modal = zhimaterm_ssh::forward_form::ForwardModal {
-            form: zhimaterm_ssh::forward_form::ForwardForm::new(
+        let modal = zhimaterm_connections::forward_form::ForwardModal {
+            form: zhimaterm_connections::forward_form::ForwardForm::new(
                 font::terminal_font(&self.font.family),
                 cx,
             ),
@@ -151,7 +151,7 @@ impl ZhimaTermApp {
         let (target, rule) = {
             let Some(modal) = host.read(cx).top_view().and_then(|view| {
                 view.as_any()
-                    .downcast_ref::<zhimaterm_ssh::forward_form::ForwardModal>()
+                    .downcast_ref::<zhimaterm_connections::forward_form::ForwardModal>()
             }) else {
                 return;
             };
@@ -180,7 +180,7 @@ impl ZhimaTermApp {
                     .top_view()
                     .and_then(|view| {
                         view.as_any()
-                            .downcast_ref::<zhimaterm_ssh::forward_form::ForwardModal>()
+                            .downcast_ref::<zhimaterm_connections::forward_form::ForwardModal>()
                     })
                     .map(|modal| modal.form.focus_handle(cx));
                 if let Some(focus) = focus {
@@ -195,7 +195,7 @@ impl ZhimaTermApp {
     /// 到连接」时，用当前规则表覆盖该条保存连接的转发配置。
     pub(super) fn forwards_changed(
         &mut self,
-        target: &dyn zhimaterm_ssh::forward_form::ForwardTarget,
+        target: &dyn zhimaterm_connections::forward_form::ForwardTarget,
         cx: &mut Context<Self>,
     ) {
         let Some((host, port, user)) = target.save_identity(cx) else {
@@ -265,7 +265,7 @@ impl ZhimaTermApp {
         let lists = CandidateLists {
             terminal_fonts: font::installed_font_candidates(cx.text_system()),
             ui_fonts: font::system_font_candidates(cx.text_system()),
-            shells: zhimaterm_runtime::local::shells::candidates(),
+            shells: zhimaterm_local::shells::candidates(),
         };
         let form = cx.new(|cx| SettingsForm::new(lists, current, cx));
         // 表单自改即重画（与连接表单同一机制，ADR-026）：渲染层直调表单实体，
@@ -358,7 +358,7 @@ impl ZhimaTermApp {
         let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
         self.font = font.clone();
         self.metrics = metrics;
-        let runtime = zhimaterm_runtime::session::RuntimeParams {
+        let runtime = zhimaterm_session::RuntimeParams {
             option_as_alt: edited.option_as_alt,
             scrolling_history: edited.scrolling_history,
         };
@@ -506,7 +506,11 @@ impl ZhimaTermApp {
         };
         let needs_password = saved.credentials.password_only();
         let password = (needs_password && saved.remember_password)
-            .then(|| zhimaterm_ssh::keychain::load(&saved.id).ok().flatten())
+            .then(|| {
+                zhimaterm_connections::keychain::load(&saved.id)
+                    .ok()
+                    .flatten()
+            })
             .flatten();
         if needs_password && password.is_none() {
             self.prompt_password_and_connect(index, saved, window, cx);
@@ -627,7 +631,7 @@ impl ZhimaTermApp {
         }
         if let Some(entry) = forgotten
             && entry.remember_password
-            && let Err(error) = zhimaterm_ssh::keychain::delete(&entry.id)
+            && let Err(error) = zhimaterm_connections::keychain::delete(&entry.id)
         {
             self.saved
                 .update(cx, |sources, _| sources.error = Some(format!("{error:#}")));
@@ -744,18 +748,18 @@ pub(super) fn modal_action(
 }
 
 /// 转发表单落点的外壳实现（ADR-007 修订六）：把会话视图实体适配成 ssh 域
-/// 定义的 [`zhimaterm_ssh::forward_form::ForwardTarget`] 能力。视图类型只出现在
+/// 定义的 [`zhimaterm_connections::forward_form::ForwardTarget`] 能力。视图类型只出现在
 /// 外壳，域不反向依赖 `views`。
 pub(super) struct ViewForwardTarget {
     pub(super) view: Entity<TerminalView>,
 }
 
-impl zhimaterm_ssh::forward_form::ForwardTarget for ViewForwardTarget {
-    fn rules(&self, cx: &App) -> Vec<zhimaterm_runtime::session::ForwardRule> {
+impl zhimaterm_connections::forward_form::ForwardTarget for ViewForwardTarget {
+    fn rules(&self, cx: &App) -> Vec<zhimaterm_session::ForwardRule> {
         self.view.read(cx).forwards().to_vec()
     }
 
-    fn add(&self, rule: zhimaterm_runtime::session::ForwardRule, cx: &mut App) {
+    fn add(&self, rule: zhimaterm_session::ForwardRule, cx: &mut App) {
         self.view.update(cx, |view, cx| view.add_forward(rule, cx));
     }
 
@@ -770,9 +774,11 @@ impl zhimaterm_ssh::forward_form::ForwardTarget for ViewForwardTarget {
 }
 
 /// 转发表单的交互装配（ADR-038）：渲染层只发语义动作。
-fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> zhimaterm_ssh::forward_form::Actions {
+fn forward_modal_actions(
+    cx: &Context<ZhimaTermApp>,
+) -> zhimaterm_connections::forward_form::Actions {
     let app = cx.entity();
-    zhimaterm_ssh::forward_form::Actions {
+    zhimaterm_connections::forward_form::Actions {
         apply: modal_action(cx, |this, window, cx| this.apply_forward(window, cx)),
         // 取消/关闭要还焦点：焦点是窗口资源，还焦点得拿得到窗口
         cancel: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),
@@ -867,8 +873,8 @@ pub(super) fn theme_picker_actions(cx: &Context<ZhimaTermApp>) -> theme_picker::
 }
 
 /// 运行中规则 → 保存连接的形态（ADR-038 回写）。
-fn saved_forward_of(rule: &zhimaterm_runtime::session::ForwardRule) -> connections::SavedForward {
-    use zhimaterm_runtime::session::ForwardFlow;
+fn saved_forward_of(rule: &zhimaterm_session::ForwardRule) -> connections::SavedForward {
+    use zhimaterm_session::ForwardFlow;
     match &rule.flow {
         ForwardFlow::Local {
             bind_addr,

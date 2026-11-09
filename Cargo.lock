@@ -8037,8 +8037,10 @@ dependencies = [
  "unicode-width",
  "winresource",
  "zhimaterm-base",
- "zhimaterm-runtime",
- "zhimaterm-ssh",
+ "zhimaterm-connections",
+ "zhimaterm-local",
+ "zhimaterm-recording",
+ "zhimaterm-session",
  "zhimaterm-terminal",
 ]
 
@@ -8054,27 +8056,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zhimaterm-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "gpui-pre",
- "libc",
- "libssh2-sys",
- "regex",
- "serde_json",
- "smol",
- "socket2",
- "ssh2",
- "windows-registry",
- "windows-sys 0.61.2",
- "zhimaterm-base",
- "zhimaterm-terminal",
-]
-
-[[package]]
-name = "zhimaterm-ssh"
+name = "zhimaterm-connections"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -8084,7 +8066,49 @@ dependencies = [
  "serde_json",
  "uuid",
  "zhimaterm-base",
- "zhimaterm-runtime",
+ "zhimaterm-session",
+]
+
+[[package]]
+name = "zhimaterm-local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-pre",
+ "libc",
+ "smol",
+ "windows-registry",
+ "windows-sys 0.61.2",
+ "zhimaterm-base",
+]
+
+[[package]]
+name = "zhimaterm-recording"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui-pre",
+ "zhimaterm-base",
+]
+
+[[package]]
+name = "zhimaterm-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui-pre",
+ "libc",
+ "libssh2-sys",
+ "serde_json",
+ "smol",
+ "socket2",
+ "ssh2",
+ "zhimaterm-base",
+ "zhimaterm-local",
+ "zhimaterm-recording",
+ "zhimaterm-terminal",
 ]
 
 [[package]]

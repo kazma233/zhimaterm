@@ -27,10 +27,12 @@ use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::ui_rems;
 use zhimaterm_base::ui::{DockPanel, card, panel};
-use zhimaterm_runtime::recording::history::{ProgressUnit, TaskItem, TaskState, file_name_of};
-use zhimaterm_runtime::sftp::{
-    RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId, TaskOutcome,
-    TaskProgress, remote_join,
+use zhimaterm_recording::history::{
+    ProgressUnit, TaskItem, TaskOutcome, TaskProgress, TaskState, file_name_of,
+};
+use zhimaterm_session::sftp::{
+    RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId,
+    TaskOutcome as SftpTaskOutcome, TaskProgress as SftpTaskProgress, remote_join,
 };
 
 const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
@@ -658,23 +660,33 @@ impl SftpPanelView {
         cx.notify();
     }
 
-    fn apply_progress(&mut self, progress: TaskProgress, cx: &mut Context<Self>) {
+    fn apply_progress(&mut self, progress: SftpTaskProgress, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|task| task.id == progress.task) {
-            task.apply_progress(&progress);
+            // 会话域的进度事件折算成留痕域的投影（不含任务 id：方法挂在任务上）
+            task.apply_progress(&TaskProgress {
+                done: progress.done,
+                total: progress.total,
+                current: progress.current,
+            });
             cx.notify();
         }
     }
 
-    fn apply_finished(&mut self, id: TaskId, outcome: &TaskOutcome, cx: &mut Context<Self>) {
+    fn apply_finished(&mut self, id: TaskId, outcome: &SftpTaskOutcome, cx: &mut Context<Self>) {
         // 结束即移出运行区：运行区只回答「正在做什么」，做过什么由历史回答
         if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
             let mut task = self.tasks.remove(index);
-            task.finish(outcome);
+            let terminal = match outcome {
+                SftpTaskOutcome::Completed(text) => TaskOutcome::Completed(text.clone()),
+                SftpTaskOutcome::Failed(text) => TaskOutcome::Failed(text.clone()),
+                SftpTaskOutcome::Cancelled(text) => TaskOutcome::Cancelled(text.clone()),
+            };
+            task.finish(&terminal);
             task.finished_at = Some(chrono::Local::now());
-            zhimaterm_runtime::recording::recorder::record_operation(self.pane, task, cx);
+            zhimaterm_recording::recorder::record_operation(self.pane, task, cx);
         }
         // 上传/递归删除会改变当前目录内容：完成后刷新一次列表
-        if matches!(outcome, TaskOutcome::Completed(_)) {
+        if matches!(outcome, SftpTaskOutcome::Completed(_)) {
             self.refresh(cx);
         }
         cx.notify();
@@ -693,7 +705,7 @@ impl SftpPanelView {
             Ok(()) => TaskState::Completed(format!("已删除 {}", path.display())),
             Err(error) => TaskState::Failed(format!("删除失败：{error}")),
         };
-        zhimaterm_runtime::recording::recorder::record_operation(
+        zhimaterm_recording::recorder::record_operation(
             self.pane,
             TaskItem {
                 id: DIRECT_DELETE_ID,
@@ -1493,8 +1505,8 @@ mod tests {
         sort_entries, upload_message,
     };
     use std::path::{Path, PathBuf};
-    use zhimaterm_runtime::recording::history::ProgressUnit;
-    use zhimaterm_runtime::sftp::{RemoteEntry, RemoteFileType};
+    use zhimaterm_recording::history::ProgressUnit;
+    use zhimaterm_session::sftp::{RemoteEntry, RemoteFileType};
 
     fn entry(name: &str, file_type: RemoteFileType) -> RemoteEntry {
         RemoteEntry {

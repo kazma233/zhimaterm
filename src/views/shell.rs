@@ -21,7 +21,7 @@ use zhimaterm_base::ui::overlay::overlay_dispatch;
 use zhimaterm_base::ui::panel;
 use zhimaterm_base::ui::ui_rems;
 use zhimaterm_base::ui::{human_bytes, human_rate};
-use zhimaterm_runtime::session::{LangStatus, MonitorSample, TrustRequest};
+use zhimaterm_session::{LangStatus, MonitorSample, TrustRequest};
 
 /// 底栏内容：同一根底栏按会话阶段切换显示——连接中、运行中的监控、
 /// 结束后的原因与出路。常驻不消失，避免布局跳动；只有远端会话有底栏，
@@ -505,7 +505,7 @@ fn shortcut_group(
 /// 点击语义，没有键盘选中态，只接 Esc。
 #[cfg(windows)]
 pub struct WslModal {
-    distros: Vec<zhimaterm_runtime::local::wsl::WslDistro>,
+    distros: Vec<zhimaterm_local::wsl::WslDistro>,
     /// 点条目后的开会话动作：外壳注入（ADR-007 修订七），视图层不依赖 app。
     on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
 }
@@ -513,7 +513,7 @@ pub struct WslModal {
 #[cfg(windows)]
 impl WslModal {
     pub fn new(
-        distros: Vec<zhimaterm_runtime::local::wsl::WslDistro>,
+        distros: Vec<zhimaterm_local::wsl::WslDistro>,
         on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
     ) -> Self {
         Self { distros, on_pick }

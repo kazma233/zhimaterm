@@ -149,18 +149,16 @@ mod tests {
     }
 
     fn dead_state(can_reconnect: bool) -> SessionViewState {
-        SessionViewState::test_ended(
-            can_reconnect.then(|| zhimaterm_runtime::session::SshTarget {
-                host: "example.com".into(),
-                port: 22,
-                user: "deploy".into(),
-                auth: zhimaterm_runtime::session::SshAuth::agent_only(),
-                forward_agent: false,
-                forwards: Vec::new(),
-                jump: None,
-                credential_id: None,
-            }),
-        )
+        SessionViewState::test_ended(can_reconnect.then(|| zhimaterm_session::SshTarget {
+            host: "example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            auth: zhimaterm_session::SshAuth::agent_only(),
+            forward_agent: false,
+            forwards: Vec::new(),
+            jump: None,
+            credential_id: None,
+        }))
     }
 
     #[test]

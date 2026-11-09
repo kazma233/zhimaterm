@@ -282,3 +282,56 @@ crates/ssh       zhimaterm-ssh        connect / connections / keychain / forward
   引用。
 - `settings`/`workspace`/`views` 留在根包：它们位于依赖图顶端或只被外壳消费，
   再拆 crate 没有编译期收益。
+
+## 修订（2026-11-09，九）：runtime 按域拆分与 connections 改名
+
+修订八的 `zhimaterm-runtime` 是层名不是域名：约 2.1 万行里装着三个域
+（会话 1.0 万、本地终端 0.45 万、会话留痕 0.13 万），而 `zhimaterm-ssh`
+名义上是 SSH 域、装的却是连接管理（表单/持久化/凭据），SSH 协议本体在
+runtime 的 `session::transport::ssh`——两个名字都不见名知意。核对发现
+`local`/`recording` 对 `session`/`terminal` 零引用（只依赖 base），早已是
+事实上的独立 crate，只差分家。本次按域拆分并改名，依赖方向规则不变：
+
+```
+crates/local        zhimaterm-local        本地终端域（pty/shells/cwd/wsl/peb/probe + probe_panel + pty 探针）
+crates/recording    zhimaterm-recording    会话留痕域（output_log/recorder/history）
+crates/session      zhimaterm-session      会话域（原 runtime 余部：协议/内核/传输（SSH 协议本体、
+                                           SFTP 任务）/sftp 契约/e2e tests/ssh-sftp 探针；
+                                           session/ 目录拍平到 crate 根，路径去一层）
+crates/connections  zhimaterm-connections  SSH 连接管理域（原 zhimaterm-ssh 改名：
+                                           connect/connections/keychain/forward_form）
+```
+
+依赖边：`根包 → connections → session → terminal → base`；`session → local`
+与 `session → recording`（机制保持叶子地位）；根包另可用全部 crate。
+
+配套改动：
+
+- **history 依赖倒置**：`recording::history` 原引 `session::sftp` 的
+  `TaskProgress`/`TaskOutcome`（若 recording 成 crate 会与 `session →
+  recording::recorder` 构成循环）。进度/终态改为 recording 自有的留痕投影
+  类型，由唯一写入方（SFTP 面板，在根包）折算——同 ForwardTarget/LoggingTarget
+  的能力注入先例，`recording → session` 引用清零。
+- `isolate_shell_environment`（测试子 shell 的 ZDOTDIR 隔离）归
+  `zhimaterm_local::pty` 常态公开：它是本地 PTY 域的测试基建，session 的
+  e2e 驱动跨 crate 引用。
+- 跨 crate 测试辅助按修订八口径常态公开：`recorder::attach_pane_with_log`/
+  `test_pane`、`output_log::from_file_for_test`、`probe::ProbeHandle::new`。
+- 探针各随其主：`pty_probe` → local，`ssh_sftp_probe` → session（`#[path]`
+  复用 `poll.rs` 的约定不变，仍在同一 crate 内）；e2e `tests/` 留在 session
+  （以正常依赖引 local/recording）。
+- 顺带清除：runtime 的 `regex` 依赖无使用（历史残留），随拆分删除；
+  `windows-sys` 的 `Win32_Security`/`Win32_System_Kernel` feature 全仓零
+  使用，不再带入 local；`Win32_System_Environment`（peb 的 GetCommandLineW）
+  归 local。
+- 原 `session/mod.rs` 的内联单测改名 `session_tests`（crate 根的 `tests`
+  名留给 `tests/` 目录的 e2e 驱动）。
+
+后果：
+
+- 「SSH 协议在哪」的答案是 `zhimaterm-session::transport::ssh`（会话域的
+  SSH 传输），「连接怎么管理」在 `zhimaterm-connections`——两侧名字都为真；
+  `local`/`recording` 与 `session` 的单向从模块纪律升级为 Cargo 强制。
+- 代价：跨 crate 公开面略增（清单见上）；workspace 成员 5→7；Windows/Linux
+  平台分支搬家后需在对应平台各过一次 `cargo check --all-targets`（本次在
+  macOS 完成 fmt/clippy/test，跨平台检查待办）。

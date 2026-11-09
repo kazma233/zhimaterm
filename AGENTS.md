@@ -5,26 +5,31 @@ ZhimaTerm 是面向开发者的 Rust 桌面终端（macOS/Linux/Windows）：本
 ## 仓库布局
 
 强制的分层边界落在 workspace 的 crate 上，根包是外壳与视图。依赖只允许
-`根包 → ssh → runtime → terminal → base` 自上而下，反向引用由 Cargo 依赖图
-直接拒绝（[ADR-007](docs/decisions/007-module-boundaries.md)，2026-11-09 修订八）：
+`根包 → connections → session → terminal → base` 与 `session → local / recording`
+自上而下，反向引用由 Cargo 依赖图直接拒绝（[ADR-007](docs/decisions/007-module-boundaries.md)，
+2026-11-09 修订九）：
 
 ```
-crates/base       zhimaterm-base      叶子与基础层：config_paths / font / input / theme / ui / wake
-crates/terminal   zhimaterm-terminal  终端模型（VT 模型与颜色）；代码本身零 gpui 引用
-crates/runtime    zhimaterm-runtime   会话协议/worker/传输、SFTP、本地终端（local/）、
-                                      会话留痕（recording/）、重量级测试（tests/）、
-                                      探针二进制（bin/）
-crates/ssh        zhimaterm-ssh       SSH 业务域：connect / connections / keychain / forward_form
-src/              根包（bin）          外壳与视图：
-                  app/                 mod / sessions / workspace_io / modals / keys / render
-                  views/               跨业务共享渲染件（grid、terminal_view、sftp_panel、panes、
-                                       session_state、terminal_keys、shell、theme_picker）
-                  settings/、workspace.rs  余留域（依赖图顶端或只被外壳消费）
-                  main.rs              入口
+crates/base         zhimaterm-base         叶子与基础层：config_paths / font / input / theme / ui / wake
+crates/terminal     zhimaterm-terminal     终端模型（VT 模型与颜色）；代码本身零 gpui 引用
+crates/local        zhimaterm-local        本地终端域：pty / shells / cwd / wsl / peb / probe
+                                           + probe_panel 视图 + pty 探针二进制
+crates/recording    zhimaterm-recording    会话留痕域：output_log / recorder / history（任务模型与模态）
+crates/session      zhimaterm-session      会话域：协议与内核（worker、reconnect、scrollback）、传输
+                                           （SSH 协议本体、本地传输、SFTP 任务、转发/监控）、sftp 契约、
+                                           重量级测试（tests/）、ssh-sftp 探针（bin/）
+crates/connections  zhimaterm-connections  SSH 连接管理域：connect / connections / keychain / forward_form
+                                           （不实现 SSH 协议；协议在 zhimaterm-session::transport）
+src/                根包（bin）             外壳与视图：
+                    app/                    mod / sessions / workspace_io / modals / keys / render
+                    views/                  跨业务共享渲染件（grid、terminal_view、sftp_panel、panes、
+                                            session_state、terminal_keys、shell、theme_picker）
+                    settings/、workspace.rs  余留域（依赖图顶端或只被外壳消费）
+                    main.rs                 入口
 ```
 
-`local`/`recording` 的「机制」保持叶子地位（可被会话内核依赖），其视图
-（probe_panel、history）随域走；单一业务专属视图同理。
+`local`/`recording` 是独立的叶域 crate：机制保持叶子地位（可被会话内核依赖），
+其视图（probe_panel、history）随域走；单一业务专属视图同理。
 
 完整模块清单与逐文件职责见 [开发指南](docs/context/development.md)。
 
@@ -38,7 +43,7 @@ cargo clippy --workspace --all-targets   # 静态检查，对本仓代码要求 
 task install                       # 构建release + 按平台做桌面集成（task uninstall 卸载）
 ```
 
-重量级用例集中在 `src/tests/`，全部 `#[ignore]` 门控，跑法见 [SSH e2e](docs/runbooks/ssh-e2e.md) 与 [性能验收](docs/runbooks/perf-acceptance.md) runbook。
+重量级用例集中在 `crates/session/src/tests/`，全部 `#[ignore]` 门控，跑法见 [SSH e2e](docs/runbooks/ssh-e2e.md) 与 [性能验收](docs/runbooks/perf-acceptance.md) runbook。
 
 **构建依赖**：ghostty 终端后端（[ADR-051](docs/decisions/051-ghostty-vt-backend.md)）经仓内
 `ffi/ghostty-vt-sys`（workspace 成员，FFI 绑定预生成提交）用 Zig 编译 vendored 的 libghostty-vt，
