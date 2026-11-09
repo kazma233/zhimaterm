@@ -107,11 +107,13 @@ src/ssh/connections.rs         保存的连接：按条目 id 读写与原子落
 src/ssh/keychain.rs            OS 安全凭据存储：凭据按条目 id 挂钥匙串（ADR-018 修订）
 src/ssh/forward_form.rs        运行中新增转发规则的小表单（ADR-038）
 src/settings/                  外观与终端设置：读写、校验、原子落盘；form.rs 是设置表单与设置模态
-src/theme/                     主题（ADR-022）：配色方案、内置主题表、UI token 推导与主题选择器（ADR-027）
+src/theme/                     基础层（ADR-007 修订五）：配色方案、内置主题表、UI token 推导与进程级
+                               主题状态（ADR-022）；只依赖 gpui，不引用 ui/views/session
 src/workspace.rs               工作区持久化：窗口几何与本地布局树（ADR-037/039）
 
 ── 视图层（跨业务的共享渲染件：消费领域数据画界面，不定义业务规则；单一业务专属视图随域走）──
 src/views/                     共享渲染件：服务全部会话类型的网格、会话画面、分屏与框架部件
+src/views/theme_picker.rs      主题选择器（ADR-027）：侧栏入口行与向上弹出的锚定浮层
 src/views/grid.rs              渲染细节：实测格尺寸、命中测试、run 渲染、侧边栏与浮层
 src/views/terminal_view.rs     单会话视图：会话句柄、画面帧、输入与鼠标手势、IME、搜索条（ADR-015）、连接期密码询问卡
 src/views/panes.rs             标签内分屏（ADR-014）：二分嵌套布局树、比例与分割条、格区域渲染

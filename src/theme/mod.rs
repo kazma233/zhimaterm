@@ -6,10 +6,12 @@
 //!
 //! 进程内状态是一个 gpui Global（[`set_theme`] 是唯一写入方）：界面渲染
 //! 从 [`tokens`] 读 token，活动会话由 app 层把 [`ColorScheme`] 推给 worker。
+//!
+//! 定位是基础层（ADR-007 修订五）：只依赖 gpui，不引用 ui/views/session。
+//! 主题选择器（侧栏入口与下拉）是外壳部件，住在 `views::theme_picker`。
 
 pub mod builtins;
 pub mod derive;
-pub mod picker;
 
 use std::sync::Arc;
 

@@ -188,3 +188,18 @@ ADR-044 2026-11-09 修订。app 的 `overlay_*` 方法保留为薄转发，栈�
 - `tests.rs`：全部单元测试与夹具。
 
 纯搬移、零行为变化；`cargo fmt`/clippy/tests 全绿。
+
+## 修订（2026-11-09，五）：theme 重定位为基础层
+
+决策一的依赖图把 `theme` 列为领域层，但它被 `ui`（叶子）与 `terminal`（模型）
+引用，构成「叶子 → 领域」的反向边。核对构成后拆开两类内容：
+
+- `theme` 核心（`ColorScheme`/`Theme`、内置主题表、token 推导、进程级主题
+  状态）零业务依赖、只依赖 gpui，是被全层消费的基础数据源 → 重定位为**基础
+  层**（叶子地位）；`ui`/`terminal`/`session` 对它的引用是合法的向下依赖。
+- `theme::picker`（侧栏主题入口与下拉，ADR-027）依赖 `ui`，是外壳部件 →
+  移到 `views::theme_picker`；交互契约与 `PickerActions` 回调形状不变。
+
+同时修正本 ADR 2026-11-09 一修订里「appearance 归组」的设想：`settings` 依赖
+`terminal`（模型层），不能与 `theme`/`font` 放进同一目录层，否则又会形成
+叶子 → 领域反向边。`settings` 与 `workspace` 留在领域层。

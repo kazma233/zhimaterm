@@ -27,8 +27,6 @@ use crate::ssh::connect::{self, ConnectForm, ConnectModal, ConnectView};
 use crate::ssh::connections;
 use crate::ssh::connections::SavedSources;
 use crate::terminal::DEFAULT_SCROLLING_HISTORY;
-use crate::theme::picker;
-use crate::theme::picker::ThemePicker;
 use crate::ui::WindowAction;
 use crate::ui::dialog::{self, Dialog, DialogAnswer};
 use crate::ui::menu;
@@ -38,6 +36,8 @@ use crate::views::panes::{self, PaneTree};
 use crate::views::shell::{self, CloseTarget};
 use crate::views::terminal_keys::{DeadSessionKey, dead_session_key};
 use crate::views::terminal_view::TerminalView;
+use crate::views::theme_picker;
+use crate::views::theme_picker::ThemePicker;
 use crate::workspace;
 use crate::workspace::{PaneId, SplitAxis};
 use gpui::App;
@@ -149,7 +149,7 @@ pub struct ZhimaTermApp {
     /// （忘掉/保存后列表要刷新），render 发生在本实体的 update 里，读同实体
     /// 会重入 panic——数据归属仍是这里，模态只读渲染。
     saved: Entity<SavedSources>,
-    /// 主题选择器：开合状态与浮层锚点，渲染在 theme::picker（ADR-027）。
+    /// 主题选择器：开合状态与浮层锚点，渲染在 views::theme_picker（ADR-027）。
     /// 点击项切换但不收起，收起只由点击下拉之外触发——连续点几项比对
     /// 观感是主要用法。不属于模态：打开任何模态时收起它（等价「点外部」）。
     theme_picker: ThemePicker,
@@ -2194,10 +2194,10 @@ fn connect_modal_actions(cx: &Context<ZhimaTermApp>) -> connect::ModalActions {
 
 /// 主题选择器的交互装配：渲染层的三个语义动作回到这里（ADR-027）。
 /// 切换的编排（生效、扇出到会话、落盘）在 `pick_theme`，状态机在
-/// `theme::picker::ThemePicker`。
-fn theme_picker_actions(cx: &Context<ZhimaTermApp>) -> picker::PickerActions {
+/// `views::theme_picker::ThemePicker`。
+fn theme_picker_actions(cx: &Context<ZhimaTermApp>) -> theme_picker::PickerActions {
     let app = cx.entity();
-    picker::PickerActions {
+    theme_picker::PickerActions {
         toggle: {
             let app = app.clone();
             Rc::new(move |cx| {
@@ -2379,7 +2379,7 @@ impl Render for ZhimaTermApp {
             .gap_x(px(4.))
             .child(session_row)
             .child(vertical_divider(&tokens))
-            .child(picker::entry(
+            .child(theme_picker::entry(
                 &tokens,
                 &self.theme_picker,
                 &theme_picker_actions(cx),
@@ -2495,10 +2495,10 @@ impl Render for ZhimaTermApp {
                     .map(|layer| layer.into_any_element())
                     .collect::<Vec<_>>()
             })
-            // 主题下拉的遮罩与浮层在 theme::picker（ADR-027）：遮罩截住
+            // 主题下拉的遮罩与浮层在 views::theme_picker（ADR-027）：遮罩截住
             // 「点别处收起」，浮层锚在入口正上方。浮层栈非空时它已被收起
             // （见 `overlay_open` 的互斥），不会同时出现。
-            .children(picker::layers(
+            .children(theme_picker::layers(
                 &tokens,
                 &self.theme_picker,
                 &theme_picker_actions(cx),

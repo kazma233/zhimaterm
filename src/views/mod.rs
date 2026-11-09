@@ -14,3 +14,4 @@ pub mod sftp_panel;
 pub mod shell;
 pub mod terminal_keys;
 pub mod terminal_view;
+pub mod theme_picker;
