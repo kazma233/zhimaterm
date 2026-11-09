@@ -15,7 +15,7 @@ ZhimaTerm 是面向开发者的独立桌面终端应用，不是可嵌入组件�
 - 桌面 UI：`gpui-pre`。创建 `Cargo.toml` 时必须锁定实际采用版本及配套 platform crate。
 - UI 侧异步设施：`smol 2`，用于 UI 事件回投与通道等待。
 - VT 状态机：`alacritty_terminal`，仅负责文本终端状态与 ANSI/VT 序列解析。
-- 本地 PTY：自研 `src/local/pty` 模块（ADR-025，移植自 portable-pty 0.9.0 语义）；首次跨平台构建时必须完成 macOS/Linux 专项验证。
+- 本地 PTY：自研 `crates/runtime/src/local/pty` 模块（ADR-025，移植自 portable-pty 0.9.0 语义）；首次跨平台构建时必须完成 macOS/Linux 专项验证。
 - SSH/SFTP：Cargo crate `ssh2`（项目名 ssh2-rs），底层 `libssh2`。创建 `Cargo.toml` 时必须锁定 crate、TLS 后端和 vendored 构建 feature，并提交 `Cargo.lock`。可复现构建还依赖固定 Rust 工具链（`rust-toolchain.toml`，编译期下限见 `Cargo.toml` 的 `rust-version`）和 macOS/Linux 构建矩阵，不能仅以 vendored `libssh2` 作为保证。
 - 序列化：`serde` 与 JSON。
 

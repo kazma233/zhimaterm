@@ -16,7 +16,7 @@
 - ⚠️ 源码树里另有 `include/ghostty.h`，那是 Ghostty 内部 embedder API
   （自述 libghostty-internal，仅 macOS app 消费），**不是本仓用的**。
 - 本仓对 C API 的全部触面 = `ffi/ghostty-vt-sys/src/bin/gen_bindings.rs` 的
-  allowlist（27 函数）+ `src/terminal/backend/ghostty/vt.rs` 的封装。
+  allowlist（27 函数）+ `crates/terminal/src/backend/ghostty/vt.rs` 的封装。
 
 ## 2. tagged get/get 协议（扩充时最先撞上的一条）
 
@@ -125,7 +125,7 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
 2. `gen_bindings.rs` 的 FUNCTIONS / TYPES / VARS 加条目 → 再生成（[runbook
    §2](../runbooks/ghostty-bindings.md)）；
 3. `vt.rs` 加安全封装（unsafe 止步于此）→ `mod.rs` 消费；
-4. 契约测试补场景（`src/terminal/contract.rs`，三后端口径）；
+4. 契约测试补场景（`crates/terminal/src/contract.rs`，三后端口径）；
 5. 语义拿不准时对照上游封装同版本实现（§10）。
 
 ## 10. 对照源与快照声明

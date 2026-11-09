@@ -9,9 +9,9 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, MouseButton, Window, canvas, div, px};
 
-use crate::ui::ui_rems;
 use crate::views::terminal_view::TerminalView;
 use crate::workspace::{LayoutSpec, PaneId, SplitAxis};
+use zhimaterm_base::ui::ui_rems;
 
 /// 分割节点标识：拖拽比例时用来定位是哪一条分割条。
 pub type SplitId = u64;
@@ -434,7 +434,7 @@ pub struct AreaActions {
 /// `view_of` 由调用方给出格到视图实体的映射；`key` 只用于元素 id 去重。
 /// 区域未知（首帧）时退回单格铺满，避免闪一帧空白。
 pub fn render_area(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     key: usize,
     area: Rect,
     tree: &PaneTree,
@@ -585,7 +585,7 @@ pub fn render_area(
     let divider_listeners = dragging.then(|| {
         let drag_move = actions.drag_move.clone();
         let drag_end = actions.drag_end.clone();
-        crate::ui::canvas::mouse_listener_canvas(
+        zhimaterm_base::ui::canvas::mouse_listener_canvas(
             move |event, _, cx| {
                 drag_move(f32::from(event.position.x), f32::from(event.position.y), cx);
             },

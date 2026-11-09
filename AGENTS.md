@@ -4,21 +4,27 @@ ZhimaTerm 是面向开发者的 Rust 桌面终端（macOS/Linux/Windows）：本
 
 ## 仓库布局
 
-`src/` 按「叶子 → 模型 → 领域 → 视图 → 外壳」分层，依赖只允许自上而下，领域层与功能域出现 `use crate::app` 即违规（[ADR-007](docs/decisions/007-module-boundaries.md)，2026-11-09 修订起目录按业务域归组）：
+强制的分层边界落在 workspace 的 crate 上，根包是外壳与视图。依赖只允许
+`根包 → ssh → runtime → terminal → base` 自上而下，反向引用由 Cargo 依赖图
+直接拒绝（[ADR-007](docs/decisions/007-module-boundaries.md)，2026-11-09 修订八）：
 
 ```
-叶子    config_paths / font / input / sftp / theme / ui
-        local/（本地终端功能域：shells、pty、cwd、peb、wsl、probe + probe_panel 视图；
-               机制保持叶子地位，session 内核可依赖）
-        recording/（会话留痕域：output_log、recorder + history 模态；
-               机制保持叶子地位，worker 与视图都可依赖）
-模型层  terminal（VT 模型与颜色）→ session（协议/worker/传输）
-领域层  ssh/（connect / connections / keychain / forward_form，只被外壳与共享视图消费）
-        settings / workspace
-视图层  views/（跨业务共享渲染件：grid、terminal_view、sftp_panel、panes、session_state、
-        terminal_keys、shell、theme_picker；单一业务专属视图随域走）
-外壳    app：会话状态机、模态互斥、键分发、渲染装配；只被 main 依赖
+crates/base       zhimaterm-base      叶子与基础层：config_paths / font / input / theme / ui / wake
+crates/terminal   zhimaterm-terminal  终端模型（VT 模型与颜色）；代码本身零 gpui 引用
+crates/runtime    zhimaterm-runtime   会话协议/worker/传输、SFTP、本地终端（local/）、
+                                      会话留痕（recording/）、重量级测试（tests/）、
+                                      探针二进制（bin/）
+crates/ssh        zhimaterm-ssh       SSH 业务域：connect / connections / keychain / forward_form
+src/              根包（bin）          外壳与视图：
+                  app/                 mod / sessions / workspace_io / modals / keys / render
+                  views/               跨业务共享渲染件（grid、terminal_view、sftp_panel、panes、
+                                       session_state、terminal_keys、shell、theme_picker）
+                  settings/、workspace.rs  余留域（依赖图顶端或只被外壳消费）
+                  main.rs              入口
 ```
+
+`local`/`recording` 的「机制」保持叶子地位（可被会话内核依赖），其视图
+（probe_panel、history）随域走；单一业务专属视图同理。
 
 完整模块清单与逐文件职责见 [开发指南](docs/context/development.md)。
 

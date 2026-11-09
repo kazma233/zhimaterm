@@ -7,9 +7,9 @@
 
 use gpui::Keystroke;
 
-use crate::terminal::SearchDirection;
-use crate::ui::overlay::bare_key;
 use crate::views::session_state::SessionViewState;
+use zhimaterm_base::ui::overlay::bare_key;
+use zhimaterm_terminal::SearchDirection;
 
 /// 已结束会话上的裸键动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,11 +149,11 @@ mod tests {
     fn dead_state(can_reconnect: bool) -> SessionViewState {
         let mut state = live_state();
         state.exited = true;
-        state.reconnect_target = can_reconnect.then(|| crate::session::SshTarget {
+        state.reconnect_target = can_reconnect.then(|| zhimaterm_runtime::session::SshTarget {
             host: "example.com".into(),
             port: 22,
             user: "deploy".into(),
-            auth: crate::session::SshAuth::agent_only(),
+            auth: zhimaterm_runtime::session::SshAuth::agent_only(),
             forward_agent: false,
             forwards: Vec::new(),
             jump: None,

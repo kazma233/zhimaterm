@@ -2,18 +2,14 @@
 name = "ghostty-vt-sys"
 version = "0.1.0"
 edition = "2024"
-# 与主 crate 同一编译期下限：成员 crate 不单独抬高工具链要求。
 rust-version = "1.98"
 build = "build.rs"
-# links 声明本仓唯一拥有 libghostty-vt 的构建与链接（ADR-051）。
 links = "ghostty-vt"
 publish = false
 
 [lib]
 doctest = false
 
-# 绑定再生成工具：只在更新 pin 或头文件口径时手动跑
-# （docs/runbooks/ghostty-bindings.md），日常构建不编译 bindgen、不需要 libclang。
 [[bin]]
 name = "gen-bindings"
 path = "src/bin/gen_bindings.rs"
@@ -36,10 +32,6 @@ flate2 = "1"
 sha2 = "0.10"
 tar = "0.4"
 
-# 下载固定源码包走系统 TLS 栈：macOS/Windows 用 NativeTls，其余用 rustls，
-# 避免给构建机引入 OpenSSL 依赖（ureq 3 按后端选 feature）。
-# 根证书同样用平台系统根（build.rs fetch 里显式 PlatformVerifier），所以
-# macOS/Windows 不带 ureq 的 webpki 根集、Linux 需补 platform-verifier。
 [target.'cfg(any(target_os = "macos", windows))'.build-dependencies.ureq]
 version = "3"
 features = ["native-tls-no-default"]

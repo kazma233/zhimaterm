@@ -1,0 +1,18 @@
+[package]
+name = "zhimaterm-terminal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "ZhimaTerm 终端模型：VT 解析后的屏幕状态、颜色与只读快照（零 gpui 直接依赖）"
+
+[dependencies]
+ghostty-vt-sys = { path = "../../ffi/ghostty-vt-sys" }
+termwiz = "0.23"
+alacritty_terminal = "0.26.0"
+regex = "1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+smol = "2"
+unicode-width = "0.2"
+zhimaterm-base = { path = "../base" }

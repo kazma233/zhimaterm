@@ -17,24 +17,24 @@ use gpui::{
     ScrollEvent, UTF16Selection, Window, canvas, div, point, px, size,
 };
 
-use crate::font::{self, CellMetrics, FontConfig};
-use crate::input::{
+use crate::views::grid;
+use crate::views::shell;
+use zhimaterm_base::font::{self, CellMetrics, FontConfig};
+use zhimaterm_base::input::{
     CopySelection, GestureModifiers, MouseAction, MouseGesture, OpenSearch, PasteClipboard,
     SplitDown, SplitRight, WheelDirection, horizontal_delta_lines, is_link_modifier, key_input,
     mouse_button, scroll_delta_lines,
 };
-use crate::session::{
+use zhimaterm_base::ui::input::{ImeComposition, TextInput};
+use zhimaterm_base::ui::menu;
+use zhimaterm_base::ui::ui_rems;
+use zhimaterm_runtime::session::{
     self, CommandError, ConnectFacts, ControlEvent, ForwardEvent, LocalShell, MonitorEvent,
     MonitorSample, PointerShape, RuntimeParams, Session, SessionConfig, SessionEvent,
     SessionTarget, StartupSize, TickOutcome,
 };
-use crate::terminal::backend::BackendKind;
-use crate::terminal::{SearchDirection, TerminalSnapshot};
-use crate::ui::input::{ImeComposition, TextInput};
-use crate::ui::menu;
-use crate::ui::ui_rems;
-use crate::views::grid;
-use crate::views::shell;
+use zhimaterm_terminal::backend::BackendKind;
+use zhimaterm_terminal::{SearchDirection, TerminalSnapshot};
 
 // 连接看门狗与自动重连（ADR-013）的裁决都在 session 域的重连计划
 // （`session::reconnect`），这里只保留每秒时钟的驱动。
@@ -73,7 +73,7 @@ pub struct ForwardHooks {
 /// 一条转发规则在 UI 侧的运行状态（ADR-011/038）。
 struct ForwardRuleState {
     /// 稳定规则 id：运行中增删后事件仍能对位（不能用列表下标）
-    id: crate::session::ForwardId,
+    id: zhimaterm_runtime::session::ForwardId,
     /// 规则的展示形态，如 `L 127.0.0.1:8080 → db:5432`
     label: String,
     /// 实际监听中的端口；None = 未在监听（失败或未建立）
@@ -145,14 +145,14 @@ pub struct TerminalView {
     /// SSH 会话的 SFTP 面板：收到 SftpReady 时创建，句柄与任务事件流都在面板实体里
     sftp_panel: Option<gpui::Entity<crate::views::sftp_panel::SftpPanelView>>,
     /// 本地进程探针面板（ADR-028）：收到 ProbeReady 时创建；探针句柄在面板实体里
-    probe_panel: Option<gpui::Entity<crate::local::probe_panel::ProbePanelView>>,
+    probe_panel: Option<gpui::Entity<zhimaterm_runtime::local::probe_panel::ProbePanelView>>,
     /// 本地默认 Shell 格才有探针：按钮列从首帧就渲染（布局恒定，PTY 列数不因
     /// 事件到达的先后抖动）；WSL 的进程树在 Linux 子系统里，宿主枚举不到
     probe_capable: bool,
     /// 前台进程探针（关闭二次确认）：收到 ForegroundProbeReady 时存下，点击
     /// 关闭那一刻同步查询 shell 前台是否有子程序——无轮询、不占 worker；
     /// 重连换代会由新事件覆盖
-    foreground_probe: Option<crate::local::pty::ForegroundProbe>,
+    foreground_probe: Option<zhimaterm_runtime::local::pty::ForegroundProbe>,
     /// 远端监控：样本与 CPU 历史驱动底栏
     monitor: MonitorState,
     /// 转发规则的运行状态（ADR-011）；没配转发规则的会话为空
@@ -257,17 +257,18 @@ impl TerminalView {
         // worker 线程一起来就查表。操作记录只有 SSH 格有（本地格没有写入方
         // 与读取方，不再白建实体）
         let pane = cx.entity_id();
-        crate::recording::recorder::attach_log(pane, &source);
+        zhimaterm_runtime::recording::recorder::attach_log(pane, &source);
         if !local {
-            crate::recording::recorder::attach_history(
+            zhimaterm_runtime::recording::recorder::attach_history(
                 pane,
-                cx.new(|_| crate::recording::history::SessionHistory::new()),
+                cx.new(|_| zhimaterm_runtime::recording::history::SessionHistory::new()),
             );
         }
         // SSH 格的历史实体变化（新操作落历史）要刷新底栏的「历史」高亮；
         // 订阅随格存活（Drop 连带释放）
         let history_sub = (!local).then(|| {
-            let history = crate::recording::recorder::history(pane).expect("刚挂上的历史实体");
+            let history =
+                zhimaterm_runtime::recording::recorder::history(pane).expect("刚挂上的历史实体");
             cx.observe(&history, |_, _, cx| cx.notify())
         });
         let (forward_states, forward_agent) = match &target {
@@ -287,7 +288,7 @@ impl TerminalView {
         });
         // 主题经命令下发而不是构造参数：模型默认以 Default 方案起跑，
         // 首帧之前命令必然已处理，用户看到的永远是当前主题
-        session.set_theme(Arc::new(crate::theme::current(cx).scheme));
+        session.set_theme(Arc::new(zhimaterm_base::theme::current(cx).scheme));
         // 运行参数同样经命令下发（与运行中调整同一条路径）：⌥ 语义由模型
         // 持有，编码时才知道修饰键语义；历史值重复设置是幂等的
         session.set_params(params.runtime);
@@ -396,7 +397,7 @@ impl TerminalView {
     /// 未就绪（ProbeReady 尚未到达的毫秒级窗口）时渲染不可点的占位，底栏从
     /// 首帧起恒在，PTY 行数不因事件到达的先后抖动。
     fn render_probe_bar(&self, cx: &gpui::Context<Self>) -> gpui::Div {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         let open = self
             .probe_panel
             .as_ref()
@@ -711,18 +712,18 @@ impl TerminalView {
     /// 视图只留成败转成的警告态——成功清除旧警告（停写/打开失败的 ⚠ 有了
     /// 出口），失败亮起
     pub fn set_logging(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let ok = crate::recording::recorder::set_logging(self.pane, enabled);
+        let ok = zhimaterm_runtime::recording::recorder::set_logging(self.pane, enabled);
         self.state.log_warning = !ok;
         cx.notify();
     }
 
     pub fn logging_enabled(&self) -> bool {
-        crate::recording::recorder::logging_enabled(self.pane)
+        zhimaterm_runtime::recording::recorder::logging_enabled(self.pane)
     }
 
     /// 日志文件的路径：记录模态展示与外部打开用；从未开过日志为 None。
     pub fn log_path(&self) -> Option<std::path::PathBuf> {
-        crate::recording::recorder::log_path(self.pane)
+        zhimaterm_runtime::recording::recorder::log_path(self.pane)
     }
 
     pub fn toggle_logging(&mut self, cx: &mut Context<Self>) {
@@ -760,7 +761,7 @@ impl TerminalView {
             // sink，追加一对新的首尾标记（ADR-017）
             pane: self.pane,
         });
-        session.set_theme(Arc::new(crate::theme::current(cx).scheme));
+        session.set_theme(Arc::new(zhimaterm_base::theme::current(cx).scheme));
         self.session = session;
         Self::watch_events(events, self.generation, cx);
         self.ensure_clock(cx);
@@ -806,7 +807,7 @@ impl TerminalView {
     }
 
     /// 主题切换的会话侧入口：把新配色方案转给 worker。
-    pub fn apply_theme(&self, scheme: Arc<crate::theme::ColorScheme>) {
+    pub fn apply_theme(&self, scheme: Arc<zhimaterm_base::theme::ColorScheme>) {
         self.session.set_theme(scheme);
     }
 
@@ -818,7 +819,7 @@ impl TerminalView {
     }
 
     /// 当前转发规则（含运行中增删）。本地格没有转发，返回空表。
-    pub fn forwards(&self) -> &[crate::session::ForwardRule] {
+    pub fn forwards(&self) -> &[zhimaterm_runtime::session::ForwardRule] {
         self.state
             .reconnect_target
             .as_ref()
@@ -839,7 +840,11 @@ impl TerminalView {
     }
 
     /// 运行中新增规则（ADR-038）：配置副本（重连用）、状态行、worker 三处同步。
-    pub fn add_forward(&mut self, rule: crate::session::ForwardRule, cx: &mut Context<Self>) {
+    pub fn add_forward(
+        &mut self,
+        rule: zhimaterm_runtime::session::ForwardRule,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(target) = self.state.reconnect_target.as_mut() {
             target.forwards.push(rule.clone());
         }
@@ -860,7 +865,11 @@ impl TerminalView {
     }
 
     /// 运行中移除规则（ADR-038）：端口随 pump 侧 listener 释放，在途连接断开。
-    pub fn remove_forward(&mut self, id: crate::session::ForwardId, cx: &mut Context<Self>) {
+    pub fn remove_forward(
+        &mut self,
+        id: zhimaterm_runtime::session::ForwardId,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(target) = self.state.reconnect_target.as_mut() {
             target.forwards.retain(|rule| rule.id != id);
         }
@@ -937,7 +946,7 @@ impl TerminalView {
                     // 会话关闭时实体随格销毁，采样线程随之回收
                     let font = font::terminal_font(&self.font.family);
                     self.probe_panel = Some(cx.new(|cx| {
-                        crate::local::probe_panel::ProbePanelView::new(handle, font, cx)
+                        zhimaterm_runtime::local::probe_panel::ProbePanelView::new(handle, font, cx)
                     }));
                 }
                 ControlEvent::ForegroundProbeReady(probe) => {
@@ -982,7 +991,7 @@ impl TerminalView {
                         &mut self.state,
                         control,
                         Instant::now(),
-                        &|id| crate::ssh::keychain::load(id).ok().flatten(),
+                        &|id| zhimaterm_ssh::keychain::load(id).ok().flatten(),
                     );
                     self.apply_session_effects(effects, cx);
                 }
@@ -1639,7 +1648,7 @@ fn center_notice(
 
 /// 网格中央提示的呈现：终端区域正中，正文一句 + 可选的键位提示。
 fn render_center_notice(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     text: String,
     hint: Option<&'static str>,
 ) -> gpui::Div {
@@ -1697,7 +1706,7 @@ fn render_search_bar(
     feedback: Option<&str>,
     cx: &mut Context<TerminalView>,
 ) -> gpui::Div {
-    let tokens = crate::theme::tokens(cx);
+    let tokens = zhimaterm_base::theme::tokens(cx);
     let view = cx.entity();
     let close_view = view.clone();
     let regex_view = view.clone();
@@ -1783,7 +1792,7 @@ fn render_context_menu(
     container: gpui::Size<gpui::Pixels>,
     cx: &mut Context<TerminalView>,
 ) -> Vec<gpui::AnyElement> {
-    let tokens = crate::theme::tokens(cx);
+    let tokens = zhimaterm_base::theme::tokens(cx);
     let split_right = Rc::new(cx.listener(|this, _, window, cx| {
         this.context_menu = None;
         window.dispatch_action(SplitRight.boxed_clone(), cx);
@@ -1828,7 +1837,7 @@ fn render_context_menu(
 /// 浮层里的点击动作：把点击事件回传给应用层
 type OverlayClick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// 删除某条转发规则
-type RemoveForward = Rc<dyn Fn(crate::session::ForwardId, &mut Window, &mut App)>;
+type RemoveForward = Rc<dyn Fn(zhimaterm_runtime::session::ForwardId, &mut Window, &mut App)>;
 
 struct OverlayActions {
     add: OverlayClick,
@@ -1840,7 +1849,7 @@ struct OverlayActions {
 /// 行尾 ✕ 立即删除；底部「＋ 规则」与「同时保存到连接」勾选（ADR-038）。
 /// 开了 agent 转发时多一行运行状态。
 fn render_forward_overlay(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     states: &[ForwardRuleState],
     agent_enabled: bool,
     agent_error: Option<&str>,
@@ -1892,9 +1901,10 @@ fn render_forward_overlay(
                         .child(status),
                 )
                 .child(
-                    crate::ui::panel::clickable(("forward-remove", id), move |_, window, cx| {
-                        remove(id, window, cx)
-                    })
+                    zhimaterm_base::ui::panel::clickable(
+                        ("forward-remove", id),
+                        move |_, window, cx| remove(id, window, cx),
+                    )
                     .px(px(4.))
                     .text_size(ui_rems(11.))
                     .text_color(gpui::rgb(tokens.fg_muted))
@@ -1958,7 +1968,7 @@ fn render_forward_overlay(
                 .items_center()
                 .gap(px(8.))
                 .child(
-                    crate::ui::panel::clickable("forward-add", {
+                    zhimaterm_base::ui::panel::clickable("forward-add", {
                         let add = actions.add.clone();
                         move |event, window, cx| add(event, window, cx)
                     })
@@ -1967,7 +1977,7 @@ fn render_forward_overlay(
                     .child("＋ 规则"),
                 )
                 .children(can_save.then(|| {
-                    crate::ui::panel::clickable("forward-save-toggle", {
+                    zhimaterm_base::ui::panel::clickable("forward-save-toggle", {
                         let toggle = actions.toggle_save.clone();
                         move |event, window, cx| toggle(event, window, cx)
                     })
@@ -1993,7 +2003,9 @@ fn render_forward_overlay(
 }
 
 /// 按连接配置里的规则表初始化 UI 状态：label 一次性算好，状态等 pump 上报。
-fn forward_states_from(forwards: &[crate::session::ForwardRule]) -> Vec<ForwardRuleState> {
+fn forward_states_from(
+    forwards: &[zhimaterm_runtime::session::ForwardRule],
+) -> Vec<ForwardRuleState> {
     forwards
         .iter()
         .map(|rule| ForwardRuleState {
@@ -2011,13 +2023,13 @@ impl Drop for TerminalView {
         self.session.close();
         // 记录门面注销（ADR-045）：格销毁摘条目，日志句柄与历史实体随之
         // 释放。正常时序 worker 线程已随会话退出
-        crate::recording::recorder::unregister_pane(self.pane);
+        zhimaterm_runtime::recording::recorder::unregister_pane(self.pane);
     }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         // 焦点裁决都在渲染时机做（事件循环拿不到 window）：重连后把焦点交回
         // 终端（活会话要输入）；会话结束则 blur——焦点留在终端会喂 IME 管道
         if self.state.terminal_focus_pending {
@@ -2087,7 +2099,7 @@ impl Render for TerminalView {
         // on_mouse_event 只能在 paint 阶段注册，因此借 canvas 完成。
         let app = cx.entity();
         let move_app = app.clone();
-        let mouse_listeners = crate::ui::canvas::mouse_listener_canvas(
+        let mouse_listeners = zhimaterm_base::ui::canvas::mouse_listener_canvas(
             move |event, _, cx| {
                 move_app.update(cx, |this, cx| this.handle_mouse_move(event, cx));
             },
@@ -2127,7 +2139,7 @@ impl Render for TerminalView {
         let history_toggle = (!self.local).then(|| {
             let pane = self.pane;
             // 有未看过的新操作时高亮（与 SFTP 开关、记录中的状态色同语言）
-            let fresh = crate::recording::recorder::history(pane)
+            let fresh = zhimaterm_runtime::recording::recorder::history(pane)
                 .is_some_and(|history| history.read(cx).has_fresh());
             div()
                 .id("session-history-toggle")
@@ -2149,13 +2161,15 @@ impl Render for TerminalView {
                 .on_click(move |_, window, cx| {
                     // 历史实体经门面查（ADR-045）；按钮在格底栏上，格必在。
                     // 打开即视为已读：清掉高亮，模态期间新落的条目会再置位
-                    if let Some(history) = crate::recording::recorder::history(pane) {
+                    if let Some(history) = zhimaterm_runtime::recording::recorder::history(pane) {
                         history.update(cx, |history, cx| {
                             history.mark_seen();
                             cx.notify();
                         });
-                        crate::ui::overlay::overlay_open(
-                            Box::new(crate::recording::history::HistoryModal { history }),
+                        zhimaterm_base::ui::overlay::overlay_open(
+                            Box::new(zhimaterm_runtime::recording::history::HistoryModal {
+                                history,
+                            }),
                             window,
                             cx,
                         );
@@ -2186,8 +2200,10 @@ impl Render for TerminalView {
                 .text_size(ui_rems(10.))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(move |_, window, cx| {
-                    crate::ui::overlay::overlay_open(
-                        Box::new(crate::recording::history::LoggingModal { view: view.clone() }),
+                    zhimaterm_base::ui::overlay::overlay_open(
+                        Box::new(zhimaterm_runtime::recording::history::LoggingModal {
+                            target: Rc::new(ViewLoggingTarget { view: view.clone() }),
+                        }),
                         window,
                         cx,
                     );
@@ -2314,7 +2330,7 @@ impl Render for TerminalView {
                                 .inset_0(),
                             )
                             .child(mouse_listeners)
-                            .child(crate::ui::canvas::input_handler_canvas(
+                            .child(zhimaterm_base::ui::canvas::input_handler_canvas(
                                 &self.focus,
                                 cx.entity(),
                             ))
@@ -2473,7 +2489,7 @@ impl Render for TerminalView {
                             .flatten(),
                     )
                     // 容器 bounds 每帧写入：菜单的容器内定位与夹取按它换算
-                    .child(crate::ui::canvas::bounds_recorder(
+                    .child(zhimaterm_base::ui::canvas::bounds_recorder(
                         self.container_bounds.clone(),
                     )),
             )
@@ -2533,6 +2549,26 @@ impl Render for TerminalView {
             // 探针底栏（ADR-028）：本地默认 Shell 格的底栏，与远端底栏同位置，
             // 右端一枚「进程」开关；WSL 格仍无底栏（ADR-016）
             .children(self.probe_capable.then(|| self.render_probe_bar(cx)))
+    }
+}
+
+/// 记录模态落点的视图侧实现（ADR-007 修订七）：把会话视图适配成
+/// `recording::history::LoggingTarget`，记录域不依赖 `TerminalView`。
+struct ViewLoggingTarget {
+    view: Entity<TerminalView>,
+}
+
+impl zhimaterm_runtime::recording::history::LoggingTarget for ViewLoggingTarget {
+    fn enabled(&self, cx: &App) -> bool {
+        self.view.read(cx).logging_enabled()
+    }
+
+    fn log_path(&self, cx: &App) -> Option<std::path::PathBuf> {
+        self.view.read(cx).log_path()
+    }
+
+    fn toggle(&self, cx: &mut App) {
+        self.view.update(cx, |view, cx| view.toggle_logging(cx));
     }
 }
 

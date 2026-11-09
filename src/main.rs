@@ -4,32 +4,20 @@
 //! ZhimaTerm 入口：打开主窗口并决定退出时机。
 //!
 //! 模块分层与依赖方向见 `docs/decisions/007-module-boundaries.md`。速览：
-//! - `app`：外壳状态机——会话生命周期、模态互斥、键分发与渲染装配
-//! - `views`：跨业务的共享渲染件——网格绘制（`grid`）、会话画面（`terminal_view`）、
-//!   SFTP 面板、分屏（`panes`）、框架部件（`shell`）；探针面板与历史模态分别在
-//!   `local` / `recording` 域内
-//! - `ssh` / `settings`：SSH 连接管理与设置两个表单领域（含各自的模态渲染）
-//! - `terminal` / `session` / `sftp`：终端模型 / 会话协议与传输、SFTP 命令契约
-//!   （见 ADR-001/004/005）
-//! - `local`：本地终端功能——PTY/Shell/采集机制与探针面板（叶子地位）
-//! - `recording`：会话留痕——输出日志、记录门面与历史模态（叶子地位）
-//! - `input` / `font` / `ui`：输入语义转换 / 字体领域 / 通用组件
+//! - 根包只有外壳与视图：
+//!   - `app`：外壳状态机——会话生命周期、模态互斥、键分发与渲染装配
+//!     （按变更轴拆为 sessions / workspace_io / modals / keys / render 子模块）
+//!   - `views`：跨业务的共享渲染件——网格绘制、会话画面、SFTP 面板、分屏、
+//!     框架部件；探针面板与历史模态随各自的域走
+//!   - `settings` / `workspace`：设置表单领域与工作区持久化
+//! - 强制的分层边界在 workspace crate：
+//!   - `zhimaterm-base`：叶子与基础层——config_paths / font / input / theme / ui / wake
+//!   - `zhimaterm-terminal`：终端模型（VT 状态、颜色、转录；零 gpui 引用）
+//!   - `zhimaterm-runtime`：会话协议与传输、SFTP、本地终端与会话留痕
+//!   - `zhimaterm-ssh`：SSH 连接管理领域（表单、保存连接、钥匙串、转发规则）
 
 mod app;
-mod config_paths;
-mod font;
-mod input;
-mod local;
-mod recording;
-mod session;
 mod settings;
-mod sftp;
-mod ssh;
-mod terminal;
-#[cfg(test)]
-mod tests;
-mod theme;
-mod ui;
 mod views;
 mod workspace;
 
@@ -44,14 +32,14 @@ use {
 };
 
 use app::ZhimaTermApp;
-use input::{Quit, app_key_bindings};
+use zhimaterm_base::input::{Quit, app_key_bindings};
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         cx.bind_keys(app_key_bindings());
         // 输入组件的编辑键位（选区、剪贴板、撤销重做、多行换行等）：
         // 命中即被输入框消费，终端等其他焦点位置没有处理器时按键回落给 on_key_down
-        cx.bind_keys(ui::input::bindings());
+        cx.bind_keys(zhimaterm_base::ui::input::bindings());
         cx.on_action::<Quit>(|_, cx| cx.quit());
         #[cfg(target_os = "macos")]
         set_app_menu(cx);

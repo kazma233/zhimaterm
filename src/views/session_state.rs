@@ -7,11 +7,11 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::session::{
+use zhimaterm_runtime::session::{
     ControlEvent, LangStatus, PointerShape, ReconnectPlanner, ScheduleOutcome, SessionExit,
     SshTarget, TrustRequest,
 };
-use crate::terminal::SearchOutcome;
+use zhimaterm_terminal::SearchOutcome;
 
 /// 事件可写、渲染只读的纯数据子集。实体句柄、画面帧与时钟留在视图。
 pub(crate) struct SessionViewState {
@@ -298,7 +298,7 @@ fn feedback_for(outcome: SearchOutcome) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{ExitReason, PasswordAccount, SshAuth};
+    use zhimaterm_runtime::session::{ExitReason, PasswordAccount, SshAuth};
 
     fn no_store(_: &str) -> Option<String> {
         None

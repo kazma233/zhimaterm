@@ -22,16 +22,16 @@ use gpui::{
     div, px,
 };
 
-use crate::recording::history::{ProgressUnit, TaskItem, TaskState, file_name_of};
-use crate::sftp::{
+use zhimaterm_base::theme::{UiTokens, tokens};
+use zhimaterm_base::ui::input::TextInput;
+use zhimaterm_base::ui::menu;
+use zhimaterm_base::ui::ui_rems;
+use zhimaterm_base::ui::{DockPanel, card, panel};
+use zhimaterm_runtime::recording::history::{ProgressUnit, TaskItem, TaskState, file_name_of};
+use zhimaterm_runtime::sftp::{
     RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId, TaskOutcome,
     TaskProgress, remote_join,
 };
-use crate::theme::{UiTokens, tokens};
-use crate::ui::input::TextInput;
-use crate::ui::menu;
-use crate::ui::ui_rems;
-use crate::ui::{DockPanel, card, panel};
 
 const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
 
@@ -671,7 +671,7 @@ impl SftpPanelView {
             let mut task = self.tasks.remove(index);
             task.finish(outcome);
             task.finished_at = Some(chrono::Local::now());
-            crate::recording::recorder::record_operation(self.pane, task, cx);
+            zhimaterm_runtime::recording::recorder::record_operation(self.pane, task, cx);
         }
         // 上传/递归删除会改变当前目录内容：完成后刷新一次列表
         if matches!(outcome, TaskOutcome::Completed(_)) {
@@ -693,7 +693,7 @@ impl SftpPanelView {
             Ok(()) => TaskState::Completed(format!("已删除 {}", path.display())),
             Err(error) => TaskState::Failed(format!("删除失败：{error}")),
         };
-        crate::recording::recorder::record_operation(
+        zhimaterm_runtime::recording::recorder::record_operation(
             self.pane,
             TaskItem {
                 id: DIRECT_DELETE_ID,
@@ -856,7 +856,7 @@ impl Render for SftpPanelView {
             }
         }
         // 面板 bounds 每帧写入：菜单的容器内定位与夹取按它换算
-        column = column.child(crate::ui::canvas::bounds_recorder(
+        column = column.child(zhimaterm_base::ui::canvas::bounds_recorder(
             self.panel_bounds.clone(),
         ));
         column
@@ -1499,9 +1499,9 @@ mod tests {
         PendingTransfer, clean_name, format_size, overwrite_message, progress_text, sibling_path,
         sort_entries, upload_message,
     };
-    use crate::recording::history::ProgressUnit;
-    use crate::sftp::{RemoteEntry, RemoteFileType};
     use std::path::{Path, PathBuf};
+    use zhimaterm_runtime::recording::history::ProgressUnit;
+    use zhimaterm_runtime::sftp::{RemoteEntry, RemoteFileType};
 
     fn entry(name: &str, file_type: RemoteFileType) -> RemoteEntry {
         RemoteEntry {

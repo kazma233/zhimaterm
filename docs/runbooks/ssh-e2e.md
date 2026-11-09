@@ -44,7 +44,7 @@ ZHIMATERM_SSH_HOST=127.0.0.1 \
 ZHIMATERM_SSH_PORT=2222 ZHIMATERM_SSH_USER="$(whoami)" ZHIMATERM_SSH_KEY=$D/client_ed25519 \
 ZHIMATERM_SSH_PASSWORD_PORT=2223 ZHIMATERM_SSH_PASSWORD_USER=tester \
 ZHIMATERM_SSH_PASSWORD="$(cat $D/password)" \
-  cargo test --bin zhimaterm "tests::session_e2e::ssh" -- --ignored --nocapture --test-threads=1
+  cargo test -p zhimaterm-runtime --lib "tests::session_e2e::ssh" -- --ignored --nocapture --test-threads=1
 ```
 
 密码服务的口令由起环境的脚本随机生成，落在 `$D/password`（600 权限），不写死在

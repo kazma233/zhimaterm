@@ -12,10 +12,10 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{App, Bounds, Pixels, div, px};
 
-use crate::theme::{UiTokens, builtin, builtin_names_sorted, current};
-use crate::ui::canvas;
-use crate::ui::select::{self, PopoverSide};
-use crate::ui::ui_rems;
+use zhimaterm_base::theme::{UiTokens, builtin, builtin_names_sorted, current};
+use zhimaterm_base::ui::canvas;
+use zhimaterm_base::ui::select::{self, PopoverSide};
+use zhimaterm_base::ui::ui_rems;
 
 /// 主题选择器的开合状态与浮层锚点。
 pub struct ThemePicker {
@@ -68,7 +68,7 @@ pub fn entry(
         .flex_none()
         // 与会话入口显式等高（ACTION_ENTRY_HEIGHT）：色板高度不随内容自然变化，
         // hover 高亮框和左边的会话按钮保持一致的边距
-        .h(px(crate::ui::ACTION_ENTRY_HEIGHT))
+        .h(px(zhimaterm_base::ui::ACTION_ENTRY_HEIGHT))
         .flex()
         .items_center()
         .px(px(2.))
@@ -176,7 +176,7 @@ fn row(
 
 /// 主题色板：主题背景色块内叠红/绿/蓝三个点，一眼读出配色倾向。
 /// 底部入口与下拉项共用这一尺寸：入口只靠它表达当前主题（ADR-041）。
-fn swatch(tokens: &UiTokens, scheme: &crate::theme::ColorScheme) -> gpui::Div {
+fn swatch(tokens: &UiTokens, scheme: &zhimaterm_base::theme::ColorScheme) -> gpui::Div {
     let dot = |color: u32| {
         div()
             .flex_none()

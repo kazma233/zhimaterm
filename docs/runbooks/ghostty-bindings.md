@@ -32,7 +32,7 @@ cargo run -p ghostty-vt-sys --features bindgen-tool --bin gen-bindings
 - bindgen/heck 是 `bindgen-tool` feature 的可选依赖，只有跑这个工具才编
  译，工具本身需要 libclang（macOS 装 Xcode Command Line Tools 即有）。
 - 生成后跑 `cargo test contract`（26 场景 × 3 后端）确认行为不回归；
-  新增绑定的消费代码在 `src/terminal/backend/ghostty/`。
+  新增绑定的消费代码在 `crates/terminal/src/backend/ghostty/`。
 - **这个 bin 不被默认收尾检查覆盖**（`--all-targets` 不开 feature）：改过
   它要单独跑
   `cargo clippy -p ghostty-vt-sys --all-targets --features bindgen-tool`。

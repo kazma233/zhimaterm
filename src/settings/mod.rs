@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::terminal::DEFAULT_SCROLLING_HISTORY;
-use crate::terminal::backend::BackendKind;
+use zhimaterm_terminal::DEFAULT_SCROLLING_HISTORY;
+use zhimaterm_terminal::backend::BackendKind;
 
 /// 终端字号下限：再小连光标都看不清。
 pub const MIN_FONT_SIZE: f32 = 6.0;
@@ -102,24 +102,24 @@ impl SettingsValues {
 
 impl Settings {
     /// 生效终端后端：未配置或名字不存在都回落默认。
-    pub fn terminal_backend_or_default(&self) -> crate::terminal::backend::BackendKind {
+    pub fn terminal_backend_or_default(&self) -> zhimaterm_terminal::backend::BackendKind {
         self.terminal_backend
             .as_deref()
-            .map(crate::terminal::backend::BackendKind::parse)
+            .map(zhimaterm_terminal::backend::BackendKind::parse)
             .unwrap_or_default()
     }
 
     /// 生效字号：未配置用默认；文件被手改出范围时夹回来，不让坏值把网格量歪。
     pub fn font_size_or_default(&self) -> f32 {
         self.font_size
-            .unwrap_or(crate::font::DEFAULT_FONT_SIZE)
+            .unwrap_or(zhimaterm_base::font::DEFAULT_FONT_SIZE)
             .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
     }
 
     /// 生效界面字号：作为窗口 rem 根，全部界面文字按它缩放；坏值同样夹回来。
     pub fn ui_font_size_or_default(&self) -> f32 {
         self.ui_font_size
-            .unwrap_or(crate::ui::DEFAULT_UI_FONT_SIZE)
+            .unwrap_or(zhimaterm_base::ui::DEFAULT_UI_FONT_SIZE)
             .clamp(MIN_UI_FONT_SIZE, MAX_UI_FONT_SIZE)
     }
 
@@ -145,7 +145,7 @@ impl Settings {
     /// 从配置目录读取。文件不存在就是默认值；解析失败要报错，不静默当作空文件，
     /// 否则下一次保存会把用户手写一半的设置覆盖掉。
     pub fn load() -> Result<Self> {
-        let path = crate::config_paths::config_dir()?.join("settings.json");
+        let path = zhimaterm_base::config_paths::config_dir()?.join("settings.json");
         Self::load_at(path)
     }
 
@@ -162,13 +162,13 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = crate::config_paths::config_dir()?.join("settings.json");
+        let path = zhimaterm_base::config_paths::config_dir()?.join("settings.json");
         self.save_at(path)
     }
 
     pub fn save_at(&self, path: PathBuf) -> Result<()> {
         let json = serde_json::to_vec_pretty(self).context("序列化设置失败")?;
-        crate::config_paths::write_atomic(&path, &json)
+        zhimaterm_base::config_paths::write_atomic(&path, &json)
             .with_context(|| format!("保存设置失败：{}", path.display()))
     }
 }
@@ -372,7 +372,7 @@ mod tests {
             local_shell: Some("/bin/zsh".into()),
             local_workdir: Some("/tmp".into()),
             option_as_alt: true,
-            terminal_backend: crate::terminal::backend::BackendKind::Termwiz,
+            terminal_backend: zhimaterm_terminal::backend::BackendKind::Termwiz,
         };
         assert_eq!(
             values.to_settings(&existing),
@@ -408,7 +408,7 @@ mod tests {
             local_shell: None,
             local_workdir: None,
             option_as_alt: false,
-            terminal_backend: crate::terminal::backend::BackendKind::Alacritty,
+            terminal_backend: zhimaterm_terminal::backend::BackendKind::Alacritty,
         };
         assert_eq!(values.to_settings(&existing).ui_font_family, None);
     }
@@ -440,11 +440,11 @@ mod tests {
         assert_eq!(missing, Settings::default());
         assert_eq!(
             missing.font_size_or_default(),
-            crate::font::DEFAULT_FONT_SIZE
+            zhimaterm_base::font::DEFAULT_FONT_SIZE
         );
         assert_eq!(
             missing.ui_font_size_or_default(),
-            crate::ui::DEFAULT_UI_FONT_SIZE
+            zhimaterm_base::ui::DEFAULT_UI_FONT_SIZE
         );
 
         // 只写了字号的文件（手改或旧版本）：其余字段回落到默认，不因缺字段而报错

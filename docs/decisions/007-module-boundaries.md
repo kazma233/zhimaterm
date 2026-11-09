@@ -219,3 +219,66 @@ ADR-044 2026-11-09 修订。app 的 `overlay_*` 方法保留为薄转发，栈�
 
 结果：`ssh` 域对 `views`/`app` 的引用为零。行为等价、纯接口重构；
 `cargo fmt`/clippy/tests 全绿。
+
+## 修订（2026-11-09，七）：视图层向上依赖清零
+
+上一条修订后仍有两处向上依赖，按同一「能力注入」模式收掉：
+
+- `recording::history::LoggingModal` 原持 `Entity<TerminalView>` 读记录状态。
+  域改为定义 `LoggingTarget` 能力（enabled / log_path / toggle），
+  `views::terminal_view` 用适配器实现并注入。`recording` 对 `views` 引用清零。
+- `views::shell` 的两个模态曾直调 `crate::app::update_app`：
+  `WslModal` 改为构造时注入 `on_pick` 回调；`ConfirmCloseModal` 改为注入
+  `confirm`/`cancel` 两个 `WindowAction`，`CloseTarget` 由外壳绑定进动作。
+  `views` 对 `app` 引用清零。
+
+结果：除 `main → app` 外，全仓没有任何向上依赖（域/基础层不引 views/app，
+views 不引 app）。分层从此可被 import 检查直接验证，也具备升 workspace
+crate 做编译边界的前提。
+
+## 修订（2026-11-09，八）：分层升为 workspace crate 边界
+
+上一条修订把向上依赖清零后，分层仍只靠目录与 import 检查。本次把四个中间层
+升为 workspace 成员 crate，让 Cargo 依赖图直接拒绝反向引用；根包保留外壳与
+视图（它位于依赖图顶端，没有任何 crate 依赖它，再拆拿不到编译期收益）：
+
+```
+crates/base      zhimaterm-base       config_paths / font / input / theme / ui / wake
+crates/terminal  zhimaterm-terminal   terminal（后端、契约、转录、回放）
+crates/runtime   zhimaterm-runtime    sftp / local / recording / session / tests / bin（探针）
+crates/ssh       zhimaterm-ssh        connect / connections / keychain / forward_form
+根包 src/                              settings / workspace / views / app / main
+```
+
+依赖边只允许 `根 → ssh → runtime → terminal → base`（根包另可用全部四层）。
+
+配套改动：
+
+- `wake` 下沉：`WakeupHandle`/`WakeupRead`/`wakeup_pair`/`WakingSender` 从
+  `session::transport` 移到叶子模块（现 `zhimaterm-base::wake`），断开
+  `sftp → session` 的反向边。探针按 `#[path]` 复用 `poll.rs` 的约定保留：
+  poll 与 wake 各自保持 std+libc 自包含，互不引用。
+- `tests::support::rendered` 归位为 `TerminalSnapshot::rendered_text()`：测试
+  驱动层随 runtime crate 走，模型契约测试不能再引用它；拼法只保留一份。
+- 跨 crate 的测试辅助不再用 `#[cfg(test)]` 门控（依赖方按测试编译时不带
+  对方的 cfg(test)）：`WakeupHandle::for_test`、`CellMetrics::for_tests`、
+  `TextInput::masked`、`TerminalModel::new` 改为常态公开。
+- 原先只在 crate 内可见、被新边界切开的项按需升为 `pub`（`BackendKind` 及
+  其方法、`colors::reply`、`file_for`/`session_number_of`、`remote_join`、
+  `SavedSources` 的字段等）；编译错误就是漏网清单。
+- `app.rs`（2707 行）按变更轴拆为 `src/app/` 目录：`mod.rs`（状态结构、构造、
+  浮层薄转发）、`sessions.rs`（会话/格生命周期与拖拽排序）、`workspace_io.rs`
+  （快照/恢复/防抖落盘）、`modals.rs`（模态与动作装配）、`keys.rs`（裸键分发）、
+  `render.rs`（`Render` 实现与侧栏/格区域渲染）。纯搬移，行为不变。
+- 根包依赖表随之收缩，只保留外壳/视图/设置/工作区与探针真正使用的 crate。
+
+后果：
+
+- 反向依赖从「import 检查可发现」变为「Cargo 依赖图不可能」；新增 crate 间
+  引用必须先改 manifest。
+- 代价：跨 crate 需公开原先 crate 内可见的项（API 面略增）；`base` 与
+  `runtime` 都依赖 gpui（`ui` 组件与 `recording` 的模态视图），因此 crate 分层
+  是**依赖方向**边界，不是「内核零 UI」的证明；`terminal` 代码本身仍零 gpui
+  引用。
+- `settings`/`workspace`/`views` 留在根包：它们位于依赖图顶端或只被外壳消费，
+  再拆 crate 没有编译期收益。

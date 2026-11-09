@@ -8023,31 +8023,83 @@ dependencies = [
 name = "zhimaterm"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "chrono",
- "ghostty-vt-sys",
  "gpui-pre",
  "gpui-pre-platform",
- "keyring",
- "libc",
- "libssh2-sys",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "regex",
  "serde",
  "serde_json",
+ "unicode-segmentation",
+ "unicode-width",
+ "winresource",
+ "zhimaterm-base",
+ "zhimaterm-runtime",
+ "zhimaterm-ssh",
+ "zhimaterm-terminal",
+]
+
+[[package]]
+name = "zhimaterm-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-pre",
+ "libc",
+ "smol",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "zhimaterm-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui-pre",
+ "libc",
+ "libssh2-sys",
+ "regex",
+ "serde_json",
  "smol",
  "socket2",
  "ssh2",
- "termwiz",
- "unicode-segmentation",
- "unicode-width",
- "uuid",
  "windows-registry",
  "windows-sys 0.61.2",
- "winresource",
+ "zhimaterm-base",
+ "zhimaterm-terminal",
+]
+
+[[package]]
+name = "zhimaterm-ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-pre",
+ "keyring",
+ "serde",
+ "serde_json",
+ "uuid",
+ "zhimaterm-base",
+ "zhimaterm-runtime",
+]
+
+[[package]]
+name = "zhimaterm-terminal"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "ghostty-vt-sys",
+ "regex",
+ "serde",
+ "serde_json",
+ "smol",
+ "termwiz",
+ "unicode-width",
+ "zhimaterm-base",
 ]
 
 [[package]]

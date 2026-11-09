@@ -1,7 +1,7 @@
 # 阶段 4 性能与资源验收
 
 对应 `../context/requirements.md` §8（初始性能验收提案）与 §10（验收证据-性能测试）。测试代码在
-`src/tests/perf_acceptance.rs`（重量级测试集中目录，与各模块内联的单测分开），全部
+`crates/runtime/src/tests/perf_acceptance.rs`（重量级测试集中目录，与各模块内联的单测分开），全部
 `#[ignore]` 门控，普通 `cargo test` 不受影响。
 
 结论速览（2026-10-15 SSH 日常能力——认证叠加/端口转发/agent 转发/keepalive——落地后复跑，无回归；同日 ADR-017 会话输出日志改动 worker 排空循环后再复跑 6/6，P95 26.8ms、吞吐 355.3 MiB/s、其余项同量级；验收环境见下）：
@@ -37,7 +37,7 @@ D=/tmp/zhimaterm-sshd
 ZHIMATERM_PERF=1 \
 ZHIMATERM_SSH_HOST=127.0.0.1 ZHIMATERM_SSH_PORT=2222 \
 ZHIMATERM_SSH_USER="$(whoami)" ZHIMATERM_SSH_KEY=$D/client_ed25519 \
-  cargo test --bin zhimaterm perf_ --release -- --ignored --nocapture --test-threads=1
+  cargo test -p zhimaterm-runtime --lib perf_ --release -- --ignored --nocapture --test-threads=1
 # 单跑某项：把 perf_ 换成用例名，如 perf_input_p95_under_flood
 ```
 
@@ -48,7 +48,7 @@ Windows 原生跑法（cmd，本地项直接可跑，SSH 项的 sshd 准备同�
 
 ```cmd
 set ZHIMATERM_PERF=1
-cargo test --bin zhimaterm perf_ -- --ignored --nocapture --test-threads=1
+cargo test -p zhimaterm-runtime --lib perf_ -- --ignored --nocapture --test-threads=1
 ```
 
 平台口径差异：本地会话默认 shell 是 PowerShell，标记命令用字面量 `echo`（不依赖
@@ -59,8 +59,7 @@ PATH 里碰巧存在的 Git printf.exe）；刷屏负载是 PowerShell 版（`[C
 足够，见 3.3 的 Windows 实测），数字口径仍以 release 为准。
 
 **为什么必须 release**：debug 构建下 VT 解析吞吐不足 10 MiB/s，回显字节被压在输出积压
-后面永远出不了帧——那是构建配置问题，不是被测语义。功能回归（`cargo test --bin
-zhimaterm`，不带 `--ignored`）仍在 debug 下全绿。
+后面永远出不了帧——那是构建配置问题，不是被测语义。功能回归（`cargo test -p zhimaterm-runtime --lib`，不带 `--ignored`）仍在 debug 下全绿。
 
 **已知偏离（测速方法限制，非产品行为）**：`perf_input_p95_under_flood` 的刷屏是「原位
 重绘」而不是滚动输出（字节速率、VT 解析负载与滚动刷屏相同）。原因见该用例文档注释：

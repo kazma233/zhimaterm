@@ -1,0 +1,19 @@
+[package]
+name = "zhimaterm-base"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "ZhimaTerm 基础层：配置路径、输入语义、字体、主题、通用组件与唤醒管道"
+
+[dependencies]
+anyhow = "1"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+smol = "2"
+unicode-segmentation = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }

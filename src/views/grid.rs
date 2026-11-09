@@ -16,9 +16,11 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
-use crate::font::CellMetrics;
-use crate::input::CellSide;
-use crate::terminal::{CursorKind, SearchHighlight, TerminalRun, TerminalSnapshot, UnderlineKind};
+use zhimaterm_base::font::CellMetrics;
+use zhimaterm_base::input::CellSide;
+use zhimaterm_terminal::{
+    CursorKind, SearchHighlight, TerminalRun, TerminalSnapshot, UnderlineKind,
+};
 
 /// 由终端区域尺寸推算行列数，下限与终端模型一致（至少 2 列 1 行）。
 pub fn grid_size(bounds: Bounds<Pixels>, metrics: CellMetrics) -> (usize, usize) {
@@ -1246,7 +1248,7 @@ mod tests {
             let Ok(ch) = char::try_from(code) else {
                 continue;
             };
-            if crate::terminal::is_block_element(ch) {
+            if zhimaterm_terminal::is_block_element(ch) {
                 assert!(
                     block_geometry(ch).is_some(),
                     "U+{code:04X} ({ch}) 被模型标记为块元素但缺几何定义"

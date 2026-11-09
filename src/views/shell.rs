@@ -5,22 +5,23 @@
 //! "数据进、Div 出"函数，监听器绑在谁身上由调用方决定。
 
 use std::collections::VecDeque;
+// WslModal 的注入回调只在 Windows 生产路径存在
+#[cfg(windows)]
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, Keystroke, MouseButton, Window, div, px};
 
-use crate::app::update_app;
-use crate::session::{LangStatus, MonitorSample, TrustRequest};
-use crate::theme::UiTokens;
-use crate::ui::WindowAction;
-use crate::ui::input::TextInput;
-use crate::ui::overlay::KeyHandling;
-use crate::ui::overlay::overlay_dispatch;
-use crate::ui::panel;
-use crate::ui::ui_rems;
-use crate::ui::{human_bytes, human_rate};
 use crate::workspace::PaneId;
+use zhimaterm_base::theme::UiTokens;
+use zhimaterm_base::ui::WindowAction;
+use zhimaterm_base::ui::input::TextInput;
+use zhimaterm_base::ui::overlay::KeyHandling;
+use zhimaterm_base::ui::overlay::overlay_dispatch;
+use zhimaterm_base::ui::panel;
+use zhimaterm_base::ui::ui_rems;
+use zhimaterm_base::ui::{human_bytes, human_rate};
+use zhimaterm_runtime::session::{LangStatus, MonitorSample, TrustRequest};
 
 /// 底栏内容：同一根底栏按会话阶段切换显示——连接中、运行中的监控、
 /// 结束后的原因与出路。常驻不消失，避免布局跳动；只有远端会话有底栏，
@@ -163,13 +164,13 @@ pub fn render_status_bar(
                 sample.cpu_percent,
                 cpu_history,
             ))
-            .child(crate::ui::vertical_divider(tokens))
+            .child(zhimaterm_base::ui::vertical_divider(tokens))
             .child(mem_metric(tokens, sample, mem_history))
-            .child(crate::ui::vertical_divider(tokens))
+            .child(zhimaterm_base::ui::vertical_divider(tokens))
             .child(usage_metric(tokens, "DISK", sample.disk))
-            .child(crate::ui::vertical_divider(tokens))
+            .child(zhimaterm_base::ui::vertical_divider(tokens))
             .child(rate_metric(tokens, "↓", sample.rx_bytes_per_sec))
-            .child(crate::ui::vertical_divider(tokens))
+            .child(zhimaterm_base::ui::vertical_divider(tokens))
             .child(rate_metric(tokens, "↑", sample.tx_bytes_per_sec)),
         StatusBar::Ended {
             status,
@@ -396,9 +397,9 @@ fn rate_metric(tokens: &UiTokens, arrow: &str, bytes_per_sec: f64) -> gpui::Div 
 /// 按生效范围分两组。点遮罩、「关闭」或 Esc 都能关。
 pub struct ShortcutsModal;
 
-impl crate::ui::overlay::ModalView for ShortcutsModal {
-    fn species(&self) -> crate::ui::overlay::Species {
-        crate::ui::overlay::Species::Modal
+impl zhimaterm_base::ui::overlay::ModalView for ShortcutsModal {
+    fn species(&self) -> zhimaterm_base::ui::overlay::Species {
+        zhimaterm_base::ui::overlay::Species::Modal
     }
 
     fn title(&self) -> Option<String> {
@@ -406,11 +407,11 @@ impl crate::ui::overlay::ModalView for ShortcutsModal {
     }
 
     fn content(&self, _window: &Window, cx: &App) -> AnyElement {
-        let tokens = crate::theme::tokens(cx);
-        let rows = crate::input::shortcut_reference();
+        let tokens = zhimaterm_base::theme::tokens(cx);
+        let rows = zhimaterm_base::input::shortcut_reference();
         let (app_rows, terminal_rows): (Vec<_>, Vec<_>) = rows
             .into_iter()
-            .partition(|row| row.scope == crate::input::Scope::App);
+            .partition(|row| row.scope == zhimaterm_base::input::Scope::App);
 
         div()
             .flex()
@@ -430,7 +431,7 @@ impl crate::ui::overlay::ModalView for ShortcutsModal {
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         panel::dialog_actions(
             [],
             Some(
@@ -439,7 +440,7 @@ impl crate::ui::overlay::ModalView for ShortcutsModal {
                     "shortcuts-close",
                     "关闭",
                     Some("esc"),
-                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
+                    |_, window, cx| zhimaterm_base::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),
@@ -460,7 +461,7 @@ impl crate::ui::overlay::ModalView for ShortcutsModal {
 fn shortcut_group(
     tokens: &UiTokens,
     title: &str,
-    rows: Vec<crate::input::ShortcutRow>,
+    rows: Vec<zhimaterm_base::input::ShortcutRow>,
 ) -> gpui::Div {
     div()
         .flex()
@@ -473,7 +474,7 @@ fn shortcut_group(
                 .child(title.to_owned()),
         )
         .children(rows.into_iter().map(
-            |crate::input::ShortcutRow {
+            |zhimaterm_base::input::ShortcutRow {
                  description, keys, ..
              }| {
                 div()
@@ -504,20 +505,25 @@ fn shortcut_group(
 /// 点击语义，没有键盘选中态，只接 Esc。
 #[cfg(windows)]
 pub struct WslModal {
-    distros: Vec<crate::local::wsl::WslDistro>,
+    distros: Vec<zhimaterm_runtime::local::wsl::WslDistro>,
+    /// 点条目后的开会话动作：外壳注入（ADR-007 修订七），视图层不依赖 app。
+    on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
 }
 
 #[cfg(windows)]
 impl WslModal {
-    pub fn new(distros: Vec<crate::local::wsl::WslDistro>) -> Self {
-        Self { distros }
+    pub fn new(
+        distros: Vec<zhimaterm_runtime::local::wsl::WslDistro>,
+        on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
+    ) -> Self {
+        Self { distros, on_pick }
     }
 }
 
 #[cfg(windows)]
-impl crate::ui::overlay::ModalView for WslModal {
-    fn species(&self) -> crate::ui::overlay::Species {
-        crate::ui::overlay::Species::Modal
+impl zhimaterm_base::ui::overlay::ModalView for WslModal {
+    fn species(&self) -> zhimaterm_base::ui::overlay::Species {
+        zhimaterm_base::ui::overlay::Species::Modal
     }
 
     fn title(&self) -> Option<String> {
@@ -525,7 +531,7 @@ impl crate::ui::overlay::ModalView for WslModal {
     }
 
     fn content(&self, _window: &Window, cx: &App) -> AnyElement {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         let rows = self.distros.iter().enumerate().map(|(index, distro)| {
             let name = distro.name.clone();
             // 副行：家族（首字母大写）+ 系统版本 + WSL 大版本，缺哪项省哪项
@@ -545,10 +551,9 @@ impl crate::ui::overlay::ModalView for WslModal {
             if let Some(version) = distro.wsl_version {
                 parts.push(format!("WSL{version}"));
             }
-            panel::clickable(("wsl-row", index), move |_, window, cx| {
-                crate::app::update_app(window, cx, |app, window, cx| {
-                    app.open_wsl_distro(&name, window, cx)
-                });
+            panel::clickable(("wsl-row", index), {
+                let on_pick = self.on_pick.clone();
+                move |_, window, cx| on_pick(&name, window, cx)
             })
             .w_full()
             .px(px(10.))
@@ -604,7 +609,7 @@ impl crate::ui::overlay::ModalView for WslModal {
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         panel::dialog_actions(
             [],
             Some(
@@ -613,7 +618,7 @@ impl crate::ui::overlay::ModalView for WslModal {
                     "wsl-cancel",
                     "取消",
                     Some("esc"),
-                    |_, window, cx| crate::ui::overlay::overlay_close_top(window, cx),
+                    |_, window, cx| zhimaterm_base::ui::overlay::overlay_close_top(window, cx),
                 )
                 .into_any_element(),
             ),
@@ -904,8 +909,8 @@ pub fn render_sidebar(
                 .child(footer),
         )
         // 最后挂载：盖在内容之上，右缘 5px 是拖宽命中区
-        .child(crate::ui::resize_grip(
-            crate::ui::GripSide::Right,
+        .child(zhimaterm_base::ui::resize_grip(
+            zhimaterm_base::ui::GripSide::Right,
             on_resize_start,
         ))
 }
@@ -1041,40 +1046,44 @@ pub(crate) enum CloseTarget {
 /// 文案与目标是打开时刻的快照（挂起期间会话可能自己结束，执行关闭时才按
 /// 目标现算），由外壳装配（`close_confirm_text` 留在壳里：它读应用状态）。
 pub(crate) struct ConfirmCloseModal {
-    target: CloseTarget,
     reason: String,
     sources: Vec<String>,
+    /// 确认/取消动作：外壳注入（ADR-007 修订七），视图层不依赖 app。
+    confirm: WindowAction,
+    cancel: WindowAction,
 }
 
 impl ConfirmCloseModal {
-    pub(crate) fn new(target: CloseTarget, reason: String, sources: Vec<String>) -> Self {
+    pub(crate) fn new(
+        reason: String,
+        sources: Vec<String>,
+        confirm: WindowAction,
+        cancel: WindowAction,
+    ) -> Self {
         Self {
-            target,
             reason,
             sources,
+            confirm,
+            cancel,
         }
     }
 
     fn cancel_handling(&self) -> KeyHandling {
-        KeyHandling::Action(Rc::new(move |window, cx| {
-            update_app(window, cx, |app, window, cx| {
-                app.cancel_close_target(window, cx)
-            });
-        }))
+        KeyHandling::Action(self.cancel.clone())
     }
 }
 
-impl crate::ui::overlay::ModalView for ConfirmCloseModal {
-    fn species(&self) -> crate::ui::overlay::Species {
-        crate::ui::overlay::Species::Dialog
+impl zhimaterm_base::ui::overlay::ModalView for ConfirmCloseModal {
+    fn species(&self) -> zhimaterm_base::ui::overlay::Species {
+        zhimaterm_base::ui::overlay::Species::Dialog
     }
 
-    fn tone(&self) -> crate::ui::card::Tone {
-        crate::ui::card::Tone::Warn
+    fn tone(&self) -> zhimaterm_base::ui::card::Tone {
+        zhimaterm_base::ui::card::Tone::Warn
     }
 
     fn content(&self, _window: &Window, cx: &App) -> AnyElement {
-        let tokens = &crate::theme::tokens(cx);
+        let tokens = &zhimaterm_base::theme::tokens(cx);
         let (reason, sources) = (&self.reason, &self.sources);
         div()
             .flex()
@@ -1096,19 +1105,15 @@ impl crate::ui::overlay::ModalView for ConfirmCloseModal {
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
-        let tokens = &crate::theme::tokens(cx);
-        let target = self.target;
+        let tokens = &zhimaterm_base::theme::tokens(cx);
+        let confirm = self.confirm.clone();
         panel::dialog_actions(
             [panel::primary_button(
                 tokens,
                 "confirm-close",
                 "关闭",
                 None,
-                move |_, window, cx| {
-                    update_app(window, cx, |app, window, cx| {
-                        app.confirm_close_target(target, window, cx)
-                    });
-                },
+                move |_, window, cx| confirm(window, cx),
             )
             .into_any_element()],
             Some(
@@ -1123,7 +1128,7 @@ impl crate::ui::overlay::ModalView for ConfirmCloseModal {
     }
 
     fn key_action(&self, key: &Keystroke, _cx: &App) -> KeyHandling {
-        if crate::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("escape") {
+        if zhimaterm_base::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("escape") {
             return self.cancel_handling();
         }
         KeyHandling::None
@@ -1145,7 +1150,7 @@ impl crate::ui::overlay::ModalView for ConfirmCloseModal {
 #[cfg(test)]
 mod tests {
     use super::{load_color, sparkline_ratio};
-    use crate::theme::default_theme;
+    use zhimaterm_base::theme::default_theme;
 
     #[test]
     fn load_color_marks_load_tiers() {

@@ -302,7 +302,7 @@ impl Workspace {
     /// 都报错，由调用方决定回退——不静默当作空文件，否则下一次保存会覆盖
     /// 用户手改的内容。
     pub fn load() -> Result<Option<Self>> {
-        let path = crate::config_paths::config_dir()?.join("workspace.json");
+        let path = zhimaterm_base::config_paths::config_dir()?.join("workspace.json");
         Self::load_at(path)
     }
 
@@ -328,13 +328,13 @@ impl Workspace {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = crate::config_paths::config_dir()?.join("workspace.json");
+        let path = zhimaterm_base::config_paths::config_dir()?.join("workspace.json");
         self.save_at(path)
     }
 
     pub fn save_at(&self, path: PathBuf) -> Result<()> {
         let json = serde_json::to_vec_pretty(self).context("序列化工作区失败")?;
-        crate::config_paths::write_atomic(&path, &json)
+        zhimaterm_base::config_paths::write_atomic(&path, &json)
             .with_context(|| format!("保存工作区失败：{}", path.display()))
     }
 }

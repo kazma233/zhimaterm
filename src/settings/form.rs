@@ -16,21 +16,21 @@ use gpui::{
     relative,
 };
 
-use crate::font;
 use crate::settings::{
     DEFAULT_SCROLLING_HISTORY, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_UI_FONT_SIZE,
     SettingsValues, validate_font_size, validate_local_shell, validate_local_workdir,
     validate_scrolling_history, validate_ui_font_size,
 };
-use crate::terminal::backend::BackendKind;
-use crate::ui::card;
-use crate::ui::input::{self, TextInput};
-use crate::ui::overlay::{KeyHandling, ModalView, Species};
-use crate::ui::panel;
-use crate::ui::select::{
+use zhimaterm_base::font;
+use zhimaterm_base::ui::card;
+use zhimaterm_base::ui::input::{self, TextInput};
+use zhimaterm_base::ui::overlay::{KeyHandling, ModalView, Species};
+use zhimaterm_base::ui::panel;
+use zhimaterm_base::ui::select::{
     plain_select_popover, plain_select_row, select_backdrop, select_popover, select_row,
 };
-use crate::ui::{DEFAULT_UI_FONT_SIZE, WindowAction, ui_rems};
+use zhimaterm_base::ui::{DEFAULT_UI_FONT_SIZE, WindowAction, ui_rems};
+use zhimaterm_terminal::backend::BackendKind;
 
 /// 设置模态的交互装配：只有真正回外壳的语义动作。表单内部交互不经这里。
 pub struct ModalActions {
@@ -421,13 +421,17 @@ fn resolve_shell_choice(shells: &[String], configured: Option<&str>) -> (ShellCh
 /// 设置面板里的小节标题：与连接表单共用 [`panel::section_header`]，按生效
 /// 范围把字段分成「界面 / 终端 / 新会话」三段；本表单比共享版多 2px 顶部
 /// 呼吸空间。
-fn section_header(tokens: &crate::theme::UiTokens, title: &str, note: Option<&str>) -> gpui::Div {
+fn section_header(
+    tokens: &zhimaterm_base::theme::UiTokens,
+    title: &str,
+    note: Option<&str>,
+) -> gpui::Div {
     panel::section_header(tokens, title, note).pt(px(2.))
 }
 
 /// 一列「标签 + 控件」，用于等宽两列行。标签在控件上方，两列顶对齐。
 fn field_column(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     title: &str,
     control: impl gpui::IntoElement,
 ) -> gpui::Div {
@@ -443,7 +447,7 @@ fn field_column(
 /// 固定像素会在界面字号调大后装不下标签；两行同宽也让字号列上下对齐。
 /// 顶对齐：两列文字字号不同高度略差，拉伸会撑出底部空隙。
 fn font_row(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     cx: &App,
     font_section: gpui::Div,
     size_label: &str,
@@ -467,7 +471,7 @@ fn font_row(
 /// 当前唯一调用是 ⌥ 键开关（macOS-only，ADR-033），随调用点一起门控。
 #[cfg(target_os = "macos")]
 fn checkbox_row(
-    tokens: &crate::theme::UiTokens,
+    tokens: &zhimaterm_base::theme::UiTokens,
     title: &str,
     description: &str,
     checked: bool,
@@ -483,7 +487,7 @@ fn checkbox_row(
                 .border_color(gpui::rgb(tokens.border_default))
         }
     };
-    crate::ui::panel::clickable("toggle-option-as-alt", move |event, window, cx| {
+    zhimaterm_base::ui::panel::clickable("toggle-option-as-alt", move |event, window, cx| {
         on_toggle(event, window, cx)
     })
     .flex()
@@ -556,7 +560,7 @@ impl ModalView for SettingsModal {
     }
 
     fn content(&self, _window: &Window, cx: &App) -> AnyElement {
-        let tokens = &crate::theme::tokens(cx);
+        let tokens = &zhimaterm_base::theme::tokens(cx);
         let form = self.form.read(cx);
         let mut content = div().flex().flex_col().gap(px(8.));
         if let Some(message) = self.error_banner.as_deref() {
@@ -646,7 +650,7 @@ impl ModalView for SettingsModal {
                 &form.ui_size,
             ));
         content = content
-            .child(crate::ui::horizontal_divider(tokens))
+            .child(zhimaterm_base::ui::horizontal_divider(tokens))
             .child(section_header(tokens, "终端", Some("已开会话立即生效")))
             .child(font_row(
                 tokens,
@@ -682,7 +686,7 @@ impl ModalView for SettingsModal {
             ));
         }
         content = content
-            .child(crate::ui::horizontal_divider(tokens))
+            .child(zhimaterm_base::ui::horizontal_divider(tokens))
             .child(section_header(tokens, "新会话", Some("已开会话保持不变")))
             // 一行一条：生效时机由小节说明统一交代，字段标签只写名字
             .child(field_column(
@@ -756,7 +760,7 @@ impl ModalView for SettingsModal {
     /// 卡片高度封顶（八成窗高，与连接表单同档）：设置项一行一行落下来，窗口
     /// 矮时不能把动作按钮顶出视口外——弹窗不比视口高，富余给内容区滚动。
     fn card(&self, window: &Window, cx: &App) -> gpui::Div {
-        let tokens = crate::theme::tokens(cx);
+        let tokens = zhimaterm_base::theme::tokens(cx);
         let mut card = card::Card::new(&tokens)
             .full_content()
             .content(self.content(window, cx))
@@ -771,7 +775,7 @@ impl ModalView for SettingsModal {
     }
 
     fn footer(&self, cx: &App) -> Option<AnyElement> {
-        let tokens = &crate::theme::tokens(cx);
+        let tokens = &zhimaterm_base::theme::tokens(cx);
         self.form
             .read(cx)
             .error
@@ -781,7 +785,7 @@ impl ModalView for SettingsModal {
     }
 
     fn actions(&self, cx: &App) -> AnyElement {
-        let tokens = &crate::theme::tokens(cx);
+        let tokens = &zhimaterm_base::theme::tokens(cx);
         let actions = &self.actions;
         panel::dialog_actions(
             [
@@ -813,7 +817,7 @@ impl ModalView for SettingsModal {
     /// 不受卡片 overflow_hidden 裁剪，也画在卡片上层。三个下拉互斥，同一时间
     /// 最多一个浮层。浮层弹出方向按视口高判定：下方放不下时贴选择框上方展开。
     fn floaters(&self, _window: &Window, cx: &App) -> Vec<AnyElement> {
-        let tokens = &crate::theme::tokens(cx);
+        let tokens = &zhimaterm_base::theme::tokens(cx);
         let form = self.form.read(cx);
         let viewport_height = _window.viewport_size().height;
 
@@ -887,7 +891,7 @@ impl ModalView for SettingsModal {
 
     /// 下拉展开时 Esc 先收下拉，再按一次才关表单；Enter 应用。
     fn key_action(&self, key: &Keystroke, cx: &App) -> KeyHandling {
-        if crate::ui::overlay::bare_key(key)
+        if zhimaterm_base::ui::overlay::bare_key(key)
             && key.key.eq_ignore_ascii_case("escape")
             && self.form.read(cx).dropdown_open()
         {
@@ -896,11 +900,11 @@ impl ModalView for SettingsModal {
                 form.update(cx, |form, cx| form.close_dropdowns(cx));
             }));
         }
-        if crate::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("enter") {
+        if zhimaterm_base::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("enter") {
             let apply = self.actions.apply.clone();
             return KeyHandling::Action(Rc::new(move |window, cx| apply(window, cx)));
         }
-        crate::ui::overlay::default_key_action(key)
+        zhimaterm_base::ui::overlay::default_key_action(key)
     }
 
     fn focus_ring(&self, cx: &App) -> Vec<FocusHandle> {
