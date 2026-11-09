@@ -87,10 +87,12 @@ pub fn primary_button(
 ) -> gpui::Stateful<gpui::Div> {
     button(tokens, id, label, shortcut, on_click)
         .bg(gpui::rgb(tokens.bg_accent))
+        .border_color(gpui::rgb(tokens.bg_accent))
         .text_color(gpui::rgb(tokens.accent))
 }
 
-/// 次按钮：只描字，不占视觉重量。
+/// 次按钮：描边不填底，与输入框、下拉共用同一控件语言（`border_default`
+/// 主边框）；悬停边框与文字各升一档，反馈档位与输入框一致。
 pub fn secondary_button(
     tokens: &UiTokens,
     id: impl Into<ElementId>,
@@ -98,7 +100,14 @@ pub fn secondary_button(
     shortcut: Option<&str>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    button(tokens, id, label, shortcut, on_click).text_color(gpui::rgb(tokens.fg_secondary))
+    button(tokens, id, label, shortcut, on_click)
+        .border_color(gpui::rgb(tokens.border_default))
+        .text_color(gpui::rgb(tokens.fg_secondary))
+        .hover(|style| {
+            style
+                .border_color(gpui::rgb(tokens.border_hover))
+                .text_color(gpui::rgb(tokens.fg))
+        })
 }
 
 /// 危险主按钮：红底，用于不可恢复的销毁操作（与主按钮同结构，仅皮肤不同）。
@@ -111,6 +120,7 @@ pub fn danger_button(
 ) -> gpui::Stateful<gpui::Div> {
     button(tokens, id, label, shortcut, on_click)
         .bg(gpui::rgb(tokens.bg_danger))
+        .border_color(gpui::rgb(tokens.bg_danger))
         .text_color(gpui::rgb(tokens.danger_soft))
 }
 
@@ -151,7 +161,11 @@ pub fn key_badge(tokens: &UiTokens, text: &str) -> gpui::Div {
         .child(text.to_owned())
 }
 
-/// 按钮骨架：基座 + 文字 + 可选的键位标记。
+/// 按钮骨架：基座 + 1px 边框 + 文字 + 可选的键位标记。
+///
+/// 边框统一画在骨架上，三种皮肤的高度才恒等（同排并排时基线对齐）；
+/// 边框色由皮肤给定，filled 皮肤取自己的底色——视觉上不可见，只为把
+/// 边缘抗锯齿像素填实，避免在深底上泛出灰边。
 fn button(
     tokens: &UiTokens,
     id: impl Into<ElementId>,
@@ -163,6 +177,7 @@ fn button(
         .px(px(12.))
         .py(px(6.))
         .rounded(px(5.))
+        .border_1()
         .flex()
         .items_center()
         .gap(px(6.))
