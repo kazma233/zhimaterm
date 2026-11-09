@@ -145,14 +145,14 @@ pub struct TerminalView {
     /// SSH 会话的 SFTP 面板：收到 SftpReady 时创建，句柄与任务事件流都在面板实体里
     sftp_panel: Option<gpui::Entity<crate::views::sftp_panel::SftpPanelView>>,
     /// 本地进程探针面板（ADR-028）：收到 ProbeReady 时创建；探针句柄在面板实体里
-    probe_panel: Option<gpui::Entity<crate::views::probe_panel::ProbePanelView>>,
+    probe_panel: Option<gpui::Entity<crate::local::probe_panel::ProbePanelView>>,
     /// 本地默认 Shell 格才有探针：按钮列从首帧就渲染（布局恒定，PTY 列数不因
     /// 事件到达的先后抖动）；WSL 的进程树在 Linux 子系统里，宿主枚举不到
     probe_capable: bool,
     /// 前台进程探针（关闭二次确认）：收到 ForegroundProbeReady 时存下，点击
     /// 关闭那一刻同步查询 shell 前台是否有子程序——无轮询、不占 worker；
     /// 重连换代会由新事件覆盖
-    foreground_probe: Option<crate::pty::ForegroundProbe>,
+    foreground_probe: Option<crate::local::pty::ForegroundProbe>,
     /// 远端监控：样本与 CPU 历史驱动底栏
     monitor: MonitorState,
     /// 转发规则的运行状态（ADR-011）；没配转发规则的会话为空
@@ -257,17 +257,17 @@ impl TerminalView {
         // worker 线程一起来就查表。操作记录只有 SSH 格有（本地格没有写入方
         // 与读取方，不再白建实体）
         let pane = cx.entity_id();
-        crate::recorder::attach_log(pane, &source);
+        crate::recording::recorder::attach_log(pane, &source);
         if !local {
-            crate::recorder::attach_history(
+            crate::recording::recorder::attach_history(
                 pane,
-                cx.new(|_| crate::views::history::SessionHistory::new()),
+                cx.new(|_| crate::recording::history::SessionHistory::new()),
             );
         }
         // SSH 格的历史实体变化（新操作落历史）要刷新底栏的「历史」高亮；
         // 订阅随格存活（Drop 连带释放）
         let history_sub = (!local).then(|| {
-            let history = crate::recorder::history(pane).expect("刚挂上的历史实体");
+            let history = crate::recording::recorder::history(pane).expect("刚挂上的历史实体");
             cx.observe(&history, |_, _, cx| cx.notify())
         });
         let (forward_states, forward_agent) = match &target {
@@ -711,18 +711,18 @@ impl TerminalView {
     /// 视图只留成败转成的警告态——成功清除旧警告（停写/打开失败的 ⚠ 有了
     /// 出口），失败亮起
     pub fn set_logging(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let ok = crate::recorder::set_logging(self.pane, enabled);
+        let ok = crate::recording::recorder::set_logging(self.pane, enabled);
         self.state.log_warning = !ok;
         cx.notify();
     }
 
     pub fn logging_enabled(&self) -> bool {
-        crate::recorder::logging_enabled(self.pane)
+        crate::recording::recorder::logging_enabled(self.pane)
     }
 
     /// 日志文件的路径：记录模态展示与外部打开用；从未开过日志为 None。
     pub fn log_path(&self) -> Option<std::path::PathBuf> {
-        crate::recorder::log_path(self.pane)
+        crate::recording::recorder::log_path(self.pane)
     }
 
     pub fn toggle_logging(&mut self, cx: &mut Context<Self>) {
@@ -937,7 +937,7 @@ impl TerminalView {
                     // 会话关闭时实体随格销毁，采样线程随之回收
                     let font = font::terminal_font(&self.font.family);
                     self.probe_panel = Some(cx.new(|cx| {
-                        crate::views::probe_panel::ProbePanelView::new(handle, font, cx)
+                        crate::local::probe_panel::ProbePanelView::new(handle, font, cx)
                     }));
                 }
                 ControlEvent::ForegroundProbeReady(probe) => {
@@ -982,7 +982,7 @@ impl TerminalView {
                         &mut self.state,
                         control,
                         Instant::now(),
-                        &|id| crate::keychain::load(id).ok().flatten(),
+                        &|id| crate::ssh::keychain::load(id).ok().flatten(),
                     );
                     self.apply_session_effects(effects, cx);
                 }
@@ -2011,7 +2011,7 @@ impl Drop for TerminalView {
         self.session.close();
         // 记录门面注销（ADR-045）：格销毁摘条目，日志句柄与历史实体随之
         // 释放。正常时序 worker 线程已随会话退出
-        crate::recorder::unregister_pane(self.pane);
+        crate::recording::recorder::unregister_pane(self.pane);
     }
 }
 
@@ -2127,8 +2127,8 @@ impl Render for TerminalView {
         let history_toggle = (!self.local).then(|| {
             let pane = self.pane;
             // 有未看过的新操作时高亮（与 SFTP 开关、记录中的状态色同语言）
-            let fresh =
-                crate::recorder::history(pane).is_some_and(|history| history.read(cx).has_fresh());
+            let fresh = crate::recording::recorder::history(pane)
+                .is_some_and(|history| history.read(cx).has_fresh());
             div()
                 .id("session-history-toggle")
                 .px(px(6.))
@@ -2149,13 +2149,13 @@ impl Render for TerminalView {
                 .on_click(move |_, window, cx| {
                     // 历史实体经门面查（ADR-045）；按钮在格底栏上，格必在。
                     // 打开即视为已读：清掉高亮，模态期间新落的条目会再置位
-                    if let Some(history) = crate::recorder::history(pane) {
+                    if let Some(history) = crate::recording::recorder::history(pane) {
                         history.update(cx, |history, cx| {
                             history.mark_seen();
                             cx.notify();
                         });
                         crate::app::overlay_open(
-                            Box::new(crate::views::history::HistoryModal { history }),
+                            Box::new(crate::recording::history::HistoryModal { history }),
                             window,
                             cx,
                         );
@@ -2187,7 +2187,7 @@ impl Render for TerminalView {
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(move |_, window, cx| {
                     crate::app::overlay_open(
-                        Box::new(crate::views::history::LoggingModal { view: view.clone() }),
+                        Box::new(crate::recording::history::LoggingModal { view: view.clone() }),
                         window,
                         cx,
                     );

@@ -26,10 +26,10 @@ pub(super) struct SessionExtras {
     /// SSH 会话的远端监控事件流。
     pub monitor: Option<super::MonitorEvents>,
     /// 本地默认 Shell 会话的进程探针句柄（ADR-028）；其余会话为 None。
-    pub probe: Option<crate::probe::ProbeHandle>,
+    pub probe: Option<crate::local::probe::ProbeHandle>,
     /// 本地会话的前台进程探针（关闭二次确认）：UI 点击关闭那一刻用它查询
     /// shell 前台是否有子程序。SSH 与 Windows 会话为 None。
-    pub foreground_probe: Option<crate::pty::ForegroundProbe>,
+    pub foreground_probe: Option<crate::local::pty::ForegroundProbe>,
     /// 本地 shell 的 PID（ADR-039）：worker 定时读它的工作目录并持久化。
     /// WSL 与 SSH 为 None（目录在子系统/远端，宿主侧读不到）。
     pub shell_pid: Option<u32>,

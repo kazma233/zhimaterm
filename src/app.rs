@@ -17,15 +17,15 @@ use gpui::{
     Size, Window, div, px,
 };
 
-use crate::connect::{self, ConnectForm, ConnectModal, ConnectView};
-use crate::connections;
-use crate::connections::SavedSources;
 use crate::font::{self, CellMetrics, FontConfig};
 use crate::input::{CloseSession, NewSession, SplitDown, SplitRight};
 use crate::session::{LocalShell, SessionTarget, file_for, session_number_of};
 use crate::settings;
 use crate::settings::SettingsValues;
 use crate::settings::form::{CandidateLists, ModalActions, SettingsForm, SettingsModal};
+use crate::ssh::connect::{self, ConnectForm, ConnectModal, ConnectView};
+use crate::ssh::connections;
+use crate::ssh::connections::SavedSources;
 use crate::theme::picker;
 use crate::theme::picker::ThemePicker;
 use crate::ui::WindowAction;
@@ -281,7 +281,7 @@ impl ZhimaTermApp {
             overlay: OverlayHost::new(),
             theme_picker: ThemePicker::new(),
             #[cfg(windows)]
-            wsl_entry_visible: !crate::wsl::list_distros().is_empty(),
+            wsl_entry_visible: !crate::local::wsl::list_distros().is_empty(),
             last_window: Some(workspace::Workspace::saved_window(window.window_bounds())),
             bounds_save_generation: 0,
             bounds_save_scheduled: false,
@@ -564,7 +564,7 @@ impl ZhimaTermApp {
     /// 即使只有一个发行版也由用户选定后再开。零发行版时入口不渲染，这里到不了。
     #[cfg(windows)]
     fn open_wsl_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let distros = crate::wsl::list_distros();
+        let distros = crate::local::wsl::list_distros();
         if !distros.is_empty() {
             self.overlay_open(Box::new(shell::WslModal::new(distros)), window, cx);
         }
@@ -1102,20 +1102,23 @@ impl ZhimaTermApp {
             .map(|modal| &modal.form)
     }
 
-    fn forward_form_mut(&mut self) -> Option<&mut crate::forward_form::ForwardForm> {
+    fn forward_form_mut(&mut self) -> Option<&mut crate::ssh::forward_form::ForwardForm> {
         let view = self.overlay.top_view_mut()?;
         view.as_any_mut()
-            .downcast_mut::<crate::forward_form::ForwardModal>()
+            .downcast_mut::<crate::ssh::forward_form::ForwardModal>()
             .map(|modal| &mut modal.form)
     }
 
     /// 栈顶的转发表单与目标视图（栈顶是转发模态时才有）。
     fn forward_modal(
         &mut self,
-    ) -> Option<(&crate::forward_form::ForwardForm, &Entity<TerminalView>)> {
+    ) -> Option<(
+        &crate::ssh::forward_form::ForwardForm,
+        &Entity<TerminalView>,
+    )> {
         let view = self.overlay.top_view_mut()?;
         view.as_any_mut()
-            .downcast_mut::<crate::forward_form::ForwardModal>()
+            .downcast_mut::<crate::ssh::forward_form::ForwardModal>()
             .map(|modal| (&modal.form, &modal.view))
     }
 
@@ -1127,8 +1130,11 @@ impl ZhimaTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let modal = crate::forward_form::ForwardModal {
-            form: crate::forward_form::ForwardForm::new(font::terminal_font(&self.font.family), cx),
+        let modal = crate::ssh::forward_form::ForwardModal {
+            form: crate::ssh::forward_form::ForwardForm::new(
+                font::terminal_font(&self.font.family),
+                cx,
+            ),
             view,
             actions: forward_modal_actions(cx),
         };
@@ -1255,7 +1261,7 @@ impl ZhimaTermApp {
         let lists = CandidateLists {
             terminal_fonts: font::installed_font_candidates(cx.text_system()),
             ui_fonts: font::system_font_candidates(cx.text_system()),
-            shells: crate::shells::candidates(),
+            shells: crate::local::shells::candidates(),
         };
         let form = cx.new(|cx| SettingsForm::new(lists, current, cx));
         // 表单自改即重画（与连接表单同一机制，ADR-026）：渲染层直调表单实体，
@@ -1496,7 +1502,7 @@ impl ZhimaTermApp {
         };
         let needs_password = saved.credentials.password_only();
         let password = (needs_password && saved.remember_password)
-            .then(|| crate::keychain::load(&saved.id).ok().flatten())
+            .then(|| crate::ssh::keychain::load(&saved.id).ok().flatten())
             .flatten();
         if needs_password && password.is_none() {
             self.prompt_password_and_connect(index, saved, window, cx);
@@ -1617,7 +1623,7 @@ impl ZhimaTermApp {
         }
         if let Some(entry) = forgotten
             && entry.remember_password
-            && let Err(error) = crate::keychain::delete(&entry.id)
+            && let Err(error) = crate::ssh::keychain::delete(&entry.id)
         {
             self.saved
                 .update(cx, |sources, _| sources.error = Some(format!("{error:#}")));
@@ -2115,9 +2121,9 @@ fn modal_action(
 
 /// 设置模态的交互装配：渲染层触发的每个动作都回到这里定义的应用方法。
 /// 转发表单的交互装配（ADR-038）：渲染层只发语义动作。
-fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> crate::forward_form::Actions {
+fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> crate::ssh::forward_form::Actions {
     let app = cx.entity();
-    crate::forward_form::Actions {
+    crate::ssh::forward_form::Actions {
         apply: modal_action(cx, |this, window, cx| this.apply_forward(window, cx)),
         // 取消/关闭要还焦点：焦点是窗口资源，还焦点得拿得到窗口
         cancel: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),

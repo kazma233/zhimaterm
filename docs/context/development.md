@@ -37,28 +37,36 @@
 
 ## 模块划分
 
-按 ADR-007 的分层分组，后面的组可以使用前面的组，反向即违规：
+按 ADR-007 的分层分组（2026-11-09 修订起目录按业务域归组），后面的组可以使用
+前面的组，反向即违规。功能域内的「机制」模块保持叶子地位（可被内核依赖），
+域内「视图」只消费本域与下层：
 
 ```
 ── 叶子层（不依赖任何上层）──
 src/config_paths.rs            应用配置目录（主机密钥记录与保存的连接都在这里）
-src/shells.rs                  系统 Shell 候选列表（/etc/shells 或 PATH 探测，ADR-036）
-src/output_log.rs              会话输出日志：文件分配、首尾标记、原始字节追加与故障停写（ADR-017）
 src/font.rs                    字体领域：等宽候选实测、回退链、格尺寸测量（CellMetrics）与默认字号
 src/input.rs                   输入提取与语义类型：KeyInput、鼠标手势、快捷键绑定（keymap）与滚轮判定
-src/keychain.rs                OS 安全凭据存储：凭据按条目 id 挂钥匙串（ADR-018 修订）
-src/peb.rs                     Windows 跨进程读 PEB：他人 cwd 与完整 argv（供 cwd 与探针用）
-src/pty/                       自研本地 PTY（ADR-025）：ConPTY/openpty、MSVCRT 引用与退出唤醒
-src/probe/                     本地进程探针（ADR-028）：三平台采集（/proc、libproc+lsof、ToolHelp+IpHelper）与结束进程（SIGTERM/TerminateProcess），树构建/树内过滤/端口合并的公共装配在这里
-src/wsl.rs                     WSL 发行版枚举与启动命令（ADR-021，注册表现查、含 Modern 项）
-src/cwd.rs                     本地 shell 工作目录采集（Linux /proc、macOS lsof，ADR-039）
 src/sftp.rs                    SFTP 协议：SftpHandle 命令句柄、任务事件流、远端条目模型
-src/ui/                        自己写的 UI 组件（与终端无关，可被别处直接复用）
+src/ui/                        自己写的 UI 组件（与终端无关，可被别处直接复用）；human_bytes/human_rate 是底栏与探针面板共用的字节/速率展示口径
 src/ui/input/                  文本输入组件：调色板、表单行助手（field，错误贴标签）与模块组装；core.rs 是编辑核心，ime.rs 是 IME 组合区状态机
 src/ui/overlay.rs              统一浮层栈：全窗口模态的唯一归属，栈序即 z 序（ADR-043/044）
 src/ui/dialog.rs               通用确认/输入/密码对话框（ADR-044/048）
 src/ui/card.rs / panel.rs / menu.rs / select.rs / dock.rs   卡片四区、模态遮罩与按钮、右键菜单、收起式下拉、右缘停靠面板外壳
 src/ui/canvas.rs               组件底座：鼠标监听、输入法处理器、bounds 记录
+
+── 本地终端功能域（src/local/）──
+src/local/shells.rs            系统 Shell 候选列表（/etc/shells 或 PATH 探测，ADR-036）
+src/local/pty/                 自研本地 PTY（ADR-025）：ConPTY/openpty、MSVCRT 引用与退出唤醒；session 本地传输的机制组成，保持叶子地位
+src/local/cwd.rs               本地 shell 工作目录采集（Linux /proc、macOS lsof，ADR-039）
+src/local/peb.rs               Windows 跨进程读 PEB：他人 cwd 与完整 argv（供 cwd 与探针用，#[cfg(windows)]）
+src/local/wsl.rs               WSL 发行版枚举与启动命令（ADR-021，注册表现查、含 Modern 项）
+src/local/probe/               本地进程探针（ADR-028）：三平台采集（/proc、libproc+lsof、ToolHelp+IpHelper）与结束进程（SIGTERM/TerminateProcess），树构建/树内过滤/端口合并的公共装配在这里
+src/local/probe_panel.rs       本地进程探针面板（ADR-028）：进程树与 LISTEN 端口列表、详情弹层与结束进程、左缘拖宽
+
+── 会话留痕域（src/recording/）──
+src/recording/output_log.rs    会话输出日志：文件分配、首尾标记、原始字节追加与故障停写（ADR-017）
+src/recording/recorder.rs      全局记录门面（ADR-045）：输出日志与操作记录的统一埋点入口；worker 与视图都只依赖它（叶子地位）
+src/recording/history.rs       会话留痕的两个全屏模态（ADR-044）：SFTP 操作记录、会话日志开关与外部打开；TaskItem/SessionHistory 等记录数据模型归这里
 
 ── 模型层 ──
 src/terminal/                  终端模型：VT 状态、滚动、选区、输入编码、run 快照
@@ -84,22 +92,23 @@ src/session/transport/monitor.rs 远端监控采集：exec 通道脚本、计数
 src/session/transport/poll.rs  SSH 跨平台等待原语：fd+poll+自管道（Unix）/ RawSocket+socketpair（Windows）
 
 ── 领域层 ──
-src/connect.rs                 SSH 连接表单与列表弹窗：目标解析、认证信息、转发规则、保存计划（ADR-026/048）
-src/connections.rs             保存的连接：按条目 id 读写与原子落盘（不含任何口令，ADR-048 修订）
+src/ssh/                       SSH 连接管理业务域：只被外壳与共享视图消费，不引 views/app
+src/ssh/connect.rs             SSH 连接表单与列表弹窗：目标解析、认证信息、转发规则、保存计划（ADR-026/048）
+src/ssh/connections.rs         保存的连接：按条目 id 读写与原子落盘（不含任何口令，ADR-048 修订）
+src/ssh/keychain.rs            OS 安全凭据存储：凭据按条目 id 挂钥匙串（ADR-018 修订）
+src/ssh/forward_form.rs        运行中新增转发规则的小表单（ADR-038）
 src/settings/                  外观与终端设置：读写、校验、原子落盘；form.rs 是设置表单与设置模态
 src/theme/                     主题（ADR-022）：配色方案、内置主题表、UI token 推导与主题选择器（ADR-027）
-src/forward_form.rs            运行中新增转发规则的小表单（ADR-038）
-src/recorder.rs                全局记录门面（ADR-045）：输出日志与操作记录的统一埋点入口
 src/workspace.rs               工作区持久化：窗口几何与本地布局树（ADR-037/039）
 
-── 视图层（消费领域数据画界面，不定义业务规则）──
-src/views/                     业务渲染件：消费领域层数据画界面，不定义业务规则
+── 视图层（跨业务的共享渲染件：消费领域数据画界面，不定义业务规则；单一业务专属视图随域走）──
+src/views/                     共享渲染件：服务全部会话类型的网格、会话画面、分屏与框架部件
 src/views/grid.rs              渲染细节：实测格尺寸、命中测试、run 渲染、侧边栏与浮层
 src/views/terminal_view.rs     单会话视图：会话句柄、画面帧、输入与鼠标手势、IME、搜索条（ADR-015）、连接期密码询问卡
 src/views/panes.rs             标签内分屏（ADR-014）：二分嵌套布局树、比例与分割条、格区域渲染
 src/views/sftp_panel.rs        SFTP 文件面板：目录浏览、操作与确认弹窗、进行中任务区（ADR-005）
-src/views/probe_panel.rs       本地进程探针面板（ADR-028）：进程树与 LISTEN 端口列表、详情弹层与结束进程、左缘拖宽
-src/views/history.rs           会话留痕的两个全屏模态（ADR-044）：SFTP 操作记录、会话日志开关与外部打开
+src/views/session_state.rs     会话视图归约：控制事件 × 视图状态 → 效果清单（纯数据与纯决策）
+src/views/terminal_keys.rs     会话视图的按键裁决：keydown 守卫链与死会话裸键的纯决策
 src/views/shell.rs             外壳框架部件：状态底栏、会话栏、横幅、密钥确认与关闭确认模态
 
 ── 外壳 ──

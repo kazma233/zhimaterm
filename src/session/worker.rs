@@ -227,7 +227,7 @@ pub(super) fn run(
     } = config;
     // 日志左边界先于连接尝试：连不上的尝试也留下一对标记（ADR-017）。
     // 埋点走记录门面（ADR-045）：本格没开日志或被运行时开关暂停时 no-op
-    crate::recorder::begin_session(&target.description());
+    crate::recording::recorder::begin_session(&target.description());
 
     // 尺寸就绪再开工（ADR-046）：PTY 的行列是子进程的出生属性，回滚恢复也
     // 要在最终宽度上折行。等待期间被关闭则无可收尾的资源，回滚文件也不能
@@ -247,7 +247,7 @@ pub(super) fn run(
     // PTY 的修正，否则远端会以默认尺寸开场，光标位置与本地网格不一致。
     let mut pending_resize: Option<(usize, usize, (u16, u16))> = None;
     // 上一轮是否在记日志:检测运行时开关的恢复边沿(恢复时丢弃暂停期间的行)
-    let mut was_logging = crate::recorder::is_logging();
+    let mut was_logging = crate::recording::recorder::is_logging();
     let transport = {
         let mut asks = UiAsks {
             commands: &commands,
@@ -417,7 +417,7 @@ pub(super) fn run(
         // 写失败（磁盘满等）只停写不致命，但要上报一次让用户知道。写点经
         // 记录门面（ADR-045）：没开或暂停时 no-op
         {
-            let logging = crate::recorder::is_logging();
+            let logging = crate::recording::recorder::is_logging();
             let lines = terminal.transcript_lines(&mut transcript.logged, &mut transcript.pending);
             // 暂停期间的输出不记也不攒：恢复的那一轮先把攒下的行排掉
             // （基线推进但不落盘），之后才记新行
@@ -425,10 +425,10 @@ pub(super) fn run(
                 drop(lines);
             } else {
                 for line in lines {
-                    crate::recorder::output_line(&line);
+                    crate::recording::recorder::output_line(&line);
                 }
             }
-            if let Some(reason) = crate::recorder::take_log_failure() {
+            if let Some(reason) = crate::recording::recorder::take_log_failure() {
                 emit_control(&control, ControlEvent::LoggingStopped(reason));
             }
             was_logging = logging;
@@ -710,7 +710,7 @@ impl ScrollbackState {
         {
             self.last_cwd_sample = now;
             self.cwd_pending = false;
-            if let Some(cwd) = crate::cwd::of_process(pid)
+            if let Some(cwd) = crate::local::cwd::of_process(pid)
                 && self.cwd.as_deref() != Some(cwd.as_path())
             {
                 self.cwd = Some(cwd.clone());
@@ -732,7 +732,7 @@ struct TranscriptState {
 fn flush_screen_transcript(terminal: &TerminalModel, transcript: &mut TranscriptState) {
     let pending = std::mem::take(&mut transcript.pending);
     for line in terminal.screen_transcript(pending) {
-        crate::recorder::output_line(&line);
+        crate::recording::recorder::output_line(&line);
     }
 }
 

@@ -63,7 +63,7 @@ mod tests {
             eprintln!("未设置 ZHIMATERM_KEYCHAIN=1，跳过");
             return;
         }
-        let id = crate::connections::new_id();
+        let id = crate::ssh::connections::new_id();
         // 清掉历史遗留，从已知状态开始
         let _ = delete(&id);
 

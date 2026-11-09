@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
 use gpui::{App, Entity, EntityId};
 
-use crate::output_log::SessionLog;
-use crate::views::history::{SessionHistory, TaskItem};
+use crate::recording::history::{SessionHistory, TaskItem};
+use crate::recording::output_log::SessionLog;
 
 /// 一格的记录装配：记到哪里、怎么写在注册时定死（装配期配置），运行期
 /// 唯一的动态是日志开关。
@@ -197,7 +197,7 @@ pub fn set_logging(pane: EntityId, enabled: bool) -> bool {
         // 没有则新建
         let opened = match &path {
             Some(path) => SessionLog::open_at(path),
-            None => crate::output_log::create(&source),
+            None => crate::recording::output_log::create(&source),
         };
         match opened {
             Ok(mut session_log) => {
@@ -381,11 +381,11 @@ mod tests {
         TaskItem {
             id: 0,
             label: "上传 a → b".into(),
-            unit: crate::views::history::ProgressUnit::Bytes,
+            unit: crate::recording::history::ProgressUnit::Bytes,
             done: 1,
             total: Some(1),
             current: None,
-            state: crate::views::history::TaskState::Completed("完成".into()),
+            state: crate::recording::history::TaskState::Completed("完成".into()),
             finished_at: None,
         }
     }

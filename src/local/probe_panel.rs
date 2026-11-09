@@ -12,10 +12,10 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{ClipboardItem, Context, ElementId, IntoElement, Render, div, px};
 
-use crate::probe::{ProbeEvent, ProbeHandle, ProbeSample};
+use crate::local::probe::{ProbeEvent, ProbeHandle, ProbeSample};
 use crate::theme::{UiTokens, tokens};
+use crate::ui::human_bytes;
 use crate::ui::{DockPanel, card, panel, ui_rems};
-use crate::views::shell::human_bytes;
 
 /// 树导线每格宽度：树根是会话 shell 本身，后代沿真实父子链每层一格（谁拉起了谁
 /// 一眼可见）；格中点画竖线，相邻行对齐成连续线。
@@ -600,7 +600,7 @@ fn section_header(palette: &UiTokens, title: &str) -> gpui::Div {
 
 /// 弹层目标在最新拍里是否仍然成立：进程在树内，或 (端口, 进程) 行还在——
 /// 同端口换了别的进程接管也算过期（详情绑定的是那个进程，不是端口本身）。
-fn detail_alive(detail: &Detail, sample: &crate::probe::ProbeSample) -> bool {
+fn detail_alive(detail: &Detail, sample: &crate::local::probe::ProbeSample) -> bool {
     match detail {
         Detail::Process(pid) => sample.root.find(*pid).is_some(),
         Detail::Port { port, pid } => sample
@@ -616,7 +616,7 @@ fn detail_alive(detail: &Detail, sample: &crate::probe::ProbeSample) -> bool {
 /// 面板。行可点击打开详情弹层——行内文本必须裁剪，完整内容只有弹层放得下。
 fn render_process_row(
     palette: &UiTokens,
-    process: &crate::probe::ProbeProcess,
+    process: &crate::local::probe::ProbeProcess,
     depth: usize,
     guides: &RowGuides,
     font: &gpui::Font,
@@ -915,7 +915,7 @@ fn empty_hint(palette: &UiTokens, text: &str) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::{Detail, detail_alive, tree_guides};
-    use crate::probe::{ProbePort, ProbeProcess, ProbeSample, ProcessNode};
+    use crate::local::probe::{ProbePort, ProbeProcess, ProbeSample, ProcessNode};
 
     fn node(pid: u32, children: Vec<ProcessNode>) -> ProcessNode {
         ProcessNode {

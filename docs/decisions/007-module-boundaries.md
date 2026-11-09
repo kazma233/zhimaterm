@@ -104,3 +104,33 @@
 叶子层的 `keychain`（ADR-018）与 `peb`；`session` 的 `reconnect`（ADR-013
 修订）与 `scrollback`（ADR-039/040）；`terminal` 的 `transcript`（本 ADR
 修订）。依赖方向与分层规则不变。
+
+## 修订（2026-11-09）：目录按业务域归组
+
+水平分层暴露出结构性错位：类型的归属由「谁渲染它」而非「谁拥有它」决定——
+记录数据模型（`TaskItem`/`SessionHistory`）长在 `views/history`、被 `recorder`
+反向引用；`pty`/`wsl`/`probe`/`cwd` 是 session 本地传输的机制组成却被当独立
+叶子平铺在顶层，业务归属只能靠文档辨认。本修订按业务域归组目录，域内允许
+自有「机制 + 视图 + 持久化」，依赖方向规则不变（自上而下）：
+
+- `local/`：本地终端功能——`shells`、`pty`、`cwd`、`peb`、`wsl`、`probe`
+  （机制，保持叶子地位，session 内核可依赖）+ `probe_panel`（探针面板视图，
+  ADR-028）。
+- `recording/`：会话留痕——`output_log`（日志文件机制，ADR-017）、`recorder`
+  （记录门面，ADR-045；机制，保持叶子地位，worker 与视图都可依赖）+
+  `history`（任务/操作模型与两个全屏模态，ADR-044）。归组同时消解了
+  `recorder → views::history` 的反向引用（模型与门面同域）。
+- `ssh/`：SSH 连接管理业务域——`connect`（表单与列表弹窗，ADR-026/048）、
+  `connections`（保存的连接）、`keychain`（OS 凭据，ADR-018 修订）、
+  `forward_form`（ADR-038）。只被外壳与共享视图消费，不引 `views`/`app`。
+- `views/` 只留跨业务共享渲染件（服务全部会话类型的 grid/terminal_view/
+  panes/shell 等）；单一业务专属的视图随域走。
+- 配套：`human_bytes`/`human_rate`/`scaled_1024` 三件套从 `views/shell` 移至
+  `ui`（底栏与探针面板共用的展示口径，属「可被任何界面复用」的工具，移走
+  消除 `local::probe_panel → views` 反向）。
+
+遗留待修（不属本次，回调反转见后续修订）：`views/shell`、`recording/history`、
+`ssh/forward_form` 对 `app`/`views::terminal_view` 的既有桥接调用；`terminal ↔
+settings` 常量循环；`ui/terminal → theme` 的 token 定位；`workspace →
+views::panes` 的布局格式归属。历史 ADR 与文档中的 `src/pty`、`src/probe` 等
+旧路径对应现 `src/local/pty`、`src/local/probe` 等，历史文档不改写。

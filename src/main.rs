@@ -5,44 +5,33 @@
 //!
 //! 模块分层与依赖方向见 `docs/decisions/007-module-boundaries.md`。速览：
 //! - `app`：外壳状态机——会话生命周期、模态互斥、键分发与渲染装配
-//! - `views`：业务渲染件——网格绘制（`grid`）、会话画面（`terminal_view`）、
-//!   SFTP 面板、分屏（`panes`）、框架部件（`shell`）
-//! - `connect` / `settings`：连接与设置两个表单领域（含各自的模态渲染）
+//! - `views`：跨业务的共享渲染件——网格绘制（`grid`）、会话画面（`terminal_view`）、
+//!   SFTP 面板、分屏（`panes`）、框架部件（`shell`）；探针面板与历史模态分别在
+//!   `local` / `recording` 域内
+//! - `ssh` / `settings`：SSH 连接管理与设置两个表单领域（含各自的模态渲染）
 //! - `terminal` / `session` / `sftp`：终端模型 / 会话协议与传输、SFTP 命令契约
 //!   （见 ADR-001/004/005）
-//! - `output_log` / `connections`：会话输出日志与保存的连接（见 ADR-017/010）
+//! - `local`：本地终端功能——PTY/Shell/采集机制与探针面板（叶子地位）
+//! - `recording`：会话留痕——输出日志、记录门面与历史模态（叶子地位）
 //! - `input` / `font` / `ui`：输入语义转换 / 字体领域 / 通用组件
 
 mod app;
 mod config_paths;
-mod connect;
-mod connections;
-mod cwd;
 mod font;
-mod forward_form;
 mod input;
-mod keychain;
-mod output_log;
-// 跨进程读 PEB 参数块（cwd/argv 采集）只存在于 Windows 生产路径
-#[cfg(windows)]
-mod peb;
-mod probe;
-mod pty;
-mod recorder;
+mod local;
+mod recording;
 mod session;
 mod settings;
 mod sftp;
-mod shells;
+mod ssh;
 mod terminal;
 #[cfg(test)]
 mod tests;
 mod theme;
 mod ui;
 mod views;
-// WSL 只在 Windows 生产存在（ADR-021）；解析层的 fixture 测试保留在所有平台的测试构建里
 mod workspace;
-#[cfg(any(windows, test))]
-mod wsl;
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 #[cfg(target_os = "macos")]

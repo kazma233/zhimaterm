@@ -22,6 +22,7 @@ use gpui::{
     div, px,
 };
 
+use crate::recording::history::{ProgressUnit, TaskItem, TaskState, file_name_of};
 use crate::sftp::{
     RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId, TaskOutcome,
     TaskProgress, remote_join,
@@ -31,7 +32,6 @@ use crate::ui::input::TextInput;
 use crate::ui::menu;
 use crate::ui::ui_rems;
 use crate::ui::{DockPanel, card, panel};
-use crate::views::history::{ProgressUnit, TaskItem, TaskState, file_name_of};
 
 const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
 
@@ -671,7 +671,7 @@ impl SftpPanelView {
             let mut task = self.tasks.remove(index);
             task.finish(outcome);
             task.finished_at = Some(chrono::Local::now());
-            crate::recorder::record_operation(self.pane, task, cx);
+            crate::recording::recorder::record_operation(self.pane, task, cx);
         }
         // 上传/递归删除会改变当前目录内容：完成后刷新一次列表
         if matches!(outcome, TaskOutcome::Completed(_)) {
@@ -693,7 +693,7 @@ impl SftpPanelView {
             Ok(()) => TaskState::Completed(format!("已删除 {}", path.display())),
             Err(error) => TaskState::Failed(format!("删除失败：{error}")),
         };
-        crate::recorder::record_operation(
+        crate::recording::recorder::record_operation(
             self.pane,
             TaskItem {
                 id: DIRECT_DELETE_ID,
@@ -1499,8 +1499,8 @@ mod tests {
         PendingTransfer, clean_name, format_size, overwrite_message, progress_text, sibling_path,
         sort_entries, upload_message,
     };
+    use crate::recording::history::ProgressUnit;
     use crate::sftp::{RemoteEntry, RemoteFileType};
-    use crate::views::history::ProgressUnit;
     use std::path::{Path, PathBuf};
 
     fn entry(name: &str, file_type: RemoteFileType) -> RemoteEntry {

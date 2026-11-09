@@ -9,7 +9,7 @@ ZhimaTerm 自身以 [MIT](LICENSE) 许可发布。本文件记录两类第三方
 
 ### 1.1 MSVCRT 命令行引用规则
 
-- 位置：`src/pty/win.rs` 的 `append_quoted`
+- 位置：`src/local/pty/win.rs` 的 `append_quoted`
 - 来源：portable-pty 0.9.0 的 `pty/src/cmdbuilder.rs`，其代码又来自
   [rust-subprocess](https://github.com/hniksic/rust-subprocess)（`src/popen.rs`），
   再往前是 ArgvQuote（<http://tinyurl.com/zmgtnls>）
@@ -70,7 +70,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### 1.2 语义参考（非逐字复制）
 
-`src/pty/` 整体是自研实现（ADR-025），语义对齐 portable-pty 0.9.0，未复制其源码。
+`src/local/pty/` 整体是自研实现（ADR-025），语义对齐 portable-pty 0.9.0，未复制其源码。
 对齐口径记录在 `docs/decisions/025-selfhost-pty.md`，逐条差异也在该文中列明。
 
 ## 2. 编译进发布二进制的依赖

@@ -64,8 +64,8 @@ fn is_utility_distro(name: &str) -> bool {
 /// `--cd ~` 让会话落在 Linux home（不传则落在应用 cwd 的 `/mnt/c/...` 翻译）。
 /// 只在 Windows 有调用方：`LocalShell::Wsl` 的命令构造分支是 cfg(windows) 的。
 #[cfg(windows)]
-pub fn launch_command(distro: &str) -> crate::pty::Command {
-    let mut command = crate::pty::Command::new(system32_wsl());
+pub fn launch_command(distro: &str) -> crate::local::pty::Command {
+    let mut command = crate::local::pty::Command::new(system32_wsl());
     command.args(["-d", distro, "--cd", "~"]);
     command
 }

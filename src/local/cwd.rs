@@ -35,7 +35,7 @@ pub fn of_process(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        crate::peb::current_directory(pid).filter(|path| path.is_absolute())
+        crate::local::peb::current_directory(pid).filter(|path| path.is_absolute())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {

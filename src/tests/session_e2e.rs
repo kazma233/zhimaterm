@@ -100,9 +100,10 @@ fn wait_for_pointer(events: &SessionEvents, timeout: Duration) -> Option<Pointer
 fn output_is_logged_between_markers() {
     let dir = std::env::temp_dir().join(format!("zhimaterm-log-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let log = crate::output_log::SessionLog::create_at(&dir, "local-e2e").expect("创建日志应成功");
+    let log = crate::recording::output_log::SessionLog::create_at(&dir, "local-e2e")
+        .expect("创建日志应成功");
     let pane = crate::tests::support::test_pane();
-    crate::recorder::attach_pane_with_log(
+    crate::recording::recorder::attach_pane_with_log(
         pane,
         "local-e2e",
         std::sync::Arc::new(std::sync::Mutex::new(Some(log))),
@@ -153,7 +154,7 @@ fn output_is_logged_between_markers() {
         !content.contains('\u{1b}') && !content.contains('\r'),
         "正文应为纯文本行：{content:?}"
     );
-    crate::recorder::unregister_pane(pane);
+    crate::recording::recorder::unregister_pane(pane);
 }
 
 /// 日志中途写失败（ADR-017）：以只读句柄模拟磁盘满/文件失效——首次写输出
@@ -166,9 +167,9 @@ fn log_write_failure_surfaces_as_an_event_and_stops() {
     let path = dir.join("readonly.log");
     std::fs::write(&path, b"").unwrap();
     let file = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
-    let log = crate::output_log::from_file_for_test(file);
+    let log = crate::recording::output_log::from_file_for_test(file);
     let pane = crate::tests::support::test_pane();
-    crate::recorder::attach_pane_with_log(
+    crate::recording::recorder::attach_pane_with_log(
         pane,
         "local-log-fail",
         std::sync::Arc::new(std::sync::Mutex::new(Some(log))),
@@ -201,7 +202,7 @@ fn log_write_failure_surfaces_as_an_event_and_stops() {
 
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.is_empty(), "失败后不应有任何字节落盘：{content:?}");
-    crate::recorder::unregister_pane(pane);
+    crate::recording::recorder::unregister_pane(pane);
 }
 
 /// 日志在主循环之前就写失败（begin 首写失败）且连接随即失败：只有 spawn
@@ -214,9 +215,9 @@ fn log_failure_before_the_main_loop_is_still_reported() {
     let path = dir.join("readonly.log");
     std::fs::write(&path, b"").unwrap();
     let file = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
-    let log = crate::output_log::from_file_for_test(file);
+    let log = crate::recording::output_log::from_file_for_test(file);
     let pane = crate::tests::support::test_pane();
-    crate::recorder::attach_pane_with_log(
+    crate::recording::recorder::attach_pane_with_log(
         pane,
         "local-log-early",
         std::sync::Arc::new(std::sync::Mutex::new(Some(log))),
@@ -255,7 +256,7 @@ fn log_failure_before_the_main_loop_is_still_reported() {
     }
     assert!(stopped, "主循环前的写失败也必须报出");
     session.close();
-    crate::recorder::unregister_pane(pane);
+    crate::recording::recorder::unregister_pane(pane);
 }
 
 /// Windows 本地会话默认应启动 PowerShell 而不是 cmd（见 transport::local）。
@@ -2983,10 +2984,11 @@ mod wsl {
 fn runtime_switch_pauses_and_resumes_without_backfill() {
     let dir = std::env::temp_dir().join(format!("zhimaterm-log-switch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let log = crate::output_log::SessionLog::create_at(&dir, "local-e2e").expect("创建日志应成功");
+    let log = crate::recording::output_log::SessionLog::create_at(&dir, "local-e2e")
+        .expect("创建日志应成功");
     let path = std::path::PathBuf::from(log.path());
     let pane = crate::tests::support::test_pane();
-    crate::recorder::attach_pane_with_log(
+    crate::recording::recorder::attach_pane_with_log(
         pane,
         "local-e2e",
         std::sync::Arc::new(std::sync::Mutex::new(Some(log))),
@@ -3038,13 +3040,16 @@ fn runtime_switch_pauses_and_resumes_without_backfill() {
     wait_logged("zt-switch-A");
 
     // 暂停（生产同路径）：B 挤出屏幕也不落盘（转录轮把它排掉），留缓冲让排空完成
-    assert!(crate::recorder::set_logging(pane, false), "暂停应成功");
+    assert!(
+        crate::recording::recorder::set_logging(pane, false),
+        "暂停应成功"
+    );
     settle("zt-switch-B");
     std::thread::sleep(Duration::from_millis(300));
 
     // 恢复：门面按原文件追加重开，C 落盘
     assert!(
-        crate::recorder::set_logging(pane, true),
+        crate::recording::recorder::set_logging(pane, true),
         "按原路径重开应成功"
     );
     settle("zt-switch-C");
@@ -3065,5 +3070,5 @@ fn runtime_switch_pauses_and_resumes_without_backfill() {
     );
     session.close();
     wait_for_control(&events, Duration::from_secs(10)).expect("会话应结束");
-    crate::recorder::unregister_pane(pane);
+    crate::recording::recorder::unregister_pane(pane);
 }

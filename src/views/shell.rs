@@ -18,6 +18,7 @@ use crate::ui::input::TextInput;
 use crate::ui::overlay::KeyHandling;
 use crate::ui::panel;
 use crate::ui::ui_rems;
+use crate::ui::{human_bytes, human_rate};
 
 /// 底栏内容：同一根底栏按会话阶段切换显示——连接中、运行中的监控、
 /// 结束后的原因与出路。常驻不消失，避免布局跳动；只有远端会话有底栏，
@@ -385,40 +386,6 @@ fn rate_metric(tokens: &UiTokens, arrow: &str, bytes_per_sec: f64) -> gpui::Div 
         )
 }
 
-/// 按 1024 进位缩放并给出档位下标。两个展示函数共用同一实现，
-/// 进位口径只在一处维护。
-fn scaled_1024(mut value: f64, unit_count: usize) -> (f64, usize) {
-    let mut unit = 0;
-    while value >= 1024. && unit + 1 < unit_count {
-        value /= 1024.;
-        unit += 1;
-    }
-    (value, unit)
-}
-
-/// 字节数的紧凑展示：按 1024 进位，B 以上保留一位小数。
-/// 本地探针面板（ADR-028）的内存列与底栏指标共用这一口径。
-pub(crate) fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let (value, unit) = scaled_1024(bytes as f64, UNITS.len());
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// 速率的紧凑展示：口径与 [`human_bytes`] 一致，尾部带 /s。
-fn human_rate(bytes_per_sec: f64) -> String {
-    const UNITS: [&str; 6] = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"];
-    let (value, unit) = scaled_1024(bytes_per_sec.max(0.), UNITS.len());
-    if unit == 0 {
-        format!("{value:.0} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 /// 关闭确认浮层（验收需求）：显式关掉未结束的 SSH、全屏程序或前台运行中的
 /// 子程序前的二次确认。`sources` 是将被关闭的会话来源标签（多格并排时逐个列出）；
 /// 点遮罩视为取消。
@@ -535,12 +502,12 @@ fn shortcut_group(
 /// 点击语义，没有键盘选中态，只接 Esc。
 #[cfg(windows)]
 pub struct WslModal {
-    distros: Vec<crate::wsl::WslDistro>,
+    distros: Vec<crate::local::wsl::WslDistro>,
 }
 
 #[cfg(windows)]
 impl WslModal {
-    pub fn new(distros: Vec<crate::wsl::WslDistro>) -> Self {
+    pub fn new(distros: Vec<crate::local::wsl::WslDistro>) -> Self {
         Self { distros }
     }
 }
@@ -1167,24 +1134,8 @@ impl crate::ui::overlay::ModalView for ConfirmCloseModal {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_bytes, human_rate, load_color, sparkline_ratio};
+    use super::{load_color, sparkline_ratio};
     use crate::theme::default_theme;
-
-    #[test]
-    fn bytes_scale_by_1024_with_one_decimal() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(1024), "1.0 KB");
-        assert_eq!(human_bytes(1536), "1.5 KB");
-        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
-    }
-
-    #[test]
-    fn rates_carry_the_per_second_suffix() {
-        assert_eq!(human_rate(0.), "0 B/s");
-        assert_eq!(human_rate(340. * 1024.), "340.0 KB/s");
-        assert_eq!(human_rate(-5.), "0 B/s");
-    }
 
     #[test]
     fn load_color_marks_load_tiers() {

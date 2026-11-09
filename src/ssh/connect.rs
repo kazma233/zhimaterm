@@ -17,8 +17,8 @@ use gpui::{
     div, px, relative,
 };
 
-use crate::connections::{SavedConnection, SavedConnections, SavedForward, SavedJump};
 use crate::session::{ForwardRule, SshAuth, SshJump, SshTarget};
+use crate::ssh::connections::{SavedConnection, SavedConnections, SavedForward, SavedJump};
 use crate::ui::WindowAction;
 use crate::ui::card;
 use crate::ui::input::{self, TextInput};
@@ -266,7 +266,7 @@ impl SavePlan {
     /// 「以为记住了」。
     pub fn run_keychain(&self) -> Result<(), FormError> {
         if let Some(password) = &self.password
-            && let Err(error) = crate::keychain::save(&self.entry.id, password)
+            && let Err(error) = crate::ssh::keychain::save(&self.entry.id, password)
         {
             return Err(keychain_error(error));
         }
@@ -527,7 +527,7 @@ impl ConnectForm {
     /// 按编辑条目的 id 读钥匙串。没在编辑、读失败与没有都是 None。
     fn stored_password(&self) -> Option<String> {
         let id = self.editing_id.as_deref()?;
-        crate::keychain::load(id).ok().flatten()
+        crate::ssh::keychain::load(id).ok().flatten()
     }
 
     /// 连接确需密码而框里为空时，从钥匙串取回填进密码框——钥匙串的第二个读取
@@ -1005,7 +1005,7 @@ impl ConnectForm {
                 host,
                 port,
                 user,
-                credentials: crate::connections::SavedCredentials {
+                credentials: crate::ssh::connections::SavedCredentials {
                     use_agent: self.jump_use_agent,
                     key_path: (!key_path.is_empty()).then_some(key_path),
                 },
@@ -1020,12 +1020,12 @@ impl ConnectForm {
             id: self
                 .editing_id
                 .clone()
-                .unwrap_or_else(crate::connections::new_id),
+                .unwrap_or_else(crate::ssh::connections::new_id),
             name: self.connection_name(cx),
             host,
             port,
             user,
-            credentials: crate::connections::SavedCredentials {
+            credentials: crate::ssh::connections::SavedCredentials {
                 use_agent: self.use_agent,
                 key_path: (!key_path.is_empty()).then_some(key_path),
             },
@@ -1517,7 +1517,7 @@ pub struct ConnectModal {
     pub actions: ModalActions,
     /// 已保存连接的实体（外壳唯一所有者，这里只读渲染）：忘掉/保存后列表
     /// 要立即刷新，读实体而不是打开时快照
-    pub saved: Entity<crate::connections::SavedSources>,
+    pub saved: Entity<crate::ssh::connections::SavedSources>,
     /// 当前视图；由外壳经 `as_any_mut` 切换
     pub view: ConnectView,
 }
@@ -2565,11 +2565,11 @@ mod tests {
     /// 密码认证时没有输入口，直接报错让人去编辑视图。
     #[test]
     fn target_of_saved_requires_enough_credentials() {
-        use crate::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
         use crate::session::ForwardFlow;
+        use crate::ssh::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
 
         let mut saved = SavedConnection {
-            id: crate::connections::new_id(),
+            id: crate::ssh::connections::new_id(),
             name: Some("生产机".into()),
             host: "a.example.com".into(),
             port: 2222,
@@ -2644,7 +2644,7 @@ mod tests {
     /// 走同一份解析；`user@` 不静默并入，指到「跳板用户」；空目标/空用户各落各家。
     #[gpui::test]
     fn jump_target_splits_host_and_port(cx: &mut gpui::TestAppContext) {
-        use crate::connections::{SavedConnection, SavedCredentials, SavedJump};
+        use crate::ssh::connections::{SavedConnection, SavedCredentials, SavedJump};
         cx.update(|cx| {
             let font = crate::font::terminal_font("monospace");
             let form = cx.new(|cx| ConnectForm::new(font, cx));
@@ -2713,7 +2713,7 @@ mod tests {
 
             // 载入非 22 端口的跳板：目标框回填 host:port，再保存得到同一条
             let saved = SavedConnection {
-                id: crate::connections::new_id(),
+                id: crate::ssh::connections::new_id(),
                 name: None,
                 host: "inner.example.com".into(),
                 port: 22,
@@ -2855,12 +2855,12 @@ mod tests {
     /// 避免测试触碰真实钥匙串。
     #[gpui::test]
     fn saved_entry_round_trips_through_load_saved(cx: &mut gpui::TestAppContext) {
-        use crate::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
+        use crate::ssh::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
         cx.update(|cx| {
             let font = crate::font::terminal_font("monospace");
             let form = cx.new(|cx| ConnectForm::new(font, cx));
             let saved = SavedConnection {
-                id: crate::connections::new_id(),
+                id: crate::ssh::connections::new_id(),
                 name: Some("生产机".into()),
                 host: "a.example.com".into(),
                 port: 2222,
@@ -2907,7 +2907,7 @@ mod tests {
     fn remembered_entry_saves_without_retyped_password_and_reveal_only_unmasks(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::connections::{SavedConnection, SavedCredentials};
+        use crate::ssh::connections::{SavedConnection, SavedCredentials};
         cx.update(|cx| {
             let font = crate::font::terminal_font("monospace");
             let form = cx.new(|cx| ConnectForm::new(font, cx));
@@ -2926,7 +2926,7 @@ mod tests {
             });
 
             let remembered = SavedConnection {
-                id: crate::connections::new_id(),
+                id: crate::ssh::connections::new_id(),
                 name: None,
                 host: "a.example.com".into(),
                 port: 22,
@@ -2973,7 +2973,7 @@ mod tests {
     /// 新建态与载入没起名的条目都给 None。
     #[gpui::test]
     fn blank_name_normalizes_to_none(cx: &mut gpui::TestAppContext) {
-        use crate::connections::{SavedConnection, SavedCredentials};
+        use crate::ssh::connections::{SavedConnection, SavedCredentials};
         cx.update(|cx| {
             let font = crate::font::terminal_font("monospace");
             let form = cx.new(|cx| ConnectForm::new(font, cx));
@@ -2997,7 +2997,7 @@ mod tests {
 
                 // 载入没起名的条目：名称框清空而不是残留上一条的名字
                 let unnamed = SavedConnection {
-                    id: crate::connections::new_id(),
+                    id: crate::ssh::connections::new_id(),
                     name: None,
                     host: "b.example.com".into(),
                     port: 22,
@@ -3026,7 +3026,7 @@ mod tests {
     #[gpui::test]
     fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppContext) {
         use super::ConnectSection;
-        use crate::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
+        use crate::ssh::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
 
         cx.update(|cx| {
             let font = crate::font::terminal_font("monospace");
@@ -3047,7 +3047,7 @@ mod tests {
             // 载入有货的连接：对应段展开
             let loaded = cx.new(|cx| ConnectForm::new(font.clone(), cx));
             let full = SavedConnection {
-                id: crate::connections::new_id(),
+                id: crate::ssh::connections::new_id(),
                 name: None,
                 host: "a.example.com".into(),
                 port: 22,
@@ -3081,7 +3081,7 @@ mod tests {
 
             // 纯 agent 默认连接：认证段仍展开，其余段收起
             let bare = SavedConnection {
-                id: crate::connections::new_id(),
+                id: crate::ssh::connections::new_id(),
                 name: None,
                 host: "b.example.com".into(),
                 port: 22,
@@ -3183,7 +3183,7 @@ fn keys_route_by_view(cx: &mut gpui::TestAppContext) {
         let font = crate::font::terminal_font("monospace");
         let form = cx.new(|cx| ConnectForm::new(font, cx));
         // 键裁决不读已保存连接,给个空源即可
-        let saved = cx.new(|_| crate::connections::SavedSources {
+        let saved = cx.new(|_| crate::ssh::connections::SavedSources {
             store: None,
             error: None,
         });
@@ -3251,14 +3251,14 @@ fn new_save_form(cx: &mut gpui::TestAppContext) -> gpui::Entity<ConnectForm> {
 
 // 同上：夹具只在测试构建里存在
 #[cfg(test)]
-fn remembered_entry(host: &str, remember: bool) -> crate::connections::SavedConnection {
-    crate::connections::SavedConnection {
-        id: crate::connections::new_id(),
+fn remembered_entry(host: &str, remember: bool) -> crate::ssh::connections::SavedConnection {
+    crate::ssh::connections::SavedConnection {
+        id: crate::ssh::connections::new_id(),
         name: None,
         host: host.to_owned(),
         port: 22,
         user: "deploy".to_owned(),
-        credentials: crate::connections::SavedCredentials {
+        credentials: crate::ssh::connections::SavedCredentials {
             use_agent: true,
             key_path: None,
         },
@@ -3355,7 +3355,7 @@ fn save_plan_round_trips_through_the_real_keychain() {
         return;
     }
     let mut entry = remembered_entry("zhimaterm.test", true);
-    let _ = crate::keychain::delete(&entry.id);
+    let _ = crate::ssh::keychain::delete(&entry.id);
 
     SavePlan {
         entry: entry.clone(),
@@ -3364,7 +3364,7 @@ fn save_plan_round_trips_through_the_real_keychain() {
     .run_keychain()
     .unwrap();
     assert_eq!(
-        crate::keychain::load(&entry.id).unwrap().as_deref(),
+        crate::ssh::keychain::load(&entry.id).unwrap().as_deref(),
         Some("probe-密码"),
         "写入后应能按 id 读回"
     );
@@ -3378,13 +3378,13 @@ fn save_plan_round_trips_through_the_real_keychain() {
     .run_keychain()
     .unwrap();
     assert_eq!(
-        crate::keychain::load(&entry.id).unwrap().as_deref(),
+        crate::ssh::keychain::load(&entry.id).unwrap().as_deref(),
         Some("rotated"),
         "同 id 再写应覆盖"
     );
 
-    crate::keychain::delete(&entry.id).unwrap();
-    assert_eq!(crate::keychain::load(&entry.id).unwrap(), None);
+    crate::ssh::keychain::delete(&entry.id).unwrap();
+    assert_eq!(crate::ssh::keychain::load(&entry.id).unwrap(), None);
 }
 
 /// 手工验收回报「改密码无效」的边界：编辑已记住条目原地改密码，应产出

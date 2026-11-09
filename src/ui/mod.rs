@@ -88,3 +88,58 @@ pub fn resize_grip(
         GripSide::Right => grip.right_0(),
     }
 }
+
+/// 按 1024 进位缩放并给出档位下标。两个展示函数共用同一实现，
+/// 进位口径只在一处维护。
+fn scaled_1024(mut value: f64, unit_count: usize) -> (f64, usize) {
+    let mut unit = 0;
+    while value >= 1024. && unit + 1 < unit_count {
+        value /= 1024.;
+        unit += 1;
+    }
+    (value, unit)
+}
+
+/// 字节数的紧凑展示：按 1024 进位，B 以上保留一位小数。
+/// 底栏指标（`views::shell`）与本地探针面板（`local::probe_panel`，ADR-028）共用这一口径。
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let (value, unit) = scaled_1024(bytes as f64, UNITS.len());
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// 速率的紧凑展示：口径与 [`human_bytes`] 一致，尾部带 /s。
+pub(crate) fn human_rate(bytes_per_sec: f64) -> String {
+    const UNITS: [&str; 6] = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"];
+    let (value, unit) = scaled_1024(bytes_per_sec.max(0.), UNITS.len());
+    if unit == 0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{human_bytes, human_rate};
+
+    #[test]
+    fn bytes_scale_by_1024_with_one_decimal() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn rates_carry_the_per_second_suffix() {
+        assert_eq!(human_rate(0.), "0 B/s");
+        assert_eq!(human_rate(340. * 1024.), "340.0 KB/s");
+        assert_eq!(human_rate(-5.), "0 B/s");
+    }
+}

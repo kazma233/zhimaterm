@@ -453,10 +453,10 @@ pub enum ControlEvent {
     MonitorReady(MonitorEvents),
     /// 本地会话的进程探针就绪（ADR-028）：句柄由面板随开合启停采样。
     /// 仅本地默认 Shell 会话发；WSL 与 SSH 会话不发。
-    ProbeReady(crate::probe::ProbeHandle),
+    ProbeReady(crate::local::probe::ProbeHandle),
     /// 本地会话的前台进程探针就绪（关闭二次确认）：点击关闭那一刻用它查询
     /// shell 前台是否有子程序。仅本地会话发；Windows 不启用。
-    ForegroundProbeReady(crate::pty::ForegroundProbe),
+    ForegroundProbeReady(crate::local::pty::ForegroundProbe),
     /// SSH 会话的转发状态流就绪（ADR-011）：规则监听状态与活跃连接数。
     /// 没配转发规则的会话不发。
     ForwardReady(ForwardEvents),
@@ -750,7 +750,7 @@ pub fn spawn(config: SessionConfig) -> (Session, SessionEvents) {
         .name("zhimaterm-session".into())
         .spawn(move || {
             // 记录门面绑定（ADR-045）：本线程任意深度的日志埋点无参调用
-            crate::recorder::bind_pane(pane);
+            crate::recording::recorder::bind_pane(pane);
             // worker 的任何 panic 都必须变成 Failed 事件：静默崩溃会让连接
             // 永远停在"正在连接"，用户看不到任何失败原因
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -759,7 +759,7 @@ pub fn spawn(config: SessionConfig) -> (Session, SessionEvents) {
             // 日志右边界在所有出口统一写：正常结束、连接失败、panic 三条路
             // 都到这；顺带交出累积的写失败（主循环已报过的不会再出现，
             // take 语义）
-            if let Some(reason) = crate::recorder::finish_session() {
+            if let Some(reason) = crate::recording::recorder::finish_session() {
                 worker::emit_control(&control_tx, ControlEvent::LoggingStopped(reason));
             }
             match outcome {

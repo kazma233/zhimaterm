@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use super::super::{ExitReason, LocalShell, SHUTDOWN_STEP_TIMEOUT, SessionExit};
 use super::{Control, SessionExtras, Transport};
-use crate::pty::{self, Command, PtySize};
+use crate::local::pty::{self, Command, PtySize};
 
 /// 本地会话的默认 Shell。Windows 上默认 PowerShell：cmd 每条命令后会多打一个
 /// 空行，且没有管道与通用的脚本习惯；装有 pwsh（PowerShell 7+）时优先用它。
@@ -64,7 +64,7 @@ fn shell_command(shell: &LocalShell) -> Command {
             command
         }
         #[cfg(windows)]
-        LocalShell::Wsl { distro } => crate::wsl::launch_command(distro),
+        LocalShell::Wsl { distro } => crate::local::wsl::launch_command(distro),
     }
 }
 
@@ -114,7 +114,7 @@ pub(super) fn open(columns: usize, lines: usize, shell: &LocalShell) -> Result<T
     // 子系统里，宿主侧枚举不到，V1 不提供（ADR-028）
     let probe = match shell {
         LocalShell::Default { .. } | LocalShell::Program { .. } => {
-            Some(crate::probe::ProbeHandle::new(pty.pid()))
+            Some(crate::local::probe::ProbeHandle::new(pty.pid()))
         }
         #[cfg(windows)]
         LocalShell::Wsl { .. } => None,

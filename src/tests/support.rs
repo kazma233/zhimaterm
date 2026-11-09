@@ -73,7 +73,7 @@ pub fn isolate_shell_environment() {
 /// 计数器会与 recorder 单测撞 id、注入静默覆盖别人的条目）。不注册进
 /// 记录门面——worker 的日志埋点全部 no-op，等价原先的 `log: None`。
 pub fn test_pane() -> gpui::EntityId {
-    crate::recorder::test_pane()
+    crate::recording::recorder::test_pane()
 }
 
 /// SSH 测试服务端连接参数；缺任一环境变量即返回 None（用例自行跳过）。

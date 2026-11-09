@@ -152,7 +152,7 @@ fn process_from_entry(entry: &PROCESSENTRY32W) -> ProbeProcess {
 /// 完整命令行（PEB）按系统规则切成 argv：引号语义由 CommandLineToArgvW
 /// 单点维护，不自写解析。取不到（进程退出、受保护）返回 None。
 fn command_argv(pid: u32) -> Option<Vec<String>> {
-    let command = crate::peb::command_line(pid)?;
+    let command = crate::local::peb::command_line(pid)?;
     let wide: Vec<u16> = command.encode_utf16().chain([0]).collect();
     let mut count = 0i32;
     // SAFETY: wide 以 NUL 终止；失败返回 null 指针由下方判断。
