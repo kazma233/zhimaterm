@@ -13,7 +13,7 @@ use crate::workspace::{PaneId, SplitAxis};
 use zhimaterm_session::{LocalShell, SessionTarget, file_for};
 use zhimaterm_terminal::DEFAULT_SCROLLING_HISTORY;
 
-use super::modals::{ViewForwardTarget, modal_action};
+use super::modals::modal_action;
 use super::{MAX_SESSIONS, Tab, ZhimaTermApp};
 
 impl ZhimaTermApp {
@@ -152,35 +152,36 @@ impl ZhimaTermApp {
                 .unwrap_or_default(),
         };
 
-        // 运行中转发增删的回调（ADR-038）：视图不持有保存的连接与 id 分配，
-        // 一律回到应用层处理
-        let saved_connection = match &target {
-            SessionTarget::Ssh(ssh) => self
-                .saved
-                .read(cx)
-                .find_target(&ssh.host, ssh.port, &ssh.user)
-                .is_some(),
-            SessionTarget::Local { .. } => false,
+        // 运行中转发的外壳入口（ADR-038）：视图不持有保存的连接与 id 分配，
+        // 增删与写回由应用层一次编排
+        let saved_connection: crate::views::terminal_view::SavedConnectionQuery = match &target {
+            SessionTarget::Ssh(ssh) => {
+                // 匹配性渲染时机现查（快照会过期：会话开着时保存了条目，
+                // 浮层的「同时保存到连接」要立刻可用）；会话身份终身不变，
+                // 捕获它没有漂移问题
+                let saved = self.saved.clone();
+                let host = ssh.host.clone();
+                let port = ssh.port;
+                let user = ssh.user.clone();
+                Rc::new(move |cx: &App| saved.read(cx).find_target(&host, port, &user).is_some())
+            }
+            // 本地格没有转发
+            SessionTarget::Local { .. } => Rc::new(|_: &App| false),
         };
         let app = cx.entity().downgrade();
         let open_app = app.clone();
-        let forwards_app = app.clone();
+        let remove_app = app.clone();
         let hooks = crate::views::terminal_view::ForwardHooks {
             open_form: Rc::new(move |view, window, cx| {
                 let _ = open_app.update(cx, |app, cx| app.open_forward_form(view, window, cx));
             }),
-            changed: Rc::new(move |view, cx| {
-                // 回调发生在视图自己的 update 里：defer 到本轮更新结束后
-                // 再读视图，否则外壳快照会对同一实体重入读取
-                let app = forwards_app.clone();
-                cx.defer(move |cx| {
-                    let _ = app.update(cx, |app, cx| {
-                        app.forwards_changed(&ViewForwardTarget { view }, cx)
-                    });
-                });
+            // 删除与写回一次编排完（对齐 apply_forward 的形状）：视图 update
+            // 同步结束后外壳即可安全读它，不需要 defer
+            remove_forward: Rc::new(move |view, id, cx| {
+                let _ = remove_app.update(cx, |app, cx| app.remove_session_forward(view, id, cx));
             }),
             state_changed: Rc::new(move |_view, cx| {
-                // 工作目录等会话状态属于工作区（ADR-039）；同样推迟到视图
+                // 工作目录等会话状态属于工作区（ADR-039）；推迟到视图
                 // update 结束之后，快照才能安全读取每个 TerminalView
                 let app = app.clone();
                 cx.defer(move |cx| {

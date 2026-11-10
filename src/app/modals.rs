@@ -192,6 +192,18 @@ impl ZhimaTermApp {
         }
     }
 
+    /// 删除运行中的转发规则（ADR-038）：视图侧删除 + 保存连接回写一次
+    /// 编排完（对齐 `apply_forward` 的形状）。由浮层 ✕ 经 ForwardHooks 调入。
+    pub(super) fn remove_session_forward(
+        &mut self,
+        view: Entity<TerminalView>,
+        id: zhimaterm_session::ForwardId,
+        cx: &mut Context<Self>,
+    ) {
+        view.update(cx, |view, cx| view.remove_forward(id, cx));
+        self.forwards_changed(&ViewForwardTarget { view }, cx);
+    }
+
     /// 转发规则增删后的回写（ADR-038）：会话匹配保存连接且勾选「同时保存
     /// 到连接」时，用当前规则表覆盖该条保存连接的转发配置。
     pub(super) fn forwards_changed(

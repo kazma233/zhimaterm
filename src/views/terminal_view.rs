@@ -53,22 +53,28 @@ const METRIC_HISTORY_CAPACITY: usize = shell::SPARKLINE_SLOTS;
 
 /// 打开「添加转发规则」表单
 pub type OpenForwardForm = Rc<dyn Fn(Entity<TerminalView>, &mut Window, &mut App)>;
-/// 转发规则增删后通知外壳
-pub type ForwardChanged = Rc<dyn Fn(Entity<TerminalView>, &mut App)>;
+/// 删除一条运行中的转发规则（外壳编排「视图删除 + 保存连接回写」）
+pub type RemoveSessionForward =
+    Rc<dyn Fn(Entity<TerminalView>, zhimaterm_session::ForwardId, &mut App)>;
 /// 会话状态变化（工作目录等）后通知外壳
 pub type SessionStateChanged = Rc<dyn Fn(Entity<TerminalView>, &mut App)>;
+/// 本会话是否匹配一条已保存连接：渲染时机现查（saved 源会变，不能快照）
+pub type SavedConnectionQuery = Rc<dyn Fn(&App) -> bool>;
 
-/// 运行中转发增删的外壳回调（ADR-038）：视图不持有保存的连接，也不负责
-/// 分配规则 id 与写回配置，这些都在应用层。
+/// 运行中转发的外壳入口（ADR-038/007 修订六）：视图不持有保存的连接，
+/// 也不负责分配规则 id 与写回配置；增删与写回由外壳一次编排完——不经
+/// 「变更广播」回跳外壳，也就不需要 defer 防重入（模态添加路径
+/// `apply_forward` 一直是这个形状，浮层删除对齐它）。
 pub struct ForwardHooks {
     /// 打开「添加转发规则」表单
     pub open_form: OpenForwardForm,
-    /// 规则增删后通知外壳：写回保存的连接（若会话匹配且用户勾选）
-    pub changed: ForwardChanged,
+    /// 删除一条运行中的规则：外壳编排「视图删除 + 写回保存连接」
+    pub remove_forward: RemoveSessionForward,
     /// 会话状态变化（工作目录等）后通知外壳落盘工作区（ADR-039）
     pub state_changed: SessionStateChanged,
-    /// 这条会话是否对应一条已保存的连接：false 时「同时保存到连接」不可用
-    pub saved_connection: bool,
+    /// 本会话是否匹配一条已保存连接：渲染时机现查——快照会过期（会话
+    /// 开着时保存了匹配条目，浮层的「同时保存到连接」要立刻可用）
+    pub saved_connection: SavedConnectionQuery,
 }
 
 /// 一条转发规则在 UI 侧的运行状态（ADR-011/038）。
@@ -880,11 +886,6 @@ impl TerminalView {
         self.forward_states.retain(|state| state.id != id);
         let _ = self.session.remove_forward(id);
         cx.notify();
-    }
-
-    fn notify_forwards_changed(&self, cx: &mut Context<Self>) {
-        let changed = self.forward_hooks.changed.clone();
-        changed(cx.entity(), cx);
     }
 
     /// 应用层换字体（设置里改了字体/字号）：更新配置与格尺寸，所有渲染、
@@ -2146,7 +2147,7 @@ impl TerminalView {
                     &self.forward_states,
                     self.forward_agent,
                     self.agent_forward_error.as_deref(),
-                    self.forward_hooks.saved_connection,
+                    (self.forward_hooks.saved_connection)(cx),
                     self.forward_save,
                     &forward_overlay_actions(&view_entity),
                 )
@@ -2604,12 +2605,9 @@ fn forward_overlay_actions(view: &Entity<TerminalView>) -> OverlayActions {
         },
         remove: {
             let view = view.clone();
-            std::rc::Rc::new(move |id, window, cx| {
-                view.update(cx, |view, cx| {
-                    view.remove_forward(id, cx);
-                    view.notify_forwards_changed(cx);
-                });
-                let _ = window;
+            std::rc::Rc::new(move |id, _window, cx| {
+                let remove = view.read(cx).forward_hooks.remove_forward.clone();
+                remove(view.clone(), id, cx);
             })
         },
     }
