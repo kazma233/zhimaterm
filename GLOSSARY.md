@@ -53,7 +53,7 @@ _Avoid_: 鼠标路由、滚轮转发开关
 _Avoid_: 输入法缓冲区、preedit 状态、组合区状态机（指散落在视图里的旧形态）
 
 **查询应答（query reply）**:
-终端查询（OSC 4/10/11/12 颜色、CSI 14t 尺寸）的应答字节归共享层单点格式化（`terminal/colors.rs` 的 `reply`：双写十六进制、固定 ST 结尾——kitty/ghostty 口径）；`TermRequest` 只携带语义载荷（槽位/尺寸查询意图），不携带格式。核心自答的后端（ghostty）把应答字节拦截翻译成同一语义载荷，不得自带格式器。
+终端查询（OSC 4/10/11/12 颜色、CSI 14t 尺寸）的应答字节归共享层单点格式化（`terminal/colors.rs` 的 `reply`：双写十六进制、固定 ST 结尾——kitty/ghostty 口径）；`TermRequest` 只携带语义载荷（槽位/尺寸查询意图），不携带格式。核心自答的后端（ghostty）把应答字节拦截翻译成同一语义载荷，不得自带格式器。请求分派（TermRequest → 写回 PTY / 交给 UI）单点在 worker 的请求应答策略，CSI 14t 的字节拼装（`text_area_size_reply`）同处，颜色应答仍调共享层。
 _Avoid_: ColorFormatter/SizeFormatter 闭包、逐后端应答格式器、上游格式器包装、镜像查询结尾符
 
 **会话视图归约（SessionViewState）**:

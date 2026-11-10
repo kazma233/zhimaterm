@@ -246,8 +246,6 @@ pub(super) fn run(
     // 连接期间 UI 可能又报过尺寸（信任弹窗这类等待）：用它做主网格与远端
     // PTY 的修正，否则远端会以默认尺寸开场，光标位置与本地网格不一致。
     let mut pending_resize: Option<(usize, usize, (u16, u16))> = None;
-    // 上一轮是否在记日志:检测运行时开关的恢复边沿(恢复时丢弃暂停期间的行)
-    let mut was_logging = zhimaterm_recording::recorder::is_logging();
     let transport = {
         let mut asks = UiAsks {
             commands: &commands,
@@ -291,7 +289,7 @@ pub(super) fn run(
     // 本地格的持久化开关就是回滚文件：生产路径每个本地格都有；测试不传就
     // 完全不采样工作目录（macOS 上每 2 秒一次 lsof，并行用例里没必要）
     let mut scrollback_state = scrollback.map(|path| ScrollbackState::new(path, shell_pid));
-    let mut transcript = TranscriptState::default();
+    let mut transcript = TranscriptState::new();
     let mut pending_frame: Option<TerminalSnapshot> = None;
     let mut dirty = true;
     // 起始时间回拨一个帧间隔，保证首帧立即发出
@@ -413,25 +411,15 @@ pub(super) fn run(
         if new_output && matches!(restore_hold, Some(RestoreHold::Armed { .. })) {
             restore_hold = None;
         }
-        // 日志（ADR-017 修订）：转录本轮流入历史的完成行（渲染后文本）；
-        // 写失败（磁盘满等）只停写不致命，但要上报一次让用户知道。写点经
-        // 记录门面（ADR-045）：没开或暂停时 no-op
-        {
-            let logging = zhimaterm_recording::recorder::is_logging();
-            let lines = terminal.transcript_lines(&mut transcript.logged, &mut transcript.pending);
-            // 暂停期间的输出不记也不攒：恢复的那一轮先把攒下的行排掉
-            // （基线推进但不落盘），之后才记新行
-            if logging && !was_logging {
-                drop(lines);
-            } else {
-                for line in lines {
-                    zhimaterm_recording::recorder::output_line(&line);
-                }
-            }
-            if let Some(reason) = zhimaterm_recording::recorder::take_log_failure() {
-                emit_control(&control, ControlEvent::LoggingStopped(reason));
-            }
-            was_logging = logging;
+        // 日志（ADR-017 修订）：转录采样策略出「哪些行进日志」，门面写入与
+        // 失败上报留在循环（ADR-045 门面：没开或暂停时 no-op；写失败只停写
+        // 不致命，上报一次让用户知道）
+        let logging = zhimaterm_recording::recorder::is_logging();
+        for line in transcript.sample(&mut terminal, logging) {
+            zhimaterm_recording::recorder::output_line(&line);
+        }
+        if let Some(reason) = zhimaterm_recording::recorder::take_log_failure() {
+            emit_control(&control, ControlEvent::LoggingStopped(reason));
         }
 
         // 回滚持久化（ADR-039）：空闲写回 + 工作目录采样。未灌入的恢复
@@ -443,42 +431,14 @@ pub(super) fn run(
             state.tick(&terminal, &control, restore_poured(&restore_hold));
         }
 
-        // 3) 核心请求：查询应答必须按前台程序的输出顺序写回 PTY，
-        //    标题与响铃交给 UI。这里必须写，否则 DA1/DSR 之类查询会让程序等在超时上。
-        for request in terminal.take_requests() {
-            match request {
-                TermRequest::PtyWrite(text) => write_bytes(&mut writer, text.as_bytes())?,
-                TermRequest::Title(title) => emit_control(&control, ControlEvent::Title(title)),
-                TermRequest::ResetTitle => {
-                    emit_control(&control, ControlEvent::Title(String::new()));
-                }
-                TermRequest::Bell => emit_control(&control, ControlEvent::Bell),
-                TermRequest::ClipboardStore(text) => {
-                    emit_control(&control, ControlEvent::ClipboardStore(text));
-                }
-                TermRequest::ColorRequest { slot } => {
-                    let answer = zhimaterm_terminal::reply(slot, terminal.query_color(slot));
-                    write_bytes(&mut writer, answer.as_bytes())?;
-                }
-                TermRequest::TextAreaSizeRequest => {
-                    let (columns, lines) = terminal.size();
-                    let answer = text_area_size_reply(WindowSize {
-                        lines,
-                        columns,
-                        cell_width: state.cell_size.0,
-                        cell_height: state.cell_size.1,
-                    });
-                    write_bytes(&mut writer, answer.as_bytes())?;
-                }
-                // 程序接管鼠标后指针用箭头，否则提示可以选择文本
-                TermRequest::MouseCursorDirty => {
-                    let shape = if terminal.wants_mouse() {
-                        PointerShape::Arrow
-                    } else {
-                        PointerShape::Text
-                    };
-                    emit_control(&control, ControlEvent::Pointer(shape));
-                }
+        // 3) 核心请求：应答策略出动作（GLOSSARY「查询应答」），写入与上报在
+        //    这里执行。应答必须按前台程序的输出顺序写回 PTY，否则 DA1/DSR
+        //    之类查询会让程序等在超时上。
+        let requests = terminal.take_requests();
+        for action in plan_requests(requests, &terminal, state.cell_size) {
+            match action {
+                RequestAction::Pty(bytes) => write_bytes(&mut writer, bytes.as_bytes())?,
+                RequestAction::Control(event) => emit_control(&control, event),
             }
         }
 
@@ -720,19 +680,43 @@ impl ScrollbackState {
     }
 }
 
-/// 日志转录状态（ADR-017 修订）：主网格历史的写出游标与跨轮次折行的挂起半行。
+/// 日志转录策略（ADR-017 修订）：主网格历史的写出游标、跨轮次折行的挂起半行
+/// 与运行时开关的上一轮状态（恢复边沿检测）。只出「哪些行进日志」的内容决定，
+/// 门面写入与失败上报由主循环执行。
 #[derive(Default)]
 struct TranscriptState {
     logged: usize,
     pending: String,
+    /// 上一轮是否在记日志：恢复的那一轮要先把暂停期间攒下的行排掉
+    was_logging: bool,
 }
 
-/// 会话收尾：把仍留在屏幕上的行冲进日志——最后一屏通常是会话的尾部输出。
-/// 备用屏激活时不冲刷（全屏界面不进日志）。写点经记录门面：没开日志即 no-op。
-fn flush_screen_transcript(terminal: &TerminalModel, transcript: &mut TranscriptState) {
-    let pending = std::mem::take(&mut transcript.pending);
-    for line in terminal.screen_transcript(pending) {
-        zhimaterm_recording::recorder::output_line(&line);
+impl TranscriptState {
+    fn new() -> Self {
+        Self {
+            was_logging: zhimaterm_recording::recorder::is_logging(),
+            ..Self::default()
+        }
+    }
+
+    /// 采样一轮：返回要写盘的行。恢复轮（上一轮没在记、这一轮开了）与暂停轮
+    /// 只推进基线不返回行——暂停期间的输出不记也不攒（写盘方是记录门面，
+    /// 暂停时本来就 no-op，这里直接不出行省一次分配）。
+    fn sample(&mut self, terminal: &mut TerminalModel, logging_now: bool) -> Vec<String> {
+        let lines = terminal.transcript_lines(&mut self.logged, &mut self.pending);
+        let resumed = logging_now && !self.was_logging;
+        self.was_logging = logging_now;
+        if !logging_now || resumed {
+            return Vec::new();
+        }
+        lines
+    }
+
+    /// 收尾：把仍留在屏幕上的行冲出来——最后一屏通常是会话的尾部输出。
+    /// 备用屏激活时不冲刷（全屏界面不进日志），由 `screen_transcript` 自判。
+    fn finish(&mut self, terminal: &TerminalModel) -> Vec<String> {
+        let pending = std::mem::take(&mut self.pending);
+        terminal.screen_transcript(pending)
     }
 }
 
@@ -1005,6 +989,55 @@ fn text_area_size_reply(size: WindowSize) -> String {
     format!("\x1b[4;{height};{width}t")
 }
 
+/// 请求应答策略的动作面：写回 PTY 的应答（含程序要的字节直通）或交给 UI
+/// 的控制事件。返回序即写入序。
+enum RequestAction {
+    Pty(String),
+    Control(ControlEvent),
+}
+
+/// 核心请求的分派（GLOSSARY「查询应答」）：纯决策无头可测——喂 `TermRequest`
+/// 变体断言动作。查询应答按请求序产出，颜色走共享层格式化，CSI 14t 在
+/// [`text_area_size_reply`] 单点拼装；鼠标指针形状按程序是否接管鼠标折算。
+fn plan_requests(
+    requests: Vec<TermRequest>,
+    terminal: &TerminalModel,
+    cell_size: (u16, u16),
+) -> Vec<RequestAction> {
+    requests
+        .into_iter()
+        .map(|request| match request {
+            TermRequest::PtyWrite(text) => RequestAction::Pty(text),
+            TermRequest::Title(title) => RequestAction::Control(ControlEvent::Title(title)),
+            TermRequest::ResetTitle => RequestAction::Control(ControlEvent::Title(String::new())),
+            TermRequest::Bell => RequestAction::Control(ControlEvent::Bell),
+            TermRequest::ClipboardStore(text) => {
+                RequestAction::Control(ControlEvent::ClipboardStore(text))
+            }
+            TermRequest::ColorRequest { slot } => {
+                RequestAction::Pty(zhimaterm_terminal::reply(slot, terminal.query_color(slot)))
+            }
+            TermRequest::TextAreaSizeRequest => {
+                let (columns, lines) = terminal.size();
+                RequestAction::Pty(text_area_size_reply(WindowSize {
+                    lines,
+                    columns,
+                    cell_width: cell_size.0,
+                    cell_height: cell_size.1,
+                }))
+            }
+            // 程序接管鼠标后指针用箭头，否则提示可以选择文本
+            TermRequest::MouseCursorDirty => {
+                RequestAction::Control(ControlEvent::Pointer(if terminal.wants_mouse() {
+                    PointerShape::Arrow
+                } else {
+                    PointerShape::Text
+                }))
+            }
+        })
+        .collect()
+}
+
 /// 用户产生输入时回到最新输出；回看历史期间输入必须先把视口拉回底部，
 /// 否则新输出会落在看不见的位置。
 fn follow_output(terminal: &mut TerminalModel) -> bool {
@@ -1034,7 +1067,9 @@ fn finish(
     {
         let _ = scrollback::persist(&state.path, terminal);
     }
-    flush_screen_transcript(terminal, transcript);
+    for line in transcript.finish(terminal) {
+        zhimaterm_recording::recorder::output_line(&line);
+    }
     shutdown(output_rx, transport, writer, reader_thread)
 }
 
@@ -1174,12 +1209,16 @@ mod tests {
     use super::join_with_deadline;
     use super::text_area_size_reply;
     use super::wait_startup_size;
+    use super::{RequestAction, TranscriptState, plan_requests};
     use super::{RestoreHold, advance_restore_hold, restore_poured};
-    use crate::{SessionCommand, StartupSize};
+    use crate::{ControlEvent, PointerShape, SessionCommand, StartupSize};
     use smol::channel::bounded;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
-    use zhimaterm_terminal::{StoredLine, StoredRun, StoredStyle, TerminalModel, WindowSize};
+    use zhimaterm_terminal::backend::{BackendKind, ColorSlot};
+    use zhimaterm_terminal::{
+        StoredLine, StoredRun, StoredStyle, TermRequest, TerminalModel, WindowSize,
+    };
 
     fn resize(columns: usize, lines: usize) -> SessionCommand {
         SessionCommand::Resize {
@@ -1201,6 +1240,132 @@ mod tests {
                 cell_height: 18,
             }),
             "\x1b[4;432;720t"
+        );
+    }
+
+    /// 请求分派矩阵（GLOSSARY「查询应答」）：应答进 Pty（含直通），界面事件
+    /// 进 Control；CSI 14t 高在前，颜色走共享层双写十六进制格式，鼠标形状按
+    /// 程序是否接管鼠标折算。
+    #[test]
+    fn plan_requests_routes_each_variant_in_order() {
+        let mut terminal = TerminalModel::with_backend(BackendKind::default(), 80, 24, 200);
+        // 鼠标上报关闭（默认）：指针提示可选文本
+        let actions = plan_requests(
+            vec![
+                TermRequest::PtyWrite("\x1b[?6c".into()),
+                TermRequest::Title("vim".into()),
+                TermRequest::ResetTitle,
+                TermRequest::Bell,
+                TermRequest::ClipboardStore("copied".into()),
+                TermRequest::ColorRequest {
+                    slot: ColorSlot::Background,
+                },
+                TermRequest::TextAreaSizeRequest,
+                TermRequest::MouseCursorDirty,
+            ],
+            &terminal,
+            (8, 16),
+        );
+        let mut actions = actions.into_iter();
+        assert!(matches!(actions.next(), Some(RequestAction::Pty(text)) if text == "\x1b[?6c"));
+        assert!(
+            matches!(actions.next(), Some(RequestAction::Control(ControlEvent::Title(title))) if title == "vim")
+        );
+        assert!(
+            matches!(actions.next(), Some(RequestAction::Control(ControlEvent::Title(title))) if title.is_empty())
+        );
+        assert!(matches!(
+            actions.next(),
+            Some(RequestAction::Control(ControlEvent::Bell))
+        ));
+        assert!(
+            matches!(actions.next(), Some(RequestAction::Control(ControlEvent::ClipboardStore(text))) if text == "copied")
+        );
+        // OSC 11 应答：共享层格式（双写十六进制 + ST 结尾）
+        assert!(
+            matches!(actions.next(), Some(RequestAction::Pty(reply)) if reply.starts_with("\x1b]11;rgb:") && reply.ends_with("\x1b\\"))
+        );
+        // CSI 14t：80 列 × 8 宽、24 行 × 16 高
+        assert!(
+            matches!(actions.next(), Some(RequestAction::Pty(reply)) if reply == "\x1b[4;384;640t")
+        );
+        assert!(matches!(
+            actions.next(),
+            Some(RequestAction::Control(ControlEvent::Pointer(
+                PointerShape::Text
+            )))
+        ));
+
+        // 程序接管鼠标：指针换箭头
+        terminal.advance(b"\x1b[?1000h");
+        let actions = plan_requests(vec![TermRequest::MouseCursorDirty], &terminal, (8, 16));
+        assert!(matches!(
+            actions.first(),
+            Some(RequestAction::Control(ControlEvent::Pointer(
+                PointerShape::Arrow
+            )))
+        ));
+    }
+
+    /// 转录采样的三个行为（ADR-017 修订）：正常轮返回新完成行；暂停轮不返回；
+    /// 恢复轮把暂停期间攒下的行排掉（基线推进）但不出行，下一轮才恢复记录。
+    #[test]
+    fn transcript_sampling_records_pauses_and_drops_the_resume_round() {
+        let mut terminal = TerminalModel::with_backend(BackendKind::default(), 80, 10, 200);
+        let mut transcript = TranscriptState {
+            was_logging: true,
+            ..TranscriptState::default()
+        };
+
+        // 正常轮：滚出一行历史
+        terminal.advance(b"first line\r\n");
+        for _ in 0..10 {
+            terminal.advance(b"\r\n");
+        }
+        let lines = transcript.sample(&mut terminal, true);
+        assert!(
+            lines.iter().any(|line| line.contains("first line")),
+            "正常轮应记录完成行：{lines:?}"
+        );
+
+        // 暂停轮：输出照常滚入，采样只推基线不出行（真实节奏里暂停期间每轮
+        // 都在采样，基线持续跟进）
+        terminal.advance(b"while paused\r\n");
+        for _ in 0..10 {
+            terminal.advance(b"\r\n");
+        }
+        assert!(transcript.sample(&mut terminal, false).is_empty());
+
+        // 恢复轮：翻转那一轮滚入的行被排掉（基线推进但不落盘）
+        terminal.advance(b"flip round\r\n");
+        for _ in 0..10 {
+            terminal.advance(b"\r\n");
+        }
+        assert!(transcript.sample(&mut terminal, true).is_empty());
+
+        // 下一轮起恢复记录：只有新滚入的行
+        terminal.advance(b"after resume\r\n");
+        for _ in 0..10 {
+            terminal.advance(b"\r\n");
+        }
+        let lines = transcript.sample(&mut terminal, true);
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("while paused") && !line.contains("flip round")),
+            "暂停期间与翻转轮的行不得记录：{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("after resume")),
+            "恢复之后的新行正常记录：{lines:?}"
+        );
+
+        // 收尾：仍留在屏幕上的行冲出（不换行，留在视口内）
+        terminal.advance(b"tail on screen");
+        let tail = transcript.finish(&terminal);
+        assert!(
+            tail.iter().any(|line| line.contains("tail on screen")),
+            "收尾应冲出尾屏行：{tail:?}"
         );
     }
 
