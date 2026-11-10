@@ -19,6 +19,7 @@ use alacritty_terminal::{
 
 use super::{
     CellColor, ColorPalette, ColorSlot, CursorState, GridCell, GridView, NamedSlot, RowBuffer,
+    pack_rgb,
 };
 use super::{TermModes, TerminalCore};
 use crate::{CursorKind, TermRequest, UnderlineKind};
@@ -169,11 +170,8 @@ impl GridView for AlacrittyCore {
         self.term.grid()[Line(line)].line_length().0
     }
 
-    fn tab_stop(&self, column: usize) -> bool {
-        // 上游没暴露它的制表位表（私有字段），只能按默认间隔推：每 8 列一个。
-        // 程序用 TSD/HTS 改过制表位时这里对不上——上游的表同样不外露。
-        column.is_multiple_of(8)
-    }
+    // tab_stop 用 GridView 默认实现（8 列近似）：上游没暴露它的制表位表
+    // （私有字段），程序用 TSD/HTS 改过制表位时对不上——ADR-050 §4 欠账
 }
 
 impl TerminalCore for AlacrittyCore {
@@ -351,7 +349,7 @@ fn convert_color(color: Color) -> CellColor {
 
 /// 上游真彩色 → 打包的 RGB。
 fn rgb_to_u32(rgb: AlacrittyRgb) -> u32 {
-    u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)
+    pack_rgb(rgb.r, rgb.g, rgb.b)
 }
 
 /// 下划线样式（SGR 4、4:1–4:5；上游把 SGR 21 当 CancelBold，不产生双线）。

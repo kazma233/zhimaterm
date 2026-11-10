@@ -91,6 +91,9 @@ views/ ──── TerminalSnapshot ──── TerminalModel（共享语义�
 上游欠账（跟进上游修复后移除近似）：alacritty_terminal 未暴露制表位表与
 SGR 21 的可选语义；`Term::input` 逐码点定宽且无宽度覆盖入口，簇口径无法
 在适配层补救，只能等上游跟进后移除本条分歧。
+（实现记录 2026-11-10：8 列制表位近似收为 `GridView::tab_stop` 默认实现，
+alacritty / ghostty 不再各自覆盖，上游跟进后单点移除；RGB 分量打包同批收为
+`backend::pack_rgb` 单点，两适配层只转自己的上游颜色类型。）
 
 ### 5. emoji 字形簇宽度（termwiz 后端，2026-11-04 补）
 

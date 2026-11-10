@@ -33,6 +33,7 @@ use vt::{
 
 use super::{
     CellColor, ColorPalette, CursorState, GridCell, GridView, NamedSlot, RowBuffer, ViewportFrame,
+    pack_rgb,
 };
 use super::{TermModes, TerminalCore};
 use crate::{CursorKind, TermRequest, UnderlineKind};
@@ -445,7 +446,7 @@ fn map_cursor_shape(style: ffi::CursorStyle::Type) -> CursorKind {
 }
 
 fn rgb_to_u32(rgb: ffi::ColorRgb) -> u32 {
-    u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)
+    pack_rgb(rgb.r, rgb.g, rgb.b)
 }
 
 /// 中性色 → ghostty 色。
@@ -629,10 +630,8 @@ impl GridView for GhosttyCore {
             .map_or(0, |position| position + 1)
     }
 
-    fn tab_stop(&self, column: usize) -> bool {
-        // 核心不暴露它的制表位表（ADR-051 有意分歧），按默认间隔推
-        column.is_multiple_of(8)
-    }
+    // tab_stop 用 GridView 默认实现（8 列近似）：核心不暴露它的制表位表
+    // （ADR-051 有意分歧）
 }
 
 impl TerminalCore for GhosttyCore {

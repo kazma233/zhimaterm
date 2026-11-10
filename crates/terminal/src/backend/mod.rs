@@ -90,6 +90,12 @@ pub struct Rgb {
     pub b: u8,
 }
 
+/// 分量打包成 0xRRGGBB（[`CellColor::Rgb`] 与调色板槽的表示）。打包规则
+/// 单点：适配层把自己的上游颜色类型拆成分量后调它，不各自写位运算。
+pub(super) fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
+    u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+}
+
 /// 单元格颜色。
 ///
 /// 「程序经 OSC 改写过的槽位」不进这里：改写是整张调色板的事，
@@ -457,8 +463,12 @@ pub(super) trait GridView {
     /// 该行有内容的列数（含）。空行是 0。
     fn row_length(&self, line: i32) -> usize;
 
-    /// 该列是否是制表位（默认每 8 列一个）。
-    fn tab_stop(&self, column: usize) -> bool;
+    /// 该列是否是制表位。默认按 8 列间隔近似：上游不外露制表位表的后端
+    /// （alacritty / ghostty，ADR-050 §4 欠账）直接用它；跟踪真实 HTS/TSD
+    /// 的后端覆盖。上游跟进后只改这一处默认实现。
+    fn tab_stop(&self, column: usize) -> bool {
+        column.is_multiple_of(8)
+    }
 
     /// 最靠上的行号（负数，是历史首行）。
     fn topmost_line(&self) -> i32 {
@@ -568,6 +578,51 @@ pub(super) trait TerminalCore: GridView {
         _cursor: Rgb,
         _ansi: &[Rgb; 16],
     ) {
+    }
+}
+
+#[cfg(test)]
+mod shared_derivations {
+    use super::*;
+
+    /// 打包规则：0xRRGGBB，通道序错了颜色整体串色且难发现。
+    #[test]
+    fn pack_rgb_is_rrggbb() {
+        assert_eq!(pack_rgb(0x12, 0x34, 0x56), 0x12_34_56);
+        assert_eq!(pack_rgb(0xff, 0x00, 0x00), 0xff_00_00);
+    }
+
+    /// 最小 GridView 桩：只为测默认推导，其余方法给空实现。
+    struct StubGrid;
+
+    impl GridView for StubGrid {
+        fn columns(&self) -> usize {
+            80
+        }
+        fn screen_lines(&self) -> usize {
+            24
+        }
+        fn history_size(&self) -> usize {
+            0
+        }
+        fn read_row(&self, _line: i32, _out: &mut RowBuffer) {}
+        fn row_wrapped(&self, _line: i32) -> bool {
+            false
+        }
+        fn row_length(&self, _line: i32) -> usize {
+            0
+        }
+    }
+
+    /// 默认制表位是 8 列近似（ADR-050 §4 欠账的单点）：上游跟进后改默认
+    /// 实现，测试跟着改这一处。
+    #[test]
+    fn default_tab_stop_is_every_eighth_column() {
+        assert!(StubGrid.tab_stop(0));
+        assert!(StubGrid.tab_stop(8));
+        assert!(StubGrid.tab_stop(80));
+        assert!(!StubGrid.tab_stop(1));
+        assert!(!StubGrid.tab_stop(9));
     }
 }
 
