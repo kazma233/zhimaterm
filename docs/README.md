@@ -78,6 +78,7 @@
 - [SSH 转发与跳板机入门](context/ssh-forward-vs-jump-host-primer.md)：本地/远程/动态转发的区别与跳板机选型。
 - [中文拼音输入排障](context/ime-pinyin-troubleshooting.md)：三层叠加假象的排查路径与可复用诊断方法（ADR-033）。
 - [死会话裸键失灵排障](context/dead-session-key-focus-troubleshooting.md)：blur 落点到「无焦点」导致按键派发不经过应用层的根因与 gpui 焦点派发事实。
+- [⌥+方向键按词跳转调研](context/alt-arrow-word-motion.md)：各终端让裸 shell 开箱即用的两条路线（kitty 集成绑定 vs Ghostty 终端层翻译）与口径选择依据。
 - [libghostty-vt C API 机制笔记](context/libghostty-vt-api-notes.md)：tagged get/set、sized 结构、两段式缓冲、回调协议等扩展 ghostty 后端前的依据（探索快照，用前二次确认）。
 
 ## 运行手册（`runbooks/`）

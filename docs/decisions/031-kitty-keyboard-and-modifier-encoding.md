@@ -65,3 +65,23 @@ pi 的实际行为(源码核实):启动时发 `CSI > 7 u`(push flags)+ `CSI ? u`
   程序;若日后想做终端本地选区扩展,需要再决策拦截范围。legacy 下 shift+tab
   仍发 `\t`,xterm 惯例是 `\x1b[Z`(backtab,TUI 反向焦点常用);legacy 下
   ctrl+space 不产生输入(xterm 发 NUL)。
+
+## 修订(2026-11-10):legacy 下纯 alt 的左右方向键发 meta 形态
+
+决策 3 的「功能键 alt 并入修饰参数」在裸 shell 行编辑器上失效(实测
+见 [context/alt-arrow-word-motion.md](../context/alt-arrow-word-motion.md)):
+zsh 默认键表只绑 `^[b`/`^[f`(meta 形态)→ 按词移动,`\e[1;3D` 无绑定,
+zle 把序列尾巴当字面插入(用户看到 "D");后果段「ctrl+left 发
+`\x1b[1;5D/C`,zsh/bash/fish 按词移动」的断言对 zsh 不成立——裸 zsh 对
+`\e[1;5D` 同样无绑定,需要用户自配。
+
+各终端让裸 shell 开箱即用的两条路线:kitty 靠 shell 集成注入绑定
+(只救直接派生的本地 shell,嵌套与 SSH 远端失效);Ghostty 1.4 靠终端
+keybind 层把 alt+←/→ 翻译成 `esc:b`/`esc:f`(普适,嵌套与远端同样
+生效);iTerm2 的 Natural Text Editing 预设同 Ghostty 形态。
+
+口径变更:ZhimaTerm 是 SSH 客户端,远端 shell 不可能有本地集成,走
+终端层翻译——**legacy 下纯 alt(无 ctrl/shift)的 ←/→ 发 `ESC b`/`ESC f`**
+(编码层 `terminal::input::encode_key`,本地与远端同时生效);ctrl/shift
+组合维持修饰 CSI(meta 形态表达不了 ctrl);kitty disambiguate 激活时
+不翻译——协商了键盘协议的程序要标准形式,它们本来就自己解析。

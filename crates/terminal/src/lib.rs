@@ -1315,10 +1315,10 @@ mod tests {
             model.encode_key(&modified("space", false, true, false)),
             Some(b"\x1b ".to_vec())
         );
-        // ⌥+方向键是功能键，修饰参数形式，不受开关影响
+        // ⌥+←/→ 发 meta 等价物（按词移动，ADR-031 修订），同样不受开关影响
         assert_eq!(
             model.encode_key(&modified("left", false, true, false)),
-            Some(b"\x1b[1;3D".to_vec())
+            Some(b"\x1bb".to_vec())
         );
     }
 
@@ -1341,8 +1341,10 @@ mod tests {
         );
     }
 
-    /// 功能键的修饰组合带 xterm 修饰参数（1+shift+2alt+4ctrl）：
-    /// shell 与 TUI（zsh/pi 的按词移动）靠 `\x1b[1;5D` 这类序列区分 ctrl/alt+方向键。
+    /// 功能键的修饰组合带 xterm 修饰参数（1+shift+2alt+4ctrl）：TUI（pi 的
+    /// 按词移动）靠 `\x1b[1;5D` 这类序列区分 ctrl/alt+方向键；**纯 alt 的
+    /// ←/→ 例外**——发 meta 等价物 ESC b/f（主流 shell 默认键表只绑这个
+    /// 形态，修饰 CSI 会被行编辑器当字面插入，ADR-031 修订）。
     #[test]
     fn modified_navigation_keys_carry_the_xterm_modifier_parameter() {
         let model = TerminalModel::new(20, 4);
@@ -1352,17 +1354,23 @@ mod tests {
             model.encode_key(&modified("left", true, false, false)),
             Some(b"\x1b[1;5D".to_vec())
         );
+        // 纯 alt 的左右方向键：meta 等价物（zsh/bash/fish 默认绑定的按词移动）
         assert_eq!(
             model.encode_key(&modified("left", false, true, false)),
-            Some(b"\x1b[1;3D".to_vec())
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            model.encode_key(&modified("right", false, true, false)),
+            Some(b"\x1bf".to_vec())
+        );
+        // 与 ctrl 组合：meta 表达不了 ctrl，维持修饰参数
+        assert_eq!(
+            model.encode_key(&modified("left", true, true, false)),
+            Some(b"\x1b[1;7D".to_vec())
         );
         assert_eq!(
             model.encode_key(&modified("left", false, false, true)),
             Some(b"\x1b[1;2D".to_vec())
-        );
-        assert_eq!(
-            model.encode_key(&modified("right", false, true, false)),
-            Some(b"\x1b[1;3C".to_vec())
         );
         assert_eq!(
             model.encode_key(&modified("delete", true, false, false)),

@@ -131,6 +131,19 @@ fn text_codepoint(key: &str) -> Option<u32> {
         .then(|| first.to_ascii_lowercase() as u32)
 }
 
+/// 纯 alt 功能键的 meta 等价物：主流 shell 的默认键表只给这些组合绑了
+/// meta 形态（zsh/bash/fish 的 `^[b`/`^[f` 按词移动），修饰 CSI 会被行
+/// 编辑器当字面插入。表里没有就是不翻——其余功能键的 meta 形态是双 ESC
+/// 废序列，无任何主流绑定。文本键不查表：通用规则本来就给它们发 ESC
+/// 前缀（alt+backspace 的 `\x1b\x7f` 即 zsh 默认的 backward-kill-word）。
+fn alt_meta_equivalent(key: &str) -> Option<u8> {
+    match key {
+        "left" => Some(b'b'),
+        "right" => Some(b'f'),
+        _ => None,
+    }
+}
+
 impl TerminalModel {
     /// 把剪贴板文本编码为终端输入。bracketed paste 由前台程序通过私有模式
     /// 2004 开关，开启时用 CSI 200~ / 201~ 包裹，并剔除 ESC，
@@ -182,6 +195,20 @@ impl TerminalModel {
             if let Some(codepoint) = codepoint {
                 return Some(csi_u(codepoint, modifier_param(key)));
             }
+        }
+
+        // 纯 alt 键的 meta 形态——与文本键「Alt 按 Meta 发送」同一条规则：
+        // legacy 下若存在全 shell 默认绑定的 meta 等价物（alt_meta_equivalent）
+        // 就发它。ctrl/shift 组合与 kitty disambiguate 除外：meta 表达不了
+        // ctrl；协商了键盘协议的程序要标准形式（ADR-031 修订 2026-11-10，
+        // 排障与各家口径见 docs/context/alt-arrow-word-motion.md）
+        if !mode.disambiguate_esc_codes
+            && key.alt
+            && !key.control
+            && !key.shift
+            && let Some(meta) = alt_meta_equivalent(&key.key)
+        {
+            return Some(vec![0x1b, meta]);
         }
 
         // shift+tab 是 backtab（`CSI Z`）：与功能键同列，ctrl/alt 并入修饰参数而不叠
