@@ -164,6 +164,159 @@ fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppCont
     }
 }
 
+/// 载入条目时观察者收到的程序化通知不算编辑：进入编辑视图后 `fail` 写下的
+/// 结论不能被 `load_saved` 的清空/掩码刷新当场撤掉（2026-11-10 手工验收回归）。
+#[gpui::test]
+fn loaded_entry_keeps_errors_written_after_load(cx: &mut gpui::TestAppContext) {
+    use crate::connections::{SavedConnection, SavedCredentials, SavedJump};
+
+    let font = zhimaterm_base::font::terminal_font("monospace");
+    let form = cx.new(|cx| ConnectForm::new(font, cx));
+    let saved = SavedConnection {
+        id: crate::connections::new_id(),
+        name: None,
+        host: "a.example.com".into(),
+        port: 2222,
+        user: "root".into(),
+        credentials: SavedCredentials {
+            use_agent: true,
+            key_path: None,
+        },
+        forward_agent: false,
+        forwards: Vec::new(),
+        remember_password: false,
+        jump: Some(SavedJump {
+            host: "bastion.example.com".into(),
+            port: 22,
+            user: "ops".into(),
+            credentials: SavedCredentials {
+                use_agent: false,
+                key_path: None,
+            },
+        }),
+    };
+
+    // 列表直连退编辑：先载入、后由外壳写错误；下一个观察周期结论仍在
+    cx.update(|cx| {
+        form.update(cx, |form, cx| {
+            form.load_saved(&saved, cx);
+            form.fail(FormError::at(Field::Auth, "这条连接需要密码"), cx);
+        });
+    });
+    form.update(cx, |form, _| {
+        assert_eq!(
+            form.error.as_deref(),
+            Some("这条连接需要密码"),
+            "载入的程序化清空/掩码刷新不是编辑，底栏结论不能撤"
+        );
+    });
+
+    // 用户真改了认证输入，旧结论才过时
+    form.update(cx, |form, cx| {
+        form.password
+            .update(cx, |input, cx| input.set_text("secret", cx));
+    });
+    form.update(cx, |form, _| {
+        assert_eq!(form.error, None, "用户改密码后组合结论撤掉");
+    });
+}
+
+/// 跳板字段的提交错误不被自身的通知清掉（错误状态变化不是编辑）；用户改值才
+/// 重算，且跳板目标的 `user@` 禁令与提交共用同一规则——改端口不丢禁令。
+#[gpui::test]
+fn jump_field_errors_survive_their_own_notifications(cx: &mut gpui::TestAppContext) {
+    let font = zhimaterm_base::font::terminal_font("monospace");
+    let form = cx.new(|cx| ConnectForm::new(font, cx));
+
+    form.update(cx, |form, cx| {
+        form.toggle(ConnectToggle::JumpEnabled, cx);
+        form.fail(
+            FormError::at(
+                Field::JumpPassword,
+                "跳板机只有密码认证：填好跳板密码后用「保存并连接」",
+            ),
+            cx,
+        );
+    });
+    form.update(cx, |form, cx| {
+        assert!(
+            form.jump.password.read(cx).error().is_some(),
+            "错误状态自身的通知不能把刚写入的结论清掉"
+        );
+        form.jump
+            .password
+            .update(cx, |input, cx| input.set_text("secret", cx));
+    });
+    form.update(cx, |form, cx| {
+        assert_eq!(
+            form.jump.password.read(cx).error(),
+            None,
+            "用户改跳板密码后错误才算过时"
+        );
+        form.jump
+            .user
+            .update(cx, |input, cx| input.set_text("ops", cx));
+    });
+
+    // 主目标先补齐，校验才会走到跳板段
+    form.update(cx, |form, cx| {
+        form.host
+            .update(cx, |input, cx| input.set_text("a.example.com", cx));
+        form.user.update(cx, |input, cx| input.set_text("root", cx));
+        form.jump
+            .target
+            .update(cx, |input, cx| input.set_text("root@bastion:2222", cx));
+        let error = form.saved_entry(cx).unwrap_err();
+        assert_eq!(error.field, Some(Field::JumpTarget));
+        form.fail(error, cx);
+    });
+    form.update(cx, |form, cx| {
+        let message = form.jump.target.read(cx).error().unwrap_or_default();
+        assert!(message.contains("跳板用户"), "{message}");
+        // 仍带用户名的另一端口：错误按同一规则重算，不能消失
+        form.jump
+            .target
+            .update(cx, |input, cx| input.set_text("root@bastion:2223", cx));
+    });
+    form.update(cx, |form, cx| {
+        let message = form.jump.target.read(cx).error().unwrap_or_default();
+        assert!(
+            message.contains("跳板用户"),
+            "仍带用户名时错误不能丢：{message}"
+        );
+        form.jump
+            .target
+            .update(cx, |input, cx| input.set_text("bastion:2223", cx));
+    });
+    form.update(cx, |form, cx| {
+        assert_eq!(form.jump.target.read(cx).error(), None);
+    });
+}
+
+/// 回到新建态是程序化清空，不是用户编辑：空表单不预报必填错误。
+#[gpui::test]
+fn reset_new_does_not_pre_report_required_fields(cx: &mut gpui::TestAppContext) {
+    let font = zhimaterm_base::font::terminal_font("monospace");
+    let form = cx.new(|cx| ConnectForm::new(font, cx));
+    form.update(cx, |form, cx| {
+        form.host
+            .update(cx, |input, cx| input.set_text("a.example.com", cx));
+        form.user.update(cx, |input, cx| input.set_text("root", cx));
+        form.reset_new(cx);
+    });
+    form.update(cx, |form, cx| {
+        assert_eq!(form.host.read(cx).error(), None, "空表单不预报必填错误");
+        assert_eq!(form.user.read(cx).error(), None);
+    });
+    // 用户自己输入坏值仍即时校验
+    form.update(cx, |form, cx| {
+        form.port.update(cx, |input, cx| input.set_text("abc", cx));
+    });
+    form.update(cx, |form, cx| {
+        assert!(form.port.read(cx).error().is_some());
+    });
+}
+
 /// 列表上直接连（ADR-048）：已保存的条目不经表单装配成会话目标。素材不够
 /// 时报错而不是装出一个连不上的目标——仅密码的条目要交进密码，跳板只有
 /// 密码认证时没有输入口，直接报错让人去编辑视图。

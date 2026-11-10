@@ -18,6 +18,16 @@ pub(super) struct Destination {
     pub(super) port: Option<u16>,
 }
 
+/// 跳板目标框的规则：`主机[:端口]`，不带用户名。校验与提交共用这一份——
+/// `user@` 不静默并入「跳板用户」，直接指过去让用户自己定。
+pub(super) fn split_jump_target(input: &str) -> Result<Destination, String> {
+    let destination = split_destination(input)?;
+    if destination.user.is_some() {
+        return Err("不要带用户名：请把 @ 前的内容填到「跳板用户」字段".into());
+    }
+    Ok(destination)
+}
+
 /// 纯拆分，不触碰表单：把 `[user@]host[:port]` 解析成三段。
 /// 没有可拆的内容时 user/port 为 None，host 原样（去首尾空白）。
 pub(super) fn split_destination(input: &str) -> Result<Destination, String> {

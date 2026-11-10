@@ -37,7 +37,34 @@ use crate::forward_draft::{ForwardKind, ForwardRuleDraft, parse_port};
 
 use auth::{form_auth, form_jump};
 use forward::form_forwards;
-use parse::{MergeOutcome, merge_field, parse_target, split_destination};
+use parse::{MergeOutcome, merge_field, parse_target, split_destination, split_jump_target};
+
+/// 观察输入框的「上一次已知文字」：只有文字真的变了才算用户编辑。
+///
+/// 错误状态自身（`set_error`）与程序化回填（`load_saved`/`reset_new`）也会发
+/// 实体通知；若一并当作编辑重算，刚由 `fail` 写入的结论会被当场撤掉。
+#[derive(Default)]
+struct EditBaseline {
+    host: String,
+    port: String,
+    user: String,
+    jump_target: String,
+    jump_user: String,
+    jump_password: String,
+    password: String,
+    key_path: String,
+}
+
+/// 输入框文字相对基线是否变了（变了就更新基线）。`False` = 这次通知不是用户
+/// 改值：错误状态变化、掩码/已存标记刷新、程序化回填（基线已同步）。
+fn input_edited(input: &Entity<TextInput>, baseline: &mut String, cx: &App) -> bool {
+    let text = input.read(cx).text().to_owned();
+    if *baseline == text {
+        return false;
+    }
+    *baseline = text;
+    true
+}
 
 /// 跳板区的输入框集合（ADR-020）：由表单在构造时自建。
 struct JumpInputs {
@@ -176,6 +203,9 @@ pub struct ConnectForm {
     /// 底栏错误：段级组合校验（认证信息不够）与动作失败（落盘、钥匙串读写
     /// 这类）。单字段的错误挂在各自的输入框上，不经过这里
     error: Option<String>,
+    /// 观察输入框的上一次已知文字（见 [`EditBaseline`]）：程序化回填后同步，
+    /// 让观察者只把用户改值当编辑
+    edit_baseline: EditBaseline,
     /// 输入框用终端同一套等宽字体：光标定位与点击命中按字宽算，路径、主机名
     /// 这类文本也适合等宽。建转发草稿时复用。
     font: Font,
@@ -225,8 +255,10 @@ impl ConnectForm {
             forwards: Vec::new(),
             editing_id: None,
             error: None,
+            edit_baseline: EditBaseline::default(),
             font,
         };
+        form.rebase_edits(cx);
         form.track_field_errors(cx);
         form
     }
@@ -234,6 +266,10 @@ impl ConnectForm {
     /// 给会出错的字段挂输入框监听：用户一改某个字段，贴在它身上的错误当场撤掉
     /// ——错误是「上次提交失败的原因」，字段改了它就过时了，不该赖到提交为止
     /// （全局错误与字段无关，仍由下一次动作更新）。
+    ///
+    /// 实体通知不只来自用户改值：`set_error` 自身、掩码/已存标记刷新、载入条目
+    /// 的程序化回填都会通知。观察者先比对 [`EditBaseline`]，不是改值的通知直接
+    /// 跳过——否则刚写入的错误会被自己的通知触发重算清掉。
     fn track_field_errors(&mut self, cx: &mut Context<Self>) {
         // 单字段错误：编辑即重跑该字段的校验，错误随值即时消长
         let fields = [
@@ -246,22 +282,71 @@ impl ConnectForm {
         ];
         for (input, field) in fields {
             cx.observe(&input, move |this, _, cx| {
-                this.revalidate_field(&field, cx);
+                if this.text_edited(field, cx) {
+                    this.revalidate_field(&field, cx);
+                }
             })
             .detach();
         }
         // 认证信息是组合校验（agent + 私钥 + 密码）：这些输入一动，底栏的旧
-        // 结论就过时了，撤掉等下一次提交重算
-        for input in [&self.password, &self.key_path] {
-            cx.observe(input, |this, _, cx| this.clear_combined_error(cx))
-                .detach();
+        // 结论就过时了，撤掉等下一次提交重算。密码框的「显示」与已存标记刷新
+        // 不是改值，不撤。
+        let password = self.password.clone();
+        cx.observe(&password, |this, _, cx| {
+            if input_edited(&this.password, &mut this.edit_baseline.password, cx) {
+                this.clear_combined_error(cx);
+            }
+        })
+        .detach();
+        let key_path = self.key_path.clone();
+        cx.observe(&key_path, |this, _, cx| {
+            if input_edited(&this.key_path, &mut this.edit_baseline.key_path, cx) {
+                this.clear_combined_error(cx);
+            }
+        })
+        .detach();
+    }
+
+    /// 记录各观察输入框的当前文字，作为「用户编辑」判定的基线。程序化回填
+    /// （载入条目、回到新建态）之后调用：这些写入不是编辑，不能让观察者把
+    /// 刚由 `fail` 写下的结论当成过时信息撤掉。
+    fn rebase_edits(&mut self, cx: &App) {
+        let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
+        self.edit_baseline = EditBaseline {
+            host: text(&self.host),
+            port: text(&self.port),
+            user: text(&self.user),
+            jump_target: text(&self.jump.target),
+            jump_user: text(&self.jump.user),
+            jump_password: text(&self.jump.password),
+            password: text(&self.password),
+            key_path: text(&self.key_path),
+        };
+    }
+
+    /// 该字段的文字这次真的被改了？是则更新基线。
+    fn text_edited(&mut self, field: Field, cx: &App) -> bool {
+        match field {
+            Field::Host => input_edited(&self.host, &mut self.edit_baseline.host, cx),
+            Field::Port => input_edited(&self.port, &mut self.edit_baseline.port, cx),
+            Field::User => input_edited(&self.user, &mut self.edit_baseline.user, cx),
+            Field::JumpTarget => {
+                input_edited(&self.jump.target, &mut self.edit_baseline.jump_target, cx)
+            }
+            Field::JumpUser => input_edited(&self.jump.user, &mut self.edit_baseline.jump_user, cx),
+            Field::JumpPassword => input_edited(
+                &self.jump.password,
+                &mut self.edit_baseline.jump_password,
+                cx,
+            ),
+            Field::Auth | Field::Forward(_) => false,
         }
     }
 
-    /// 编辑了某个字段：重跑它自己的校验，错误随值即时消长。程序化回填
-    /// （load_saved / expand_host 的拆分回填）同样触发：载入的数据是完整的，
-    /// 重算结果为无错；expand_host 回填后用户与端口重算亦通过，冲突时没有
-    /// 回填、随后才报新错误——no-op 无害。
+    /// 编辑了某个字段：重跑它自己的校验，错误随值即时消长。提交时用什么规则，
+    /// 这里就用什么规则——跳板目标的 `user@` 禁令与提交共用
+    /// [`split_jump_target`]，不另写近似。expand_host 的拆分回填也会触发：
+    /// 回填的值是完整的，重算结果为无错；冲突时没有回填、随后才报新错误。
     fn revalidate_field(&mut self, field: &Field, cx: &mut Context<Self>) {
         let message = match field {
             Field::Host => self
@@ -286,10 +371,7 @@ impl ConnectForm {
                 if !self.jump_enabled {
                     None
                 } else {
-                    match self.jump.target.read(cx).text().trim() {
-                        "" => Some("请填写主机".to_owned()),
-                        text => split_destination(text).err(),
-                    }
+                    split_jump_target(self.jump.target.read(cx).text().trim()).err()
                 }
             }
             Field::JumpUser => {
@@ -563,8 +645,9 @@ impl ConnectForm {
     /// 口令不保存，所以只填到"该输密码"为止。转发规则的草稿输入框也在这里重建
     /// （表单自建实体后不再有"建不了实体"的接缝错位）。
     pub fn load_saved(&mut self, saved: &SavedConnection, cx: &mut Context<Self>) {
+        // 进入编辑态从干净状态起手：上一条留在输入框/草稿/底栏的错误不能带过来
+        self.clear_errors(cx);
         self.editing_id = Some(saved.id.clone());
-        self.error = None;
         self.use_agent = saved.credentials.use_agent;
         self.forward_agent = saved.forward_agent;
         self.remember_password = saved.remember_password;
@@ -677,12 +760,15 @@ impl ConnectForm {
         self.jump_open = saved.jump.is_some();
         self.options_open = saved.forward_agent;
         self.forwards_open = !saved.forwards.is_empty();
+        // 回填的文字是基线：随后的观察者通知（含 set_error 与掩码刷新）不算编辑
+        self.rebase_edits(cx);
     }
 
     /// 回到新建态：清空全部字段、退出编辑。编辑视图「新建连接」入口用。
-    pub fn reset_new(&mut self, cx: &mut App) {
+    pub fn reset_new(&mut self, cx: &mut Context<Self>) {
+        // 新建态从干净状态起手：上一条的错误不跟着过来，空表单也不预报必填错误
+        self.clear_errors(cx);
         self.editing_id = None;
-        self.error = None;
         self.use_agent = true;
         self.forward_agent = false;
         self.remember_password = false;
@@ -713,6 +799,8 @@ impl ConnectForm {
             .update(cx, |input, cx| input.set_secret_stored(false, cx));
         self.password
             .update(cx, |input, cx| input.set_masked(true, cx));
+        // 清空的文字是基线：这些程序化写入不是编辑，不触发必填校验
+        self.rebase_edits(cx);
     }
 
     /// 表单 → 要保存的那条连接。只含能重建连接的字段，任何口令都不在内。
@@ -848,14 +936,8 @@ impl ConnectForm {
     fn parse_jump_target(&self, cx: &App) -> Result<(String, u16, String), FormError> {
         let target = self.jump.target.read(cx).text().trim().to_owned();
         let user = self.jump.user.read(cx).text().trim().to_owned();
-        let destination = split_destination(&target)
+        let destination = split_jump_target(&target)
             .map_err(|message| FormError::at(Field::JumpTarget, message))?;
-        if destination.user.is_some() {
-            return Err(FormError::at(
-                Field::JumpTarget,
-                "不要带用户名：请把 @ 前的内容填到「跳板用户」字段",
-            ));
-        }
         if user.is_empty() {
             return Err(FormError::at(Field::JumpUser, "请填写用户名"));
         }
