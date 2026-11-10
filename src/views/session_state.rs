@@ -422,11 +422,13 @@ pub(super) fn fold_signal(
 }
 
 /// 结束态的共同落点：结束、焦点必离输入网格（OffGrid 落到格内非输入容器
-/// ——理由见 `FocusAction::OffGrid`）、一次性聚焦标志作废。状态文案与
-/// 重连裁决由调用方补。
+/// ——理由见 `FocusAction::OffGrid`）、一次性聚焦标志全部作废——包括
+/// 「交回网格」：重连发起与失败可能同帧到达，连接已死时那条指令会把焦点
+/// 交给死网格并让 blur 永远挂起。状态文案与重连裁决由调用方补。
 fn enter_ended(state: &mut SessionViewState, status: String) {
     state.data.exited = true;
     state.data.password_focus_pending = false;
+    state.data.terminal_focus_pending = false;
     state.data.blur_pending = true;
     state.data.status = status;
 }
@@ -719,6 +721,29 @@ mod tests {
         assert_eq!(
             effects,
             vec![SessionEffect::Receipt("会话日志已停写：磁盘已满".into())]
+        );
+    }
+
+    #[test]
+    fn failed_reconnect_does_not_hand_focus_back_to_the_grid() {
+        let mut state = ssh_state(None);
+        reduce(&mut state, ControlEvent::Started, Instant::now(), &no_store);
+        // R 重连发起：keydown 处理器里同步 fold，焦点预定交回网格
+        fold_signal(&mut state, SessionSignal::ReconnectStarting, Instant::now());
+        // 连接失败可能与发起同帧到达（认证拒绝只花几百毫秒）：两个一次性
+        // 焦点标志同挂。连接已死，「交回网格」的指令必须被结束态作废——
+        // 否则焦点被交给死网格（文本输入处理者，平台继续把按键路由进残留
+        // 的输入处理器，R 蒸发），blur 挂起永不消费
+        reduce(
+            &mut state,
+            ControlEvent::Failed("SSH 认证未通过".into()),
+            Instant::now(),
+            &no_store,
+        );
+        assert_eq!(
+            state.take_focus_action(false),
+            Some(FocusAction::OffGrid),
+            "失败后焦点应离输入网格、落到锚点，R 无需先点击即可重连"
         );
     }
 
