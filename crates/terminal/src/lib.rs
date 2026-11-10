@@ -556,6 +556,12 @@ impl TerminalModel {
         self.core.display_offset()
     }
 
+    /// 滚动历史当前行数。转录基线推进（日志关闭期不逐行行走）等低频
+    /// 读者用；高频画面路径走快照携带的值。
+    pub fn history_size(&self) -> usize {
+        self.core.history_size()
+    }
+
     /// 执行一次搜索（ADR-015）：正则开关关时模式串按字面匹配（转义元字符），
     /// 开时原样编译；大小写智能：模式全小写不区分大小写。
     ///
@@ -740,6 +746,11 @@ impl TerminalModel {
         let viewport_cursor_line = cursor_state.line + display_offset as i32;
         let mut rows = Vec::with_capacity(self.size.lines);
         let mut cursor_cell = None;
+        // 两个复用 scratch：格文本（开新段才克隆，段内合并零分配）与 URL
+        // 识别的行文本/格偏移（跨行复用，见 plain_url_links 的快门）
+        let mut cell_text = String::new();
+        let mut url_text = String::new();
+        let mut url_offsets: Vec<(usize, usize, usize)> = Vec::new();
 
         for row in 0..self.size.lines {
             // 视口帧的第 row 行就是画面第 row 行（回看偏移已反映在帧内）
@@ -750,7 +761,7 @@ impl TerminalModel {
                 .map_or(&[], |buffer| buffer.cells.as_slice());
             // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史
             let grid_line = row as i32 - display_offset as i32;
-            let plain_links = self.plain_url_links(cells);
+            let plain_links = self.plain_url_links(cells, &mut url_text, &mut url_offsets);
             let mut runs: Vec<TerminalRun> = Vec::new();
             let mut current: Option<RunStyle> = None;
             let mut current_link: Option<Arc<str>> = None;
@@ -799,17 +810,18 @@ impl TerminalModel {
                 let wide = cell.width == 2;
                 let columns = if wide { 2 } else { 1 };
 
-                let mut text = String::with_capacity(4);
-                text.push(cell.c);
+                cell_text.clear();
+                cell_text.push(cell.c);
                 if let Some(zerowidth) = &cell.zerowidth {
-                    text.push_str(zerowidth);
+                    cell_text.push_str(zerowidth);
                 }
 
                 // 链接也是段的一部分：鼠标悬停与点击都按段判定，跨链接不能合并。
                 // 显式 OSC 8 优先，纯文本识别兜底，两者都以 uri 参与段切分。
+                // 快门命中的行链接表为空，get 安全取用。
                 let link = match &cell.link {
                     Some(hyperlink) => Some(hyperlink.clone()),
-                    None => plain_links[column].clone(),
+                    None => plain_links.get(column).cloned().flatten(),
                 };
 
                 // 宽字符必须单独成段：它来自回退字体，字宽未必正好两格，
@@ -818,12 +830,12 @@ impl TerminalModel {
                     current == Some(style) && !wide && !previous_wide && current_link == link;
                 match runs.last_mut() {
                     Some(run) if mergeable => {
-                        run.text.push_str(&text);
+                        run.text.push_str(&cell_text);
                         run.columns += columns;
                     }
                     _ => {
                         runs.push(TerminalRun {
-                            text,
+                            text: cell_text.clone(),
                             columns,
                             foreground: style.foreground,
                             background: style.background,
@@ -870,11 +882,20 @@ impl TerminalModel {
 
     /// 行内纯文本 URL → 按列的链接表（与 OSC 8 无关的 hints 识别）。
     /// 只在单行内识别，折行的长 URL 各行各自成链。
-    fn plain_url_links(&self, cells: &[GridCell]) -> Vec<Option<Arc<str>>> {
-        let mut links = vec![None::<Arc<str>>; self.size.columns];
+    ///
+    /// 快门：[`PLAIN_URL`] 的任何匹配都含字面 `"://"`，行文本搜不到它就
+    /// 直接返回空表——绝大多数行没有链接，正则与按列的链接表对它们是
+    /// 每帧纯浪费。文本与格偏移拼进调用方的 scratch（跨行跨帧复用容量），
+    /// 只有命中快门的行才分配链接表。
+    fn plain_url_links(
+        &self,
+        cells: &[GridCell],
+        text: &mut String,
+        offsets: &mut Vec<(usize, usize, usize)>,
+    ) -> Vec<Option<Arc<str>>> {
+        text.clear();
+        offsets.clear();
         // 行文本与每个格的字节起点/列号/占格数（跳过宽字符尾格，与快照切分一致）
-        let mut text = String::with_capacity(self.size.columns * 4);
-        let mut offsets: Vec<(usize, usize, usize)> = Vec::with_capacity(self.size.columns);
         for (column, cell) in backend::display_cells(cells) {
             let wide = cell.width == 2;
             offsets.push((text.len(), column, if wide { 2 } else { 1 }));
@@ -883,8 +904,12 @@ impl TerminalModel {
                 text.push_str(zerowidth);
             }
         }
+        if !text.contains("://") {
+            return Vec::new();
+        }
+        let mut links = vec![None::<Arc<str>>; self.size.columns];
 
-        for found in PLAIN_URL.find_iter(&text) {
+        for found in PLAIN_URL.find_iter(text) {
             let url = trim_url_tail(found.as_str());
             // 剥到只剩 scheme 说明整条都是句子标点，放弃
             if !url.contains("://") {

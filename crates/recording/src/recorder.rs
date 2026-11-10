@@ -237,6 +237,22 @@ pub fn log_path(pane: EntityId) -> Option<PathBuf> {
         .and_then(|entry| entry.log_path.clone())
 }
 
+/// 立即落盘本格缓冲里的正文（ADR-017 修订）：正文写入走内存缓冲、按
+/// 阈值/定时/边界标记落盘，「打开日志」这类要把文件交给外部前、以及
+/// 需要按文件内容断言的测试，先经这里同步。
+pub fn flush_now(pane: EntityId) {
+    let sink = registry()
+        .read()
+        .unwrap()
+        .get(&pane)
+        .map(|entry| entry.log.clone());
+    if let Some(sink) = sink
+        && let Some(log) = lock_sink(&sink).as_mut()
+    {
+        log.flush();
+    }
+}
+
 // ---------- 操作记录门面（UI 侧，显式带格） ----------
 
 /// 记一条已结束的操作：内部 update 实体并 notify，打开的模态与面板传输

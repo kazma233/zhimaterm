@@ -36,6 +36,10 @@ const STARTUP_SIZE_WAIT: Duration = Duration::from_millis(250);
 const DRAIN_BUDGET: Duration = Duration::from_millis(2);
 /// reader -> worker 的有界队列：worker 落后时由 PTY 内核缓冲背压，而不是无限堆积内存。
 const OUTPUT_QUEUE_CAPACITY: usize = 32;
+/// resize 尾沿节流的静默期（ADR-052）：连续 Resize（拖窗口/拖分屏边）期间
+/// 模型 reflow 与 PTY 的 SIGWINCH 按此节奏应用最新值，静止后最迟一个静默期
+/// 收敛；单次 resize（开合面板）无前置应用，立即生效、零新增延迟。
+const RESIZE_QUIET: Duration = Duration::from_millis(50);
 
 /// worker 的会话级可变状态：本地拖选与 UI 上报的度量。
 #[derive(Default)]
@@ -54,6 +58,83 @@ enum Wakeup {
     Tick,
     /// 子进程退出信号（Windows 本地会话；EOF 不可靠时的唤醒源）
     ChildExit,
+}
+
+/// Resize 的完整几何（列、行、格像素）：节流暂存与应用共用一份载荷。
+type ResizeGeometry = (usize, usize, (u16, u16));
+
+/// Resize 尾沿节流的决策核（ADR-052）：纯时间逻辑、无终端与传输副作用，
+/// 应用动作由调用方执行。规则：距上次应用已过静默期的命令立即应用；
+/// 静默期内的命令只暂存最新值，到点检查时应用并重置窗口。连续命令流
+/// 因此按 ≥ 静默期的节奏应用最新值（拖拽期间内容持续跟进），队列里排队的
+/// 中间尺寸自然合并为最新一条。
+struct ResizeGate {
+    pending: Option<ResizeGeometry>,
+    last_applied: Option<Instant>,
+}
+
+impl ResizeGate {
+    fn new() -> Self {
+        Self {
+            pending: None,
+            last_applied: None,
+        }
+    }
+
+    /// 收到一条 Resize：立即应用返回 Some；静默期内暂存最新值返回 None。
+    fn offer(&mut self, geometry: ResizeGeometry, now: Instant) -> Option<ResizeGeometry> {
+        let due = self
+            .last_applied
+            .is_none_or(|at| now.duration_since(at) >= RESIZE_QUIET);
+        if due {
+            self.last_applied = Some(now);
+            Some(geometry)
+        } else {
+            self.pending = Some(geometry);
+            None
+        }
+    }
+
+    /// 到点检查：暂存值距上次应用已过静默期就交出应用；未到点返回 None。
+    fn due(&mut self, now: Instant) -> Option<ResizeGeometry> {
+        let geometry = self.pending?;
+        if self
+            .last_applied
+            .is_some_and(|at| now.duration_since(at) < RESIZE_QUIET)
+        {
+            return None;
+        }
+        self.pending = None;
+        self.last_applied = Some(now);
+        Some(geometry)
+    }
+
+    /// 下一次需要醒来的等待：有暂存值时到静默期满为止，没有则不参与等待。
+    fn next_wakeup(&self, now: Instant) -> Option<Duration> {
+        self.pending?;
+        let applied = self.last_applied?;
+        Some(RESIZE_QUIET.saturating_sub(now.duration_since(applied)))
+    }
+}
+
+/// 应用一次 resize（节流后的唯一副作用点）：模型 reflow、恢复门控灌入与
+/// PTY/SIGWINCH 在这里一次完成——三类代价对一串中间尺寸只各付一次。
+fn apply_resize(
+    (columns, lines, cell_size): ResizeGeometry,
+    transport: &mut Transport,
+    terminal: &mut TerminalModel,
+    state: &mut SessionState,
+    restore_hold: &mut Option<RestoreHold>,
+) -> Result<()> {
+    let columns = columns.max(2);
+    let lines = lines.max(1);
+    state.cell_size = cell_size;
+    let lines_grew = lines > terminal.size().1;
+    terminal.set_cell_pixels(cell_size.0, cell_size.1);
+    terminal.resize(columns, lines);
+    // 灌入先于 SIGWINCH 发出：shell 因尺寸变化重画的提示符落在清屏后的空屏上
+    advance_restore_hold(restore_hold, terminal, lines_grew);
+    transport.resize(columns, lines, state.cell_size)
 }
 
 /// 尺寸就绪阶段的产出（ADR-046）：open、模型与回滚恢复都要在最终行列上发生。
@@ -290,6 +371,7 @@ pub(super) fn run(
     // 完全不采样工作目录（macOS 上每 2 秒一次 lsof，并行用例里没必要）
     let mut scrollback_state = scrollback.map(|path| ScrollbackState::new(path, shell_pid));
     let mut transcript = TranscriptState::new();
+    let mut resize_gate = ResizeGate::new();
     let mut pending_frame: Option<TerminalSnapshot> = None;
     let mut dirty = true;
     // 起始时间回拨一个帧间隔，保证首帧立即发出
@@ -336,6 +418,7 @@ pub(super) fn run(
             &mut terminal,
             &mut state,
             &mut restore_hold,
+            &mut resize_gate,
             &control,
         )?;
         closing |= outcome.closing;
@@ -352,6 +435,7 @@ pub(super) fn run(
                 &mut terminal,
                 &mut state,
                 &mut restore_hold,
+                &mut resize_gate,
                 &control,
             )?;
             closing |= outcome.closing;
@@ -368,10 +452,22 @@ pub(super) fn run(
                 &mut terminal,
                 &mut state,
                 &mut restore_hold,
+                &mut resize_gate,
                 &control,
             )?;
             closing |= outcome.closing;
             dirty |= outcome.dirty;
+        }
+        // 1.5) 节流暂存的 resize 到点应用（Tick 唤醒回来或排空后的顺路检查）
+        if let Some(geometry) = resize_gate.due(Instant::now()) {
+            apply_resize(
+                geometry,
+                &mut transport,
+                &mut terminal,
+                &mut state,
+                &mut restore_hold,
+            )?;
+            dirty = true;
         }
 
         // 2) 输出合并：一轮内把待处理输出解析完，只发一帧。
@@ -523,10 +619,13 @@ pub(super) fn run(
         let scrollback_wait = scrollback_state
             .as_ref()
             .and_then(|state| state.next_wakeup());
+        // 节流暂存的 resize 到点即醒（ADR-052）：否则静默期满后没有任何唤醒源
+        let resize_wait = resize_gate.next_wakeup(Instant::now());
         let tick_after = [
             needs_tick.then_some(FRAME_INTERVAL),
             sync_wait,
             scrollback_wait,
+            resize_wait,
         ]
         .into_iter()
         .flatten()
@@ -701,12 +800,22 @@ impl TranscriptState {
 
     /// 采样一轮：返回要写盘的行。恢复轮（上一轮没在记、这一轮开了）与暂停轮
     /// 只推进基线不返回行——暂停期间的输出不记也不攒（写盘方是记录门面，
-    /// 暂停时本来就 no-op，这里直接不出行省一次分配）。
+    /// 暂停时本来就是 no-op）。暂停期连逐行行走也省掉：结果注定丢弃，直接
+    /// 把基线推到当前历史并清掉半行，观察行为与「走完再丢」完全一致；
+    /// 备用屏不产生主网格历史，基线原样保留（重开时从头接续）。
     fn sample(&mut self, terminal: &mut TerminalModel, logging_now: bool) -> Vec<String> {
+        if !logging_now {
+            if !terminal.is_alt_screen() {
+                self.logged = terminal.history_size();
+                self.pending.clear();
+            }
+            self.was_logging = false;
+            return Vec::new();
+        }
         let lines = terminal.transcript_lines(&mut self.logged, &mut self.pending);
-        let resumed = logging_now && !self.was_logging;
-        self.was_logging = logging_now;
-        if !logging_now || resumed {
+        let resumed = !self.was_logging;
+        self.was_logging = true;
+        if resumed {
             return Vec::new();
         }
         lines
@@ -738,6 +847,9 @@ struct CommandOutcome {
     dirty: bool,
 }
 
+/// 会话的全部可变状态都经这里传递；参数位超过 clippy 默认阈值，按本仓库
+/// 既有取舍放行（同 `TerminalView::new`）。
+#[allow(clippy::too_many_arguments)]
 fn apply_command(
     command: SessionCommand,
     transport: &mut Transport,
@@ -745,6 +857,7 @@ fn apply_command(
     terminal: &mut TerminalModel,
     state: &mut SessionState,
     restore_hold: &mut Option<RestoreHold>,
+    resize_gate: &mut ResizeGate,
     control: &Sender<ControlEvent>,
 ) -> Result<CommandOutcome> {
     match command {
@@ -887,19 +1000,23 @@ fn apply_command(
             cell_width,
             cell_height,
         } => {
-            let columns = columns.max(2);
-            let lines = lines.max(1);
-            state.cell_size = (cell_width, cell_height);
-            let lines_grew = lines > terminal.size().1;
-            terminal.set_cell_pixels(cell_width, cell_height);
-            terminal.resize(columns, lines);
-            // 灌入先于 SIGWINCH 发出：shell 因尺寸变化重画的提示符落在清屏后的空屏上
-            advance_restore_hold(restore_hold, terminal, lines_grew);
-            transport.resize(columns, lines, state.cell_size)?;
-            Ok(CommandOutcome {
-                closing: false,
-                dirty: true,
-            })
+            // 尾沿节流（ADR-052）：立即应用或暂存最新值，副作用统一在
+            // apply_resize——一串中间尺寸只做一次 reflow 与一次 SIGWINCH
+            let applied =
+                resize_gate.offer((columns, lines, (cell_width, cell_height)), Instant::now());
+            match applied {
+                Some(geometry) => {
+                    apply_resize(geometry, transport, terminal, state, restore_hold)?;
+                    Ok(CommandOutcome {
+                        closing: false,
+                        dirty: true,
+                    })
+                }
+                None => Ok(CommandOutcome {
+                    closing: false,
+                    dirty: false,
+                }),
+            }
         }
         // 连接期密码询问的答复只在连接等待循环里被消费（UiAsks）；会话建立
         // 后再收到（UI 迟到的应答）无处可去，忽略
@@ -1209,8 +1326,8 @@ mod tests {
     use super::join_with_deadline;
     use super::text_area_size_reply;
     use super::wait_startup_size;
+    use super::{RESIZE_QUIET, ResizeGate, RestoreHold, advance_restore_hold, restore_poured};
     use super::{RequestAction, TranscriptState, plan_requests};
-    use super::{RestoreHold, advance_restore_hold, restore_poured};
     use crate::{ControlEvent, PointerShape, SessionCommand, StartupSize};
     use smol::channel::bounded;
     use std::sync::mpsc;
@@ -1227,6 +1344,75 @@ mod tests {
             cell_width: 8,
             cell_height: 16,
         }
+    }
+
+    /// 节流决策核（ADR-052）：首条命令无前置应用，立即交出；没有暂存值时
+    /// 不参与等待集合。
+    #[test]
+    fn resize_gate_applies_the_first_command_immediately() {
+        let now = Instant::now();
+        let mut gate = ResizeGate::new();
+        assert_eq!(gate.offer((80, 24, (8, 16)), now), Some((80, 24, (8, 16))));
+        assert!(gate.next_wakeup(now).is_none(), "没有暂存就没有唤醒");
+    }
+
+    /// 节流决策核：静默期内只暂存最新值，到点交出最后一条并重置窗口。
+    #[test]
+    fn resize_gate_stashes_only_the_latest_within_the_quiet_window() {
+        let base = Instant::now();
+        let mut gate = ResizeGate::new();
+        assert!(gate.offer((80, 24, (8, 16)), base).is_some());
+        assert!(
+            gate.offer((100, 30, (8, 16)), base + Duration::from_millis(10))
+                .is_none()
+        );
+        assert!(
+            gate.offer((120, 40, (8, 16)), base + Duration::from_millis(20))
+                .is_none()
+        );
+        assert!(
+            gate.due(base + Duration::from_millis(30)).is_none(),
+            "静默期内不交出"
+        );
+        assert_eq!(
+            gate.due(base + RESIZE_QUIET),
+            Some((120, 40, (8, 16))),
+            "到点交出暂存的最新值"
+        );
+        // 交出即重置窗口：紧随其后的命令重新进暂存
+        assert!(
+            gate.offer(
+                (90, 25, (8, 16)),
+                base + RESIZE_QUIET + Duration::from_millis(5)
+            )
+            .is_none()
+        );
+    }
+
+    /// 节流决策核：拖拽形态（每 16ms 一条命令）按 ≥ 静默期的节奏应用最新值，
+    /// 命令流停止后最迟一个静默期收敛——期间内容持续跟进而不是冻结到松手。
+    #[test]
+    fn resize_gate_applies_continuous_streams_at_quiet_cadence() {
+        let base = Instant::now();
+        let frame = Duration::from_millis(16);
+        let mut gate = ResizeGate::new();
+        let mut applied: Vec<u64> = Vec::new();
+        for index in 0..10u64 {
+            let now = base + frame * index as u32;
+            if gate
+                .offer((190 + index as usize, 50, (8, 16)), now)
+                .is_some()
+            {
+                applied.push(index);
+            }
+            if gate.due(now).is_some() {
+                applied.push(index);
+            }
+        }
+        // 应用时刻（0、64ms、128ms，帧序 0/4/8）间隔不小于静默期
+        assert_eq!(applied, vec![0, 4, 8], "应用节奏应由静默期决定");
+        // 停止后：最后一条暂存值在 ≤ 静默期内交出
+        assert!(gate.due(base + frame * 9 + RESIZE_QUIET).is_some());
     }
 
     #[test]

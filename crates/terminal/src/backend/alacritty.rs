@@ -177,7 +177,11 @@ impl GridView for AlacrittyCore {
 impl TerminalCore for AlacrittyCore {
     fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
-        self.refresh_palette();
+        // 调色板只在程序发 OSC 4/10/11/12 改写时变，改写序列必含 ESC：
+        // 纯文本块（cat 大文件的主力形态）跳过整组重读（与 ghostty 后端同款门）
+        if bytes.contains(&0x1b) {
+            self.refresh_palette();
+        }
     }
 
     fn resize(&mut self, columns: usize, lines: usize) {

@@ -602,7 +602,8 @@ impl SessionEvents {
 
 /// 会话命令的发送结果。通道层的两态天然不同，调用方对它们的正确反应也不同：
 /// 队列满是背压（等一等再发），通道关闭是会话终态（不再发）。
-/// 尽力而为的命令（焦点/鼠标/resize/主题）不走这条带反馈的路径，沿用丢弃语义。
+/// 尽力而为的命令（焦点/鼠标/主题）不走这条带反馈的路径，沿用丢弃语义；
+/// resize 例外——它的丢弃不可自愈（几何不变就不会再发），必须带反馈。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {
     /// 命令队列有界且已满：worker 正在排空积压，稍后重试即可
@@ -661,13 +662,21 @@ impl Session {
         self.send(SessionCommand::Input(text))
     }
 
-    pub fn resize(&self, columns: usize, lines: usize, cell_width: u16, cell_height: u16) {
-        let _ = self.inner.commands.try_send(SessionCommand::Resize {
+    /// 上报格子几何变化。返回投递结果：队列满是背压，调用方应保留几何键
+    /// 下次重发（静默丢弃会让终端模型与 PTY 永久停在旧尺寸，直到下次变化）。
+    pub fn resize(
+        &self,
+        columns: usize,
+        lines: usize,
+        cell_width: u16,
+        cell_height: u16,
+    ) -> Result<(), CommandError> {
+        self.send(SessionCommand::Resize {
             columns,
             lines,
             cell_width,
             cell_height,
-        });
+        })
     }
 
     /// 在滚动历史与视口里搜索（ADR-015）。结果经 `ControlEvent::SearchResult`

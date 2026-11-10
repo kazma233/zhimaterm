@@ -2,12 +2,22 @@
 //!
 //! 文件按格（视图）分配，追加模式；每次会话尝试（初次连接、重连）各写一对
 //! 首尾标记，正文是 worker 收到的原始输出字节。写入只发生在会话线程。
+//! 正文行先进内存缓冲，按阈值或定时整包落盘（ADR-017 修订）：开启记录的
+//! 刷屏会话不再每行一次 write(2)；边界标记、开关切换、会话收尾与 Drop
+//! 都即刷，硬崩溃的损失上限是缓冲里未落盘的一段。
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+/// 落盘缓冲上限：刷屏期由它主导触发（约百毫秒级一次整包写）。
+const FLUSH_BYTES: usize = 64 * 1024;
+/// 落盘定时间隔：慢输出期的兜底节奏。硬崩溃的日志损失窗口以此为上界
+/// （缓冲上限之外）；正常路径全部即刷，无损失。
+const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 在应用配置目录的 `logs/` 下打开（或追加）本格的日志文件。
 pub fn create(label: &str) -> Result<SessionLog> {
@@ -22,6 +32,10 @@ pub struct SessionLog {
     failure: Option<String>,
     /// 打开的日志文件路径：调用方展示与外部打开用（写入仍只经句柄）
     path: std::path::PathBuf,
+    /// 未落盘的正文字节：达阈值、到定时或遇边界标记即整包写出
+    buffer: Vec<u8>,
+    /// 上次落盘时刻：定时触发的基准，正文写入时顺带检查（纳秒级）
+    flushed_at: Instant,
 }
 
 impl SessionLog {
@@ -40,6 +54,8 @@ impl SessionLog {
             file: Some(file),
             failure: None,
             path,
+            buffer: Vec::new(),
+            flushed_at: Instant::now(),
         })
     }
 
@@ -55,34 +71,38 @@ impl SessionLog {
             file: Some(file),
             failure: None,
             path: path.to_path_buf(),
+            buffer: Vec::new(),
+            flushed_at: Instant::now(),
         })
     }
 
     /// 一次会话尝试的左边界：本地时间戳 + 来源标签，文件被单独拷走也能自述来历。
+    /// 边界标记即刷：文件被外部打开时边界永远完整。
     pub fn begin_session(&mut self, label: &str) {
         let line = format!(
             "==== 会话开始 {} {label} ====\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         );
         self.write_raw(line.as_bytes());
+        self.flush();
     }
 
-    /// 正文：终端渲染后的一行（ADR-017 修订），行尾补换行。
+    /// 正文：终端渲染后的一行（ADR-017 修订），行尾补换行。进缓冲，按
+    /// 阈值或定时落盘——刷屏期不再每行一个 write(2)。
     pub fn write_line(&mut self, line: &str) {
-        let mut bytes = String::with_capacity(line.len() + 1);
-        bytes.push_str(line);
-        bytes.push('\n');
-        self.write_raw(bytes.as_bytes());
+        self.write_raw(line.as_bytes());
+        self.write_raw(b"\n");
     }
 
     /// 一次会话尝试的右边界：本地时间戳。换行前缀保证标记独立成行——
-    /// 上一次输出可能没有以换行收尾。
+    /// 上一次输出可能没有以换行收尾。边界标记即刷。
     pub fn end_session(&mut self) {
         let line = format!(
             "\n==== 会话结束 {} ====\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         );
         self.write_raw(line.as_bytes());
+        self.flush();
     }
 
     /// 首次写失败的原因；取走后停写状态不变，后续调用返回 None。
@@ -91,13 +111,14 @@ impl SessionLog {
     }
 
     /// 运行时开关的边界标记：与连接首尾标记同一格式族，文案区分——
-    /// 暂停期间的输出不记录，文件里用标记解释这段空白。
+    /// 暂停期间的输出不记录，文件里用标记解释这段空白。边界标记即刷。
     pub fn mark(&mut self, text: &str) {
         let line = format!(
             "\n==== {text} {} ====\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         );
         self.write_raw(line.as_bytes());
+        self.flush();
     }
 
     /// 本日志写入的文件路径。
@@ -105,16 +126,39 @@ impl SessionLog {
         &self.path
     }
 
-    /// 追加写入；任何错误都只停写并记一次原因，不向上传播——日志失败
-    /// 绝不能变成会话失败（ADR-017 的故障行为）。
+    /// 追加进缓冲；达阈值或到定时即整包落盘。停写后（file=None）不再
+    /// 接收——缓冲里也不会再有残留。
     fn write_raw(&mut self, bytes: &[u8]) {
+        if self.file.is_none() {
+            return;
+        }
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() >= FLUSH_BYTES || self.flushed_at.elapsed() >= FLUSH_INTERVAL {
+            self.flush();
+        }
+    }
+
+    /// 把缓冲整包写出并清空；任何错误都只停写并记一次原因，不向上传播——
+    /// 日志失败绝不能变成会话失败（ADR-017 的故障行为）。
+    /// `pub(crate)`：门面为「打开日志前同步」与测试提供立即落盘入口。
+    pub(crate) fn flush(&mut self) {
+        self.flushed_at = Instant::now();
         let Some(file) = self.file.as_mut() else {
             return;
         };
-        if let Err(error) = file.write_all(bytes) {
+        let pending = std::mem::take(&mut self.buffer);
+        if let Err(error) = file.write_all(&pending) {
             self.file = None;
             self.failure = Some(format!("{error}"));
         }
+    }
+}
+
+impl Drop for SessionLog {
+    /// 最后一道即刷：正常释放（开关关闭、会话收尾、格注销）时缓冲必空。
+    /// 写失败停写后 file 已是 None，这里是 no-op。
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
@@ -143,6 +187,8 @@ pub fn from_file_for_test(file: File) -> SessionLog {
         file: Some(file),
         failure: None,
         path: std::path::PathBuf::new(),
+        buffer: Vec::new(),
+        flushed_at: Instant::now(),
     }
 }
 
@@ -285,5 +331,68 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.is_empty(), "失败后的字节都不落盘：{content:?}");
+    }
+
+    /// 缓冲落盘的两个触发（ADR-017 修订）：未达阈值未到定时的正文留在内存；
+    /// 越过 64 KiB 阈值当次写入即把已累积的一批整包落盘（阈值之后的尾部
+    /// 留在缓冲，等下一次触发或 Drop——那是契约，不是丢失）。
+    #[test]
+    fn buffered_lines_flush_on_threshold_and_stay_put_before_it() {
+        let dir = temp_dir("buffered");
+        let mut log = SessionLog::create_at(&dir, "deploy@web-1:22").unwrap();
+        log.begin_session("deploy@web-1:22");
+        let path = log.path().to_path_buf();
+
+        // 少量正文：不足以触发任何落盘条件，文件里只有即刷的边界标记
+        log.write_line("quiet line");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("quiet line"),
+            "阈值内的正文应留在缓冲：{content:?}"
+        );
+
+        // 2000 行 × ~58 字节 ≈ 116 KiB：途中至少一次越阈整包落盘
+        for index in 0..2000 {
+            log.write_line(&format!("LINE-{index:04}-{}", "x".repeat(48)));
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("quiet line"), "首批整包落盘不丢早期行");
+        assert!(content.contains("LINE-0100"), "越阈批次的行应已落盘");
+        assert!(
+            !content.contains("LINE-1999"),
+            "末批之后的尾部按契约留在缓冲：{content:?}"
+        );
+
+        drop(log);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.matches("LINE-").count(),
+            2000,
+            "Drop 即刷后全部正文行落盘且无重复"
+        );
+        assert!(content.contains("LINE-1999"));
+    }
+
+    /// Drop 即刷：正常释放时缓冲里剩下的正文必须落盘（开关关闭与格注销
+    /// 走同一条 Drop 路径），硬崩溃的损失窗口承诺只属于异常终止。
+    #[test]
+    fn drop_flushes_the_remaining_buffer() {
+        let dir = temp_dir("drop-flush");
+        let mut log = SessionLog::create_at(&dir, "deploy@web-1:22").unwrap();
+        log.begin_session("deploy@web-1:22");
+        let path = log.path().to_path_buf();
+        log.write_line("tail before drop");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("tail before drop")
+        );
+
+        drop(log);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("tail before drop"),
+            "Drop 应把缓冲里的正文落盘：{content:?}"
+        );
     }
 }

@@ -21,11 +21,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::support::{
-    send_key, spawn, ssh_session, ssh_setup, trust_and_start, type_line, wait_for_control,
-    wait_for_exit, wait_for_frame, wait_for_sftp, wait_for_task, wait_sftp_event,
+    send_key, spawn, spawn_local, ssh_session, ssh_setup, trust_and_start, type_line,
+    wait_for_control, wait_for_exit, wait_for_frame, wait_for_sftp, wait_for_task, wait_sftp_event,
 };
 use crate::sftp::{SftpEvent, SftpEvents, TaskOutcome, TaskProgress};
-use crate::{ControlEvent, ExitReason, Session, SessionEvents};
+use crate::{
+    CommandError, ControlEvent, ExitReason, LocalShell, Session, SessionConfig, SessionEvents,
+    SessionTarget, StartupSize,
+};
 use zhimaterm_terminal::TerminalModel;
 
 /// 1 GiB：§8 的大文件传输体积。
@@ -34,7 +37,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const INPUT_PROBES: usize = 200;
 /// 输入 P95 延迟上限。
 const INPUT_P95_LIMIT: Duration = Duration::from_millis(50);
-/// 传输进行中按键回显的上限（与输入 P95 同源）。
+/// 传输期间按键回显的上限（与输入 P95 同源）。
 const TRANSFER_ECHO_LIMIT: Duration = Duration::from_millis(50);
 /// 取消请求到终态的上限。
 const CANCEL_LIMIT: Duration = Duration::from_millis(2000);
@@ -43,6 +46,12 @@ const STALL_LIMIT: Duration = Duration::from_millis(5000);
 /// 会话数与资源残留容差（§8：100 会话后不遗留）。
 const SESSION_CHURN: usize = 100;
 const LEAK_TOLERANCE: i64 = 5;
+/// resize 风暴的历史规模与突发条数（ADR-052 尾沿节流的验收形状）。
+const RESIZE_HISTORY: usize = 50_000;
+const RESIZE_BURST: usize = 240;
+/// 末条 Resize 命令到终尺寸画面帧的上限：节流静默期 50ms + 帧间隔 8ms +
+/// 计时与调度余量。未节流实现要串行做完 240 次全量 reflow，实测显著超限。
+const RESIZE_APPLY_LIMIT: Duration = Duration::from_millis(300);
 
 fn perf_enabled() -> bool {
     std::env::var("ZHIMATERM_PERF").is_ok_and(|value| value == "1")
@@ -816,4 +825,109 @@ fn perf_hundred_sessions_leave_nothing_behind() {
         fds_delta <= LEAK_TOLERANCE,
         "不应遗留文件描述符：{before_fds} → {after_fds}"
     );
+}
+
+/// 灌满历史的命令（POSIX shell）：50,000 行短行 + 结束标记。标记用 `$?`
+/// 展开——命令回显帧里是字面 `$?`，输出帧里是展开值，等待谓词只匹配后者。
+#[cfg(unix)]
+fn resize_flood_history_command() -> String {
+    format!("seq {RESIZE_HISTORY}; echo RESIZE-READY-$?")
+}
+
+/// 灌满历史的命令（PowerShell）：同样的形状与标记技巧（`$?` 展开为 True）。
+#[cfg(windows)]
+fn resize_flood_history_command() -> String {
+    format!("1..{RESIZE_HISTORY} | ForEach-Object {{ $_ }}; echo RESIZE-READY-$?")
+}
+
+/// 发一条 Resize：队列满（worker 正被 reflow 占住）时按背压重试到成功。
+fn send_resize(session: &Session, columns: usize, lines: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match session.resize(columns, lines, 8, 16) {
+            Ok(()) => return,
+            Err(CommandError::QueueFull) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("resize 被拒：{error}"),
+        }
+    }
+}
+
+/// 附：resize 风暴收敛到尾沿（ADR-052）。灌满 50,000 行历史后突发 240 条
+/// Resize（列数 190..=203 循环，末条 205 为唯一终值），计量「末条命令 →
+/// 终尺寸画面帧」。节流实现里突发只会触发首尾两次应用（模型 reflow 与
+/// PTY ioctl/SIGWINCH 各两次）；未节流实现逐条串行全量 reflow，本用例在
+/// 基线运行中显著超限——这是该修复的可复现证据。
+#[test]
+#[ignore = "阶段4 性能验收，见 docs/runbooks/perf-acceptance.md"]
+fn perf_resize_burst_applies_at_trailing_edge() {
+    if !perf_enabled() {
+        eprintln!("跳过：需要 ZHIMATERM_PERF=1");
+        return;
+    }
+
+    let (session, events) = spawn_local(SessionConfig {
+        size: StartupSize::Fixed(200, 50),
+        target: SessionTarget::Local {
+            shell: LocalShell::Default { cwd: None },
+        },
+        backend: zhimaterm_terminal::backend::BackendKind::Alacritty,
+        history: RESIZE_HISTORY,
+        scrollback: None,
+        pane: super::support::test_pane(),
+    });
+
+    let fill_started = Instant::now();
+    type_line(&session, &resize_flood_history_command());
+    // 只认输出帧（`RESIZE-READY-` 前缀由 $? 展开产生），命令回显帧不会命中
+    let filled = wait_for_frame(&events, Duration::from_secs(60), |snapshot| {
+        snapshot.history_size >= RESIZE_HISTORY - 5_000
+            && snapshot.rendered_text().contains("RESIZE-READY-")
+    });
+    let history = filled.expect("历史应灌满并看到结束标记").history_size;
+    eprintln!(
+        "历史灌满 {history} 行（命令全程 {:?}）",
+        fill_started.elapsed()
+    );
+
+    // 突发：列数循环变化保证每条都会触发真实 reflow；末条 205 是唯一终值，
+    // 中间任何一帧的列数都不可能与它相等
+    let burst_started = Instant::now();
+    for index in 0..RESIZE_BURST {
+        let columns = if index + 1 == RESIZE_BURST {
+            205
+        } else {
+            190 + index % 14
+        };
+        send_resize(&session, columns, 50);
+    }
+    let last_sent = Instant::now();
+    eprintln!(
+        "{RESIZE_BURST} 条 resize 入队耗时 {:?}",
+        last_sent.duration_since(burst_started)
+    );
+
+    let final_frame = wait_for_frame(&events, Duration::from_secs(30), |snapshot| {
+        snapshot.columns == 205
+    })
+    .expect("终尺寸画面帧应到达");
+    let applied = last_sent.elapsed();
+    eprintln!(
+        "末条命令 → 终尺寸帧：{applied:?}（上限 {RESIZE_APPLY_LIMIT:?}），终帧历史 {} 行",
+        final_frame.history_size
+    );
+    assert!(
+        applied <= RESIZE_APPLY_LIMIT,
+        "resize 突发应在尾沿收敛（末条命令后 ≤ {RESIZE_APPLY_LIMIT:?} 应用终值），实测 {applied:?}"
+    );
+    assert!(
+        final_frame.history_size >= RESIZE_HISTORY - 5_000,
+        "节流应用不应丢历史：终帧历史 {} 行",
+        final_frame.history_size
+    );
+
+    session.close();
+    let exit = wait_for_exit(&events, Duration::from_secs(15)).expect("会话应正常关闭");
+    assert_eq!(exit.description, "会话已关闭");
 }

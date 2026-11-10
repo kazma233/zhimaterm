@@ -5,8 +5,11 @@
 //! 不进 div/taffy 布局树：满屏数千个单元格放进展树里每帧整树重排，必然卡顿。
 //! 外壳的框架部件见 `shell`。
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use gpui::{
     App, BorderStyle, Bounds, Edges, Font, FontStyle, FontWeight, Hsla, Pixels, Point,
@@ -92,7 +95,42 @@ pub struct ScrollMarker {
     pub row: usize,
 }
 
+/// 「run 文本 → 每格起始字节偏移」的跨帧缓存（见 [`GridPainter`]）。
+/// 行内容不变时钉位绘制免去每帧重复的 grapheme 聚类；键是内容哈希加
+/// 文本长度——与 gpui `shape_line_by_hash` 同思路、同量级的碰撞概率。
+/// 容量有界：滚动不断带来新键，超上限整体清空重建（满屏 run 数远低于
+/// 上限，整清的代价可忽略，不值得 LRU 的复杂度）。
+#[derive(Default)]
+pub struct OffsetsCache {
+    entries: HashMap<(u64, usize), Rc<Vec<usize>>>,
+}
+
+/// 缓存条目上限：一屏 run 至多数百，4096 覆盖多格共享一份缓存的余量。
+const OFFSETS_CACHE_CAP: usize = 4096;
+
+impl OffsetsCache {
+    /// 查或算：命中给 Rc 克隆，未命中聚类后存入。None（簇数与格数对不上，
+    /// 走流式回退的常态路径）不入缓存——同一键下次仍要现算，缓存它没收益。
+    fn get_or_build(&mut self, text: &str, columns: usize) -> Option<Rc<Vec<usize>>> {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = (hasher.finish(), text.len());
+        if let Some(hit) = self.entries.get(&key) {
+            return Some(Rc::clone(hit));
+        }
+        let built = cell_start_bytes(text, columns)?;
+        if self.entries.len() >= OFFSETS_CACHE_CAP {
+            self.entries.clear();
+        }
+        let shared = Rc::new(built);
+        self.entries.insert(key, Rc::clone(&shared));
+        Some(shared)
+    }
+}
+
 /// 网格绘制参数：每帧由终端视图组装一次，字形与背景都在这里落地。
+/// `offsets` 是跨帧复用的格偏移缓存：绘制器每帧重组，缓存由视图持有、
+/// 经 Rc 带进每帧的绘制器。
 pub struct GridPainter {
     pub metrics: CellMetrics,
     pub font: Font,
@@ -114,6 +152,8 @@ pub struct GridPainter {
     /// 窗口非激活：光标不论形状都画成空心框（Alacritty 的 unfocused_hollow），
     /// 一眼区分"这个窗口没有键盘焦点"与"程序把光标藏了"。
     pub cursor_hollow: bool,
+    /// 格偏移的跨帧缓存：由视图持有（绘制器每帧重组），Rc 带进本帧。
+    pub offsets: Rc<RefCell<OffsetsCache>>,
 }
 
 impl GridPainter {
@@ -323,7 +363,11 @@ impl GridPainter {
         foreground: u32,
         window: &mut Window,
     ) {
-        let Some(starts) = cell_start_bytes(&run.text, run.columns) else {
+        let Some(starts) = self
+            .offsets
+            .borrow_mut()
+            .get_or_build(&run.text, run.columns)
+        else {
             return;
         };
         let mut index = 0usize;
@@ -455,7 +499,12 @@ impl GridPainter {
         // 彻底解耦。段内连字（如 ->）照常成形，钉在首格上。
         // 簇数与格数对不上时退回整段流式绘制，保持旧行为——宽字符/emoji 整簇
         // 占两格，钉位模型装不下它，每帧走的就是这条回退，并非异常网格数据独有。
-        let Some(cell_start_bytes) = cell_start_bytes(&run.text, run.columns) else {
+        // 格偏移走跨帧缓存：行内容不变时每帧只付一次哈希查找。
+        let Some(cell_start_bytes) = self
+            .offsets
+            .borrow_mut()
+            .get_or_build(&run.text, run.columns)
+        else {
             // 流式回退沿用 base_offset 居中：宽字符（单字符占两格）的唯一去处就是这条分支。
             // 下划线经回调按样式画（与钉位路径同一套画法），删除线由 gpui 随字形画出
             log_paint_error(line.paint_with_underline_handler(

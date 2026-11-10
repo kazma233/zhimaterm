@@ -3,7 +3,7 @@
 //! 多会话由 `app` 的侧边栏管理；每个会话是一个独立实体，各自持有 worker 句柄、
 //! 画面帧与焦点，终端状态只在自己的 worker 内，会话之间不共享任何状态。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
@@ -134,6 +134,9 @@ pub struct TerminalView {
     backend_badge_done: bool,
     /// resize 判重键：完整几何（行列 + 格像素），与命令载荷同形。
     last_size: Rc<Cell<grid::GridGeometry>>,
+    /// 钉位绘制的格偏移跨帧缓存：行内容不变时每帧免去重复的 grapheme 聚类
+    /// （见 grid::OffsetsCache）。
+    offsets_cache: Rc<RefCell<grid::OffsetsCache>>,
     /// 触摸板以像素为单位连续滚动，累积不足一格的小增量，避免被四舍五入丢弃
     scroll_remainder: f32,
     /// 横向滚动同理，按格宽换算
@@ -327,6 +330,7 @@ impl TerminalView {
             backend_badge_done: false,
             scrollback,
             last_size: Rc::new(Cell::new(grid::GridGeometry::default())),
+            offsets_cache: Rc::new(RefCell::new(grid::OffsetsCache::default())),
             scroll_remainder: 0.0,
             scroll_remainder_x: 0.0,
             window_active: true,
@@ -1435,7 +1439,9 @@ impl TerminalView {
         None
     }
 
-    /// 悬停位置变化时更新链接高亮。只在真正变化时重画。
+    /// 悬停位置变化时更新链接态。重画经 [`hover_notify_needed`] 门控：悬停
+    /// 唯一的视觉效应是链接下划线与指针形状，无链接区内的移动不再触发
+    /// 整屏重画（此前每过一个格就重画一次）。
     fn update_hover(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         let hovered = grid::cell_at(self.surface_bounds.get(), position, self.metrics)
             .map(|(column, row, _)| (column, row));
@@ -1444,8 +1450,12 @@ impl TerminalView {
         }
 
         self.hovered = hovered;
-        self.hovered_link = hovered.and_then(|(column, row)| self.link_at(column, row));
-        cx.notify();
+        let new_link = hovered.and_then(|(column, row)| self.link_at(column, row));
+        let repaint = hover_notify_needed(&self.hovered_link, &new_link);
+        self.hovered_link = new_link;
+        if repaint {
+            cx.notify();
+        }
     }
 
     fn handle_mouse_down(
@@ -2208,6 +2218,7 @@ impl TerminalView {
             scroll_marker_color: gpui::rgba(tokens.scroll_marker),
             cursor_hidden: !self.cursor_blink_on,
             cursor_hollow: !self.window_active,
+            offsets: Rc::clone(&self.offsets_cache),
         };
         let view_entity = cx.entity();
         let resize_session = self.session.clone();
@@ -2270,16 +2281,23 @@ impl TerminalView {
                 canvas(
                     move |bounds, _, _| {
                         bounds_state.set(bounds);
-                        // 判重键 = 命令载荷：纯像素变化（换字体）也算
+                        // 判重键 = 命令载荷：纯像素变化（换字体）也算。只在投递
+                        // 成功时更新——失败（队列满）保留旧键，下一帧 paint 重发；
+                        // 静默吞掉会让模型与 PTY 停在旧尺寸直到下次几何变化。
+                        // 已结束的会话命令通道已关，Closed 同样走不更新分支，
+                        // 一次失败的 try_send 是纳秒级，无需单独挡。
                         let geometry = grid::GridGeometry::from_bounds(bounds, metrics);
-                        if resize_state.get() != geometry {
+                        if resize_state.get() != geometry
+                            && resize_session
+                                .resize(
+                                    geometry.columns,
+                                    geometry.lines,
+                                    geometry.cell_width,
+                                    geometry.cell_height,
+                                )
+                                .is_ok()
+                        {
                             resize_state.set(geometry);
-                            resize_session.resize(
-                                geometry.columns,
-                                geometry.lines,
-                                geometry.cell_width,
-                                geometry.cell_height,
-                            );
                         }
                         bounds
                     },
@@ -2633,9 +2651,18 @@ impl zhimaterm_recording::history::LoggingTarget for ViewLoggingTarget {
     }
 }
 
+/// 悬停移动是否需要重画：链接身份变化（含 None↔Some）必须重画；悬停在
+/// 链上的移动也重画——下划线画在悬停所在段上，同一 URL 被样式切成多段时
+/// 段变视觉就变。两者之外的移动（无链接区）没有任何视觉效应，不重画。
+fn hover_notify_needed(old_link: &Option<Arc<str>>, new_link: &Option<Arc<str>>) -> bool {
+    old_link != new_link || new_link.is_some()
+}
+
 #[cfg(test)]
 mod center_notice_tests {
     use super::center_notice;
+    use super::hover_notify_needed;
+    use std::sync::Arc;
 
     #[test]
     fn local_pane_hints_startup_in_the_center() {
@@ -2643,6 +2670,27 @@ mod center_notice_tests {
             center_notice(true, false, false, ""),
             Some(("正在启动本地 Shell…".to_owned(), None))
         );
+    }
+
+    /// 悬停重画门控：无链接区内的移动不重画（此前每过一个格整屏重画一次）；
+    /// 进出链接与链上移动（下划线跟段走）都重画。
+    #[test]
+    fn hover_movement_only_repaints_when_a_link_is_involved() {
+        let none: Option<Arc<str>> = None;
+        let a: Option<Arc<str>> = Some(Arc::from("https://example.com/a"));
+        let b: Option<Arc<str>> = Some(Arc::from("https://example.com/b"));
+
+        // 无链接区内移动：旧新都是 None，没有视觉效应
+        assert!(!hover_notify_needed(&none, &none));
+
+        // 进出链接：身份变化（None↔Some、不同 URL）
+        assert!(hover_notify_needed(&none, &a));
+        assert!(hover_notify_needed(&a, &none));
+        assert!(hover_notify_needed(&a, &b));
+
+        // 链上移动：同一 URL 也要重画——下划线画在悬停所在段上，
+        // 同 URL 被样式切成多段时段变视觉就变
+        assert!(hover_notify_needed(&a, &a));
     }
 
     #[test]

@@ -493,7 +493,7 @@ fn restored_scrollback_opens_at_the_delivered_size() {
         scrollback: Some(path),
         pane: crate::tests::support::test_pane(),
     });
-    session.resize(120, 40, 8, 16);
+    session.resize(120, 40, 8, 16).expect("发送 resize");
     let first = wait_for_frame(&events, Duration::from_secs(10), |snapshot| {
         snapshot.history_size > 0
     })
@@ -585,7 +585,7 @@ fn restored_scrollback_waits_for_a_late_resize() {
     );
 
     // 首个 Resize（真实尺寸）到达：内容按真实宽度灌入历史，视口干净
-    session.resize(120, 40, 8, 16);
+    session.resize(120, 40, 8, 16).expect("发送 resize");
     let frame = wait_for_frame(&events, Duration::from_secs(10), |snapshot| {
         snapshot.history_size > 0 && snapshot.columns == 120
     })
@@ -1164,7 +1164,7 @@ fn color_queries_are_answered_with_the_effective_palette() {
 fn pixel_size_queries_use_the_reported_cell_size() {
     let (session, events) = spawn(80, 24);
     // 字符尺寸 80x24、格子 10x20 → 像素 800x480，回复格式由核心给出
-    session.resize(80, 24, 10, 20);
+    session.resize(80, 24, 10, 20).expect("发送 resize");
 
     let probe = concat!(
         "stty raw -echo; ",
@@ -1463,7 +1463,7 @@ mod ssh {
         assert!(frame.is_some(), "远端命令应有输出");
 
         // 尺寸变化要传到远端 PTY
-        session.resize(100, 40, 8, 16);
+        session.resize(100, 40, 8, 16).expect("发送 resize");
         type_line(&session, "stty size");
         let frame = wait_for_frame(&events, Duration::from_secs(20), |snapshot| {
             snapshot.rendered_text().contains("40 100")
@@ -3011,9 +3011,12 @@ fn runtime_switch_pauses_and_resumes_without_backfill() {
     });
 
     let wait_logged = |probe: &str| {
-        // worker 的日志转录晚于帧发送：按文件内容等，不按画面等
+        // worker 的日志转录晚于帧发送：按文件内容等，不按画面等。正文走
+        // 内存缓冲（ADR-017 修订），每次轮询先同步落盘再读——本用例验证
+        // 开关语义，不验证缓冲的落盘节奏（那是 output_log 单测的口径）。
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
+            zhimaterm_recording::recorder::flush_now(pane);
             if let Ok(content) = std::fs::read_to_string(&path)
                 && content.contains(probe)
             {
