@@ -30,6 +30,9 @@ app.rs——注释写明接缝错位：`load_saved` 只有 `&mut App` 建不了�
 5. **副作用留外壳**：钥匙串写/删与落盘（`store.upsert`）的编排——ADR-018 的
    「钥匙串先动、成功才落盘」顺序——留在 app.rs，表单不持有 store；钥匙串只读
    回填（`keychain::load`）留在 `load_saved` 内。
+   （实现记录 2026-11-10：编排仍留壳；「读盘失败即冻结」守卫下沉到拥有 schema
+   的域——`SavedSources` 字段私有化并提供冻结感知写入口，外壳不再手写 None
+   臂，见 GLOSSARY「持久化冻结」。）
 6. **测试接缝**：纯逻辑（拆分/并入/字段校验）保持纯测；实体级行为（载入↔保存
    往返、dirty 判定、expand_host 分支）在 connect.rs 内用 `#[gpui::test]`
    （`TestAppContext`，经 dev-dependency 的 `test-support` feature 开启，release

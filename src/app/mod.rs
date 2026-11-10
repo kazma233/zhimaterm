@@ -86,9 +86,9 @@ pub struct ZhimaTermApp {
     ui_font_size: f32,
     /// 界面字体家族：None = 系统默认。应用根节点按它设置，界面文字全部继承
     ui_font_family: Option<String>,
-    /// 已保存的外观设置。读盘失败时为 None：这时不写盘，避免把读不出来的文件
-    /// 覆盖成默认值，把用户改过的设置真的弄丢。
-    settings: Option<settings::Settings>,
+    /// 已保存的外观设置（冻结感知写入口，GLOSSARY「持久化冻结」）：读盘失败
+    /// 即冻结，写一律由 Store 拒掉，外壳没有 None 臂可漏。
+    settings: settings::Store,
     settings_error: Option<String>,
     /// 已经写到窗口上的标题，避免每帧重复调用平台接口
     applied_title: Option<String>,
@@ -104,11 +104,11 @@ pub struct ZhimaTermApp {
     /// 遮罩与浮层挂在应用根部盖住全窗；不入浮层栈——它不持有焦点，与主题
     /// 下拉同为锚定浮层，任何层入栈即收起
     sidebar_menu: Option<(usize, Point<Pixels>)>,
-    /// 保存过的 SSH 连接与读盘错误（ADR-044 实体化）。读盘失败时 store 为
-    /// None：这时不写盘，避免把读不出来的文件覆盖成空列表，把用户存过的
-    /// 连接真的弄丢。独立实体而非本实体的字段：连接模态的渲染每帧读它
-    /// （忘掉/保存后列表要刷新），render 发生在本实体的 update 里，读同实体
-    /// 会重入 panic——数据归属仍是这里，模态只读渲染。
+    /// 保存过的 SSH 连接与读盘错误（ADR-044 实体化）。读走投影、写走冻结
+    /// 感知写入口（GLOSSARY「持久化冻结」），外壳不直改字段。独立实体而非
+    /// 本实体的字段：连接模态的渲染每帧读它（忘掉/保存后列表要刷新），render
+    /// 发生在本实体的 update 里，读同实体会重入 panic——数据归属仍是这里，
+    /// 模态只读渲染。
     saved: Entity<SavedSources>,
     /// 主题选择器：开合状态与浮层锚点，渲染在 views::theme_picker（ADR-027）。
     /// 点击项切换但不收起，收起只由点击下拉之外触发——连续点几项比对
@@ -154,38 +154,35 @@ impl ZhimaTermApp {
         workspace_error: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (saved_store, saved_error) = match connections::SavedConnections::load() {
-            Ok(store) => (Some(store), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        };
-        let (settings_store, settings_error) = match settings::Settings::load() {
-            Ok(store) => (Some(store), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        };
+        let saved_sources = connections::SavedSources::load();
+        let (settings_store, settings_error) = settings::Store::load();
         // 保存过就用保存的；没保存过才自动挑字体。保存值应用时已校验过安装，
         // 这里不再查：字体被卸载属于罕见情况，静默回退比启动失败更可接受。
         let font = FontConfig {
             family: settings_store
-                .as_ref()
+                .settings()
                 .and_then(|store| store.font_family.clone())
                 .unwrap_or_else(|| font::resolve_font_family(cx.text_system())),
             size: settings_store
-                .as_ref()
+                .settings()
                 .map(|store| store.font_size_or_default())
                 .unwrap_or(font::DEFAULT_FONT_SIZE),
         };
         let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
         let ui_font_size = settings_store
-            .as_ref()
+            .settings()
             .map(|store| store.ui_font_size_or_default())
             .unwrap_or(zhimaterm_base::ui::DEFAULT_UI_FONT_SIZE);
         let ui_font_family = settings_store
-            .as_ref()
+            .settings()
             .and_then(|store| store.ui_font_family.clone());
         // 界面字号就是 rem 根：界面文字全部用 rem 标定，这里设一次全局生效
         window.set_rem_size(px(ui_font_size));
         // 主题按保存的名字装载；名字不存在（手改坏）回落默认
-        zhimaterm_base::theme::init(settings_store.as_ref().and_then(|s| s.theme.as_deref()), cx);
+        zhimaterm_base::theme::init(
+            settings_store.settings().and_then(|s| s.theme.as_deref()),
+            cx,
+        );
 
         let mut app = Self {
             tabs: Vec::new(),
@@ -209,10 +206,7 @@ impl ZhimaTermApp {
             sidebar_width: shell::SIDEBAR_DEFAULT_WIDTH,
             sidebar_resizing: None,
             sidebar_menu: None,
-            saved: cx.new(|_| SavedSources {
-                store: saved_store,
-                error: saved_error,
-            }),
+            saved: cx.new(|_| saved_sources),
             theme_picker: ThemePicker::new(),
             #[cfg(windows)]
             wsl_entry_visible: !zhimaterm_local::wsl::list_distros().is_empty(),

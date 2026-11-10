@@ -785,10 +785,7 @@ fn keys_route_by_view(cx: &mut gpui::TestAppContext) {
         let font = zhimaterm_base::font::terminal_font("monospace");
         let form = cx.new(|cx| ConnectForm::new(font, cx));
         // 键裁决不读已保存连接,给个空源即可
-        let saved = cx.new(|_| crate::connections::SavedSources {
-            store: None,
-            error: None,
-        });
+        let saved = cx.new(|_| crate::connections::SavedSources::empty_for_test());
         let mut modal = ConnectModal {
             form,
             actions,

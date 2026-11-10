@@ -16,6 +16,7 @@ use zhimaterm_base::ui::dialog::{self, Dialog, DialogAnswer};
 use zhimaterm_base::ui::overlay::overlay_host;
 use zhimaterm_connections::connect::{self, ConnectForm, ConnectModal, ConnectView};
 use zhimaterm_connections::connections;
+use zhimaterm_connections::connections::{SavedSources, StoreWriteError};
 use zhimaterm_session::SessionTarget;
 use zhimaterm_terminal::DEFAULT_SCROLLING_HISTORY;
 
@@ -204,10 +205,13 @@ impl ZhimaTermApp {
         let forwards: Vec<connections::SavedForward> =
             target.rules(cx).iter().map(saved_forward_of).collect();
         self.saved.update(cx, |sources, _| {
-            if let Some(store) = sources.store.as_mut()
-                && let Err(error) = store.replace_forwards(&host, port, &user, forwards)
-            {
-                sources.error = Some(format!("转发规则写回失败：{error:#}"));
+            // 冻结的自动回写静默跳过（GLOSSARY「持久化冻结」）：不是用户显式
+            // 动作，错误无处安放；显式忽略让这个决定可评审
+            if sources.is_frozen() {
+                return;
+            }
+            if let Err(error) = sources.replace_forwards(&host, port, &user, forwards) {
+                sources.set_error(format!("转发规则写回失败：{error}"));
             }
         });
         cx.notify();
@@ -245,7 +249,7 @@ impl ZhimaTermApp {
     /// 打开设置表单：按当前生效值预填（建造与预填由表单自持）。焦点归模态
     /// 自己（ADR-043），不落到某个输入框上。
     pub(super) fn open_settings_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let store = self.settings.as_ref();
+        let store = self.settings.settings();
         let current = SettingsValues {
             font_family: self.font.family.clone(),
             font_size: self.font.size,
@@ -372,24 +376,10 @@ impl ZhimaTermApp {
         // 界面字体：应用根节点按它设置，下一帧全部界面文字继承
         self.ui_font_family = edited.ui_font_family.clone();
 
-        match self.settings.as_mut() {
-            Some(store) => {
-                // 落盘映射单点在 SettingsValues::to_settings（theme 从旧设置抄回）
-                *store = edited.to_settings(store);
-                if let Err(error) = store.save() {
-                    return self.fail_settings(
-                        format!("已应用，但保存失败：{error:#}；重启后将恢复为上次保存的设置"),
-                        cx,
-                    );
-                }
-            }
-            // 读盘失败的设置文件不写：把读不出来的文件覆盖掉可能弄丢用户手改的内容
-            None => {
-                return self.fail_settings(
-                    "已应用，但设置文件读不出来，本次不会保存；请先修好配置文件".into(),
-                    cx,
-                );
-            }
+        // 冻结与落盘在 Store 域内裁决（GLOSSARY「持久化冻结」）；前缀是本动作
+        // 的语境（界面已经换上了）
+        if let Err(message) = self.settings.apply(&edited) {
+            return self.fail_settings(format!("已应用，但{message}"), cx);
         }
 
         self.overlay_close_top(window, cx);
@@ -414,20 +404,9 @@ impl ZhimaTermApp {
     /// 界面，只把后果讲清楚（重启后会回到上次保存的主题）。
     fn pick_theme(&mut self, name: &'static str, cx: &mut Context<Self>) {
         self.apply_theme(name, cx);
-        match self.settings.as_mut() {
-            Some(store) => {
-                store.theme = Some(name.to_owned());
-                if let Err(error) = store.save() {
-                    self.settings_error = Some(format!(
-                        "主题已切换，但保存失败：{error:#}；重启后将恢复为上次保存的主题"
-                    ));
-                }
-            }
-            // 读盘失败的设置文件不写：覆盖掉可能弄丢用户手改的内容
-            None => {
-                self.settings_error =
-                    Some("主题已切换，但设置文件读不出来，本次不会保存；请先修好配置文件".into());
-            }
+        // 冻结与落盘在 Store 域内裁决；前缀是本动作的语境（主题已经切上了）
+        if let Err(message) = self.settings.set_theme(name) {
+            self.settings_error = Some(format!("主题已切换，但{message}"));
         }
         cx.notify();
     }
@@ -446,24 +425,31 @@ impl ZhimaTermApp {
         let previous = form.read(cx).editing_id().and_then(|id| {
             self.saved
                 .read(cx)
-                .store
-                .as_ref()
-                .and_then(|store| store.items().iter().find(|item| item.id == id))
+                .items()
+                .iter()
+                .find(|item| item.id == id)
                 .cloned()
         });
         let Some(plan) = form.update(cx, |form, cx| form.save(cx, previous.as_ref())) else {
             return false;
         };
-        let outcome = self
-            .saved
-            .update(cx, |sources, _| match sources.store.as_mut() {
-                Some(store) => plan
-                    .run_keychain()
-                    .and_then(|()| plan.apply_to_store(store)),
-                None => Err(connect::FormError::global(
-                    "保存的连接读不出来，先修好配置文件再保存",
-                )),
-            });
+        let outcome = self.saved.update(cx, |sources, _| {
+            // 冻结时闭包不执行（含钥匙串）；ADR-018 的「钥匙串先动、成功才
+            // 落盘」顺序由闭包自持。冻结文案由域给底稿，动作语境（「再保存」）
+            // 在这里拼——手动验收记录就是这个措辞
+            sources
+                .with_store(|store| {
+                    plan.run_keychain()
+                        .and_then(|()| plan.apply_to_store(store))
+                })
+                .map_err(|error| match error {
+                    StoreWriteError::Frozen => connect::FormError::global(format!(
+                        "{}再保存",
+                        SavedSources::frozen_message()
+                    )),
+                    StoreWriteError::Rejected(error) => error,
+                })
+        });
         match outcome {
             Ok(()) => true,
             Err(error) => {
@@ -489,12 +475,7 @@ impl ZhimaTermApp {
 
     /// 列表里第 index 条已保存的连接（读不出列表或越界为 None）。
     fn saved_at(&self, index: usize, cx: &App) -> Option<connections::SavedConnection> {
-        self.saved
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|store| store.items().get(index))
-            .cloned()
+        self.saved.read(cx).items().get(index).cloned()
     }
 
     /// 行上「连接」：直接连（ADR-048）。钥匙串只在密码是唯一认证信息、而这条
@@ -606,25 +587,18 @@ impl ZhimaTermApp {
     /// 忘掉一条保存的连接。能存就得能删，否则写错的条目会一直留在列表里。
     /// 记住过密码的条目联动删除钥匙串条目（ADR-018）：删不掉要提示，让用户能手动清理。
     fn forget_saved(&mut self, index: usize, cx: &mut Context<Self>) {
-        let forgotten = self
+        let forgotten = self.saved.read(cx).items().get(index).cloned();
+        // 冻结时拒绝删除（连接模态顶部亮原因）：主删除没发生，联动删钥匙串
+        // 也不执行——否则条目还在文件里，钥匙串先没了
+        let removed = self
             .saved
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|store| store.items().get(index))
-            .cloned();
-        let removed = self.saved.update(cx, |sources, _| {
-            let Some(store) = sources.store.as_mut() else {
-                return true;
-            };
-            match store.remove(index) {
+            .update(cx, |sources, _| match sources.remove(index) {
                 Ok(()) => true,
                 Err(error) => {
-                    sources.error = Some(format!("{error:#}"));
+                    sources.set_error(error);
                     false
                 }
-            }
-        });
+            });
         if !removed {
             cx.notify();
             return;
@@ -634,7 +608,7 @@ impl ZhimaTermApp {
             && let Err(error) = zhimaterm_connections::keychain::delete(&entry.id)
         {
             self.saved
-                .update(cx, |sources, _| sources.error = Some(format!("{error:#}")));
+                .update(cx, |sources, _| sources.set_error(format!("{error:#}")));
         }
         cx.notify();
     }

@@ -213,12 +213,136 @@ impl SavedConnection {
     }
 }
 
+/// 冻结基础文案（GLOSSARY「持久化冻结」）：Err 原样给用户，调用方按展示面
+/// 决定前缀（表单错误面 / 连接模态顶部）。
+const FROZEN: &str = "保存的连接读不出来，先修好配置文件";
+
+/// 写入口的失败：冻结（读盘失败，域内拒写）或域内拒绝（校验/落盘错误）。
+/// 分开是为了让外壳给冻结失败拼本动作的语境后缀（「再保存」），域内拒绝
+/// 的文案原样透传——语境归编排，裁决与基础文案归域。
+#[derive(Debug)]
+pub enum StoreWriteError {
+    Frozen,
+    Rejected(crate::connect::FormError),
+}
+
 /// 已保存连接的实体负载：连接列表与它的读盘错误（错误决定列表可不可信，
-/// 一起变更）。语义属本模块，所有者是外壳的 `saved` 实体——外壳直接读写
-/// 两个字段，因此它们是公开的。
+/// 一起变更）。语义属本模块，所有者是外壳的 `saved` 实体——读走投影方法、
+/// 写必经冻结感知写入口（GLOSSARY「持久化冻结」），外壳不再直改字段。
 pub struct SavedSources {
-    pub store: Option<SavedConnections>,
-    pub error: Option<String>,
+    store: Option<SavedConnections>,
+    error: Option<String>,
+}
+
+impl SavedSources {
+    /// 从配置目录装载；读盘失败即冻结（列表为空、写入全拒）。
+    pub fn load() -> Self {
+        match SavedConnections::load() {
+            Ok(store) => Self {
+                store: Some(store),
+                error: None,
+            },
+            Err(error) => Self {
+                store: None,
+                error: Some(format!("{error:#}")),
+            },
+        }
+    }
+
+    pub fn load_at(path: PathBuf) -> Self {
+        match SavedConnections::load_at(path) {
+            Ok(store) => Self {
+                store: Some(store),
+                error: None,
+            },
+            Err(error) => Self {
+                store: None,
+                error: Some(format!("{error:#}")),
+            },
+        }
+    }
+
+    /// 条目投影；冻结时为空切片（读盘失败的列表本来就不可信）。
+    pub fn items(&self) -> &[SavedConnection] {
+        self.store
+            .as_ref()
+            .map(|store| store.items())
+            .unwrap_or_default()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// 壳侧编排错误的展示位（钥匙串删除失败等）：错误与列表同实体变更，
+    /// 连接模态读它刷新。
+    pub fn set_error(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
+    /// 是否冻结（读盘失败）。外壳用它决定自动回写等动作的静默跳过；
+    /// 用户显式动作不需要查它——写入口自己会拒。
+    pub fn is_frozen(&self) -> bool {
+        self.store.is_none()
+    }
+
+    /// 测试用空源（连接模态的键裁决等不读列表内容的场景）。
+    #[cfg(test)]
+    pub fn empty_for_test() -> Self {
+        Self {
+            store: None,
+            error: None,
+        }
+    }
+
+    /// 按连接身份找保存的条目（ADR-038 的回写判定）；冻结时没有可匹配的列表。
+    pub fn find_target(&self, host: &str, port: u16, user: &str) -> Option<&SavedConnection> {
+        self.store
+            .as_ref()
+            .and_then(|store| store.find_target(host, port, user))
+    }
+
+    /// 冻结基础文案（`StoreWriteError::Frozen` 的展示文本）：调用方可给它
+    /// 拼本动作的语境后缀（「再保存」）。
+    pub fn frozen_message() -> &'static str {
+        FROZEN
+    }
+
+    /// 冻结感知写入口：编排闭包只在可写时执行——钥匙串等联动副作用放在
+    /// 闭包里，冻结时它们也不会跑（ADR-018 的顺序由闭包自持）。
+    pub fn with_store<T>(
+        &mut self,
+        run: impl FnOnce(&mut SavedConnections) -> Result<T, crate::connect::FormError>,
+    ) -> Result<T, StoreWriteError> {
+        match self.store.as_mut() {
+            Some(store) => run(store).map_err(StoreWriteError::Rejected),
+            None => Err(StoreWriteError::Frozen),
+        }
+    }
+
+    /// 删除一条；冻结时拒写（连带效应——钥匙串删除——由调用方在 Ok 后执行）。
+    pub fn remove(&mut self, index: usize) -> Result<(), String> {
+        let Some(store) = self.store.as_mut() else {
+            return Err(FROZEN.to_owned());
+        };
+        store.remove(index).map_err(|error| format!("{error:#}"))
+    }
+
+    /// 运行中转发规则回写（ADR-038）；冻结时拒写。
+    pub fn replace_forwards(
+        &mut self,
+        host: &str,
+        port: u16,
+        user: &str,
+        forwards: Vec<SavedForward>,
+    ) -> Result<(), String> {
+        let Some(store) = self.store.as_mut() else {
+            return Err(FROZEN.to_owned());
+        };
+        store
+            .replace_forwards(host, port, user, forwards)
+            .map_err(|error| format!("{error:#}"))
+    }
 }
 
 /// 保存的连接集合。唯一所有者是它自己，落盘在配置目录。
@@ -626,5 +750,67 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(!json.contains("\"kind\": \"agent\""), "{json}");
         assert!(json.contains("\"use_agent\": true"), "{json}");
+    }
+
+    /// 冻结守卫（GLOSSARY「持久化冻结」）：读盘失败后全部写入口拒写且返回
+    /// 同一条冻结文案，坏文件分毫不动。
+    #[test]
+    fn frozen_sources_refuse_every_write_with_the_freeze_message() {
+        let path = temp_path("frozen");
+        std::fs::create_dir_all(path.parent().expect("临时目录路径有父")).expect("建临时目录");
+        std::fs::write(&path, "{ 手改坏的 JSON").expect("预置坏文件");
+        let mut sources = super::SavedSources::load_at(path.clone());
+        assert!(sources.error().is_some(), "冻结要带原因");
+        assert!(sources.is_frozen());
+        assert!(sources.items().is_empty(), "冻结的列表不可信");
+        assert!(sources.find_target("a.example.com", 22, "root").is_none());
+
+        let frozen = "保存的连接读不出来，先修好配置文件";
+        assert_eq!(sources.remove(0).unwrap_err(), frozen);
+        assert_eq!(
+            sources
+                .replace_forwards("a.example.com", 22, "root", Vec::new())
+                .unwrap_err(),
+            frozen
+        );
+        let refused = sources.with_store(|store| {
+            // 钥匙串等联动副作用在闭包里：冻结时闭包根本不执行——真执行会写盘，
+            // 下面「坏文件分毫不动」的断言就会抓住它
+            store
+                .save(connection("x", "x", agent_credentials()))
+                .map_err(|error| crate::connect::FormError::global(format!("{error:#}")))
+        });
+        assert!(
+            matches!(refused, Err(super::StoreWriteError::Frozen)),
+            "冻结时编排闭包不得执行"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ 手改坏的 JSON",
+            "冻结时不得碰坏文件"
+        );
+    }
+
+    /// 可写路径：写入口透传编排结果，条目投影与身份匹配可见。
+    #[test]
+    fn writable_sources_run_the_orchestration_and_expose_items() {
+        let path = temp_path("writable");
+        let mut sources = super::SavedSources::load_at(path);
+        assert!(!sources.is_frozen());
+        assert!(sources.error().is_none());
+
+        let entry = connection("a.example.com", "root", agent_credentials());
+        sources
+            .with_store(|store| {
+                store.save(entry.clone()).expect("保存应成功");
+                Ok(())
+            })
+            .expect("可写时编排应执行");
+        assert_eq!(sources.items(), &[entry]);
+        assert!(sources.find_target("a.example.com", 22, "root").is_some());
+
+        sources.remove(0).expect("删除应成功");
+        assert!(sources.items().is_empty());
     }
 }

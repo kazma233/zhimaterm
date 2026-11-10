@@ -47,10 +47,10 @@ impl ZhimaTermApp {
                     shell: restored_shell(
                         leaf,
                         self.settings
-                            .as_ref()
+                            .settings()
                             .and_then(|store| store.local_shell_or_default()),
                         self.settings
-                            .as_ref()
+                            .settings()
                             .and_then(|store| store.local_workdir_or_default()),
                     ),
                 };

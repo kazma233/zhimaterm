@@ -77,8 +77,7 @@ impl ConnectModal {
     fn list_body(&self, tokens: &zhimaterm_base::theme::UiTokens, cx: &App) -> gpui::Div {
         let actions = &self.actions;
         let sources = self.saved.read(cx);
-        let (saved, saved_error) = (sources.store.as_ref(), sources.error.as_deref());
-        let items = saved.map(|store| store.items()).unwrap_or_default();
+        let (items, saved_error) = (sources.items(), sources.error());
 
         // 列表单独滚动：存多了也顶不开弹窗（卡片按 max_h 封顶，这里 min_h(0) 让
         // flex 子项肯收缩到内容高度以下）

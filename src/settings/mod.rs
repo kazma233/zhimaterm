@@ -142,13 +142,9 @@ impl Settings {
         self.local_workdir.as_deref()
     }
 
-    /// 从配置目录读取。文件不存在就是默认值；解析失败要报错，不静默当作空文件，
-    /// 否则下一次保存会把用户手写一半的设置覆盖掉。
-    pub fn load() -> Result<Self> {
-        let path = zhimaterm_base::config_paths::config_dir()?.join("settings.json");
-        Self::load_at(path)
-    }
-
+    /// 从指定路径读取。文件不存在就是默认值；解析失败要报错，不静默当作空
+    /// 文件，否则下一次保存会把用户手写一半的设置覆盖掉。配置目录的解析与
+    /// 冻结裁决在 [`Store::load`]。
     pub fn load_at(path: PathBuf) -> Result<Self> {
         let settings = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -161,15 +157,81 @@ impl Settings {
         Ok(settings)
     }
 
-    pub fn save(&self) -> Result<()> {
-        let path = zhimaterm_base::config_paths::config_dir()?.join("settings.json");
-        self.save_at(path)
-    }
-
+    /// 写到指定路径（配置目录的路径由 [`Store`] 持有）。
     pub fn save_at(&self, path: PathBuf) -> Result<()> {
         let json = serde_json::to_vec_pretty(self).context("序列化设置失败")?;
         zhimaterm_base::config_paths::write_atomic(&path, &json)
             .with_context(|| format!("保存设置失败：{}", path.display()))
+    }
+}
+
+/// 冻结基础文案（GLOSSARY「持久化冻结」）：Err 原样给用户，调用方按动作
+/// 语境加前缀（「已应用，但」「主题已切换，但」）。
+const FROZEN: &str = "设置文件读不出来，本次不会保存；请先修好配置文件";
+
+/// 设置的冻结感知写入口（GLOSSARY「持久化冻结」）：读盘失败时内部为 None，
+/// 写一律拒掉；读走 [`Store::settings`] 投影（冻结时 None，调用方按默认值走）。
+pub struct Store {
+    settings: Option<Settings>,
+    /// 落盘路径：写入口用它（测试可指到临时目录），Settings 自己不再记路径。
+    path: PathBuf,
+}
+
+impl Store {
+    /// 从配置目录装载；读盘失败即冻结，返回冻结原因供错误面展示。
+    pub fn load() -> (Self, Option<String>) {
+        let path = match zhimaterm_base::config_paths::config_dir() {
+            Ok(dir) => dir.join("settings.json"),
+            Err(error) => return (Self::frozen(), Some(format!("{error:#}"))),
+        };
+        Self::load_at(path)
+    }
+
+    pub fn load_at(path: PathBuf) -> (Self, Option<String>) {
+        match Settings::load_at(path.clone()) {
+            Ok(settings) => (
+                Self {
+                    settings: Some(settings),
+                    path,
+                },
+                None,
+            ),
+            Err(error) => (Self::frozen(), Some(format!("{error:#}"))),
+        }
+    }
+
+    fn frozen() -> Self {
+        Self {
+            settings: None,
+            path: PathBuf::new(),
+        }
+    }
+
+    pub fn settings(&self) -> Option<&Settings> {
+        self.settings.as_ref()
+    }
+
+    /// 应用编辑值（theme 不在表单里编辑，从现有设置抄回——映射单点在
+    /// [`SettingsValues::to_settings`]）。Err 文案已完整，调用方加语境前缀即可。
+    pub fn apply(&mut self, edited: &SettingsValues) -> Result<(), String> {
+        let Some(current) = self.settings.as_mut() else {
+            return Err(FROZEN.to_owned());
+        };
+        *current = edited.to_settings(current);
+        current
+            .save_at(self.path.clone())
+            .map_err(|error| format!("保存失败：{error:#}；重启后将恢复为上次保存的设置"))
+    }
+
+    /// 选定主题后的落盘（主题本身已由调用方应用到全局）。
+    pub fn set_theme(&mut self, name: &str) -> Result<(), String> {
+        let Some(current) = self.settings.as_mut() else {
+            return Err(FROZEN.to_owned());
+        };
+        current.theme = Some(name.to_owned());
+        current
+            .save_at(self.path.clone())
+            .map_err(|error| format!("保存失败：{error:#}；重启后将恢复为上次保存的主题"))
     }
 }
 
@@ -612,6 +674,82 @@ mod tests {
                 "工作目录不存在或不是目录：{}",
                 test_paths::plain_file()
             ))
+        );
+    }
+
+    /// 冻结守卫（GLOSSARY「持久化冻结」）：读盘失败后 apply/set_theme 拒写，
+    /// Err 是完整的冻结文案，磁盘上不产生新内容。
+    #[test]
+    fn frozen_store_refuses_writes_with_the_freeze_message() {
+        let path = temp_path("frozen");
+        std::fs::write(&path, "{ 手改坏的 JSON").expect("预置坏文件");
+        let (mut store, error) = super::Store::load_at(path.clone());
+        assert!(error.is_some(), "读盘失败要给出原因");
+        assert!(store.settings().is_none(), "冻结时读投影为 None");
+
+        let edited = super::SettingsValues {
+            font_family: "Mono".into(),
+            font_size: 15.0,
+            ui_font_family: None,
+            ui_font_size: 14.0,
+            scrolling_history: DEFAULT_SCROLLING_HISTORY,
+            local_shell: None,
+            local_workdir: None,
+            option_as_alt: false,
+            terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
+        };
+        assert_eq!(
+            store.apply(&edited).unwrap_err(),
+            "设置文件读不出来，本次不会保存；请先修好配置文件"
+        );
+        assert_eq!(
+            store.set_theme("Dracula").unwrap_err(),
+            "设置文件读不出来，本次不会保存；请先修好配置文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ 手改坏的 JSON",
+            "冻结时不得碰坏文件"
+        );
+    }
+
+    /// 可写路径：apply 落盘成功，theme 从旧设置抄回；set_theme 就地改写。
+    #[test]
+    fn store_applies_edits_and_persists_to_its_own_path() {
+        let path = temp_path("writable");
+        let existing = Settings {
+            theme: Some("Dracula".into()),
+            ..Default::default()
+        };
+        existing.save_at(path.clone()).expect("预置旧设置");
+        let (mut store, error) = super::Store::load_at(path.clone());
+        assert!(error.is_none());
+
+        let edited = super::SettingsValues {
+            font_family: "Mono".into(),
+            font_size: 15.0,
+            ui_font_family: None,
+            ui_font_size: 14.0,
+            scrolling_history: DEFAULT_SCROLLING_HISTORY,
+            local_shell: None,
+            local_workdir: None,
+            option_as_alt: true,
+            terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
+        };
+        store.apply(&edited).expect("可写时应用应成功");
+        let saved = Settings::load_at(path.clone()).expect("落盘应可读回");
+        assert_eq!(saved.font_family.as_deref(), Some("Mono"));
+        assert_eq!(
+            saved.theme.as_deref(),
+            Some("Dracula"),
+            "theme 从旧设置抄回"
+        );
+        assert!(saved.option_as_alt);
+
+        store.set_theme("Nord").expect("可写时换主题应成功");
+        assert_eq!(
+            Settings::load_at(path).unwrap().theme.as_deref(),
+            Some("Nord")
         );
     }
 }

@@ -32,7 +32,7 @@ impl ZhimaTermApp {
     /// 设置里的默认本地 Shell 与工作目录（ADR-036）：路径可用性已在设置表单
     /// 校验，这里直接按用户选择构造；手改配置写坏了由会话启动失败显式报错。
     fn default_local_shell(&self) -> LocalShell {
-        let (shell, cwd) = match self.settings.as_ref() {
+        let (shell, cwd) = match self.settings.settings() {
             Some(store) => (
                 store.local_shell_or_default().map(std::path::PathBuf::from),
                 store
@@ -136,18 +136,18 @@ impl ZhimaTermApp {
             runtime: zhimaterm_session::RuntimeParams {
                 option_as_alt: self
                     .settings
-                    .as_ref()
+                    .settings()
                     .map(|store| store.option_as_alt)
                     .unwrap_or(false),
                 scrolling_history: self
                     .settings
-                    .as_ref()
+                    .settings()
                     .map(|store| store.scrolling_history_or_default())
                     .unwrap_or(DEFAULT_SCROLLING_HISTORY),
             },
             backend: self
                 .settings
-                .as_ref()
+                .settings()
                 .map(|store| store.terminal_backend_or_default())
                 .unwrap_or_default(),
         };
@@ -155,11 +155,11 @@ impl ZhimaTermApp {
         // 运行中转发增删的回调（ADR-038）：视图不持有保存的连接与 id 分配，
         // 一律回到应用层处理
         let saved_connection = match &target {
-            SessionTarget::Ssh(ssh) => {
-                self.saved.read(cx).store.as_ref().is_some_and(|store| {
-                    store.find_target(&ssh.host, ssh.port, &ssh.user).is_some()
-                })
-            }
+            SessionTarget::Ssh(ssh) => self
+                .saved
+                .read(cx)
+                .find_target(&ssh.host, ssh.port, &ssh.user)
+                .is_some(),
             SessionTarget::Local { .. } => false,
         };
         let app = cx.entity().downgrade();
