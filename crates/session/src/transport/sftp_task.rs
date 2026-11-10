@@ -16,6 +16,7 @@ use ssh2::OpenFlags;
 use crate::sftp::{TaskId, TaskOutcome, remote_join};
 
 use super::poll::RawSock;
+use super::sftp_temp::{LocalTempFile, RemoteCommit, RemoteTempFile};
 use super::ssh::retry_brief;
 
 /// 单次分块的字节数。任务总量可达 1 MiB 分块（requirements §6），这里是
@@ -102,7 +103,7 @@ enum TaskKind {
 
 impl TransferTask {
     pub(crate) fn upload(id: TaskId, local: PathBuf, remote: PathBuf, overwrite: bool) -> Self {
-        let temp = remote_sibling_temp(&remote, "upload", id);
+        let temp = RemoteTempFile::new(&remote, "upload", id);
         Self::new(
             id,
             TaskKind::Upload(UploadTask {
@@ -112,7 +113,6 @@ impl TransferTask {
                 temp,
                 target_exists: false,
                 sink_open: false,
-                writing_temp: true,
                 total: 0,
                 sent: 0,
                 source: None,
@@ -125,7 +125,7 @@ impl TransferTask {
     }
 
     pub(crate) fn download(id: TaskId, remote: PathBuf, local: PathBuf, overwrite: bool) -> Self {
-        let temp = local_sibling_temp(&local, "download", id);
+        let temp = LocalTempFile::new(&local, "download", id);
         Self::new(
             id,
             TaskKind::Download(DownloadTask {
@@ -136,7 +136,6 @@ impl TransferTask {
                 total: 0,
                 received: 0,
                 source_open: false,
-                sink: None,
                 chunk: vec![0; CHUNK],
                 phase: DownloadPhase::Probe,
             }),
@@ -273,14 +272,7 @@ impl TransferTask {
         match &mut self.kind {
             TaskKind::Upload(task) => {
                 fs.abandon();
-                let note = if task.writing_temp {
-                    match fs.unlink(&task.temp) {
-                        Ok(()) => String::new(),
-                        Err(_) => format!("；临时文件未能删除：{}", task.temp.display()),
-                    }
-                } else {
-                    "；目标文件处于直接写入的中间状态".to_owned()
-                };
+                let note = task.temp.discard(fs);
                 TaskOutcome::Cancelled(format!(
                     "上传已取消：{} → {}{note}",
                     task.local.display(),
@@ -289,12 +281,7 @@ impl TransferTask {
             }
             TaskKind::Download(task) => {
                 fs.abandon();
-                task.sink = None;
-                let note = match std::fs::remove_file(&task.temp) {
-                    Ok(()) => String::new(),
-                    Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-                    Err(_) => format!("；本地临时文件未能删除：{}", task.temp.display()),
-                };
+                let note = task.temp.discard();
                 TaskOutcome::Cancelled(format!(
                     "下载已取消：{} → {}{note}",
                     task.remote.display(),
@@ -328,34 +315,6 @@ impl TransferTask {
     }
 }
 
-/// 目标同目录下的临时文件名：点前缀 + 进程与任务标识，避免跨会话重名。
-fn temp_name_of(path: &Path, label: &str, id: TaskId) -> String {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    format!(".{name}.{label}-{}-{id}.tmp", std::process::id())
-}
-
-/// 目标的父目录；没有父目录（如根）时给 `.`，相对路径语义下即当前目录。
-fn parent_dir_of(path: &Path) -> PathBuf {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// 远端目标的临时路径：远端按 POSIX 语义拼（remote_join），`\` 会被服务端
-/// 当文件名字符。
-fn remote_sibling_temp(remote: &Path, label: &str, id: TaskId) -> PathBuf {
-    remote_join(&parent_dir_of(remote), &temp_name_of(remote, label, id))
-}
-
-/// 本地目标的临时路径：本地按宿主平台语义拼。
-fn local_sibling_temp(local: &Path, label: &str, id: TaskId) -> PathBuf {
-    parent_dir_of(local).join(temp_name_of(local, label, id))
-}
-
 /// 路径末段的名字；没有末段（如根）时给占位名，调用方只为显示用它。
 fn file_name_of(path: &Path) -> String {
     path.file_name()
@@ -378,12 +337,11 @@ struct UploadTask {
     local: PathBuf,
     remote: PathBuf,
     overwrite: bool,
-    temp: PathBuf,
+    /// 临时文件的提交与清理策略（含回退直写状态）；本机只管阶段与流
+    temp: RemoteTempFile,
     target_exists: bool,
     /// 远端写端是否已打开（打开操作没有 Blocked 返回，用标志记忆）
     sink_open: bool,
-    /// 当前写的是临时文件还是（回退时）目标本身；也决定提交方式
-    writing_temp: bool,
     total: u64,
     sent: u64,
     source: Option<std::fs::File>,
@@ -446,15 +404,15 @@ impl UploadTask {
             }
             UploadPhase::Stream => {
                 if !self.sink_open {
-                    let open = if self.writing_temp {
-                        fs.open_write_exclusive(&self.temp)
-                    } else {
+                    // 回退直写后打开的就是目标本身（正常路径只是临时文件）
+                    let open = if self.temp.is_direct() {
                         fs.open_write_truncate(&self.remote)
+                            .map_err(|error| format!("上传失败：{error}"))
+                    } else {
+                        self.temp.begin(fs)
                     };
                     if let Err(error) = open {
-                        return StepOutcome::Finished(TaskOutcome::Failed(format!(
-                            "上传失败：{error}"
-                        )));
+                        return StepOutcome::Finished(TaskOutcome::Failed(error));
                     }
                     self.sink_open = true;
                 }
@@ -498,7 +456,7 @@ impl UploadTask {
                     }
                     Ok(StreamProgress::Blocked) => StepOutcome::Blocked,
                     Err(error) => {
-                        let cleanup = discard_remote_temp(fs, self.writing_temp, &self.temp);
+                        let cleanup = self.temp.discard(fs);
                         StepOutcome::Finished(TaskOutcome::Failed(format!(
                             "上传失败：{error}{cleanup}"
                         )))
@@ -506,84 +464,46 @@ impl UploadTask {
                 }
             }
             UploadPhase::Commit => {
-                if let Err(error) = fs.finish() {
-                    let cleanup = discard_remote_temp(fs, self.writing_temp, &self.temp);
-                    return StepOutcome::Finished(TaskOutcome::Failed(format!(
-                        "上传失败：{error}{cleanup}"
-                    )));
-                }
                 self.sink_open = false;
-                // 回退路径直接写的就是目标本身：刷盘完成即提交完成
-                if !self.writing_temp {
-                    return StepOutcome::Finished(TaskOutcome::Completed(format!(
-                        "已上传 {} 字节到 {}（直接写入）",
-                        self.sent,
-                        self.remote.display()
-                    )));
-                }
-                let commit = if self.target_exists && self.overwrite {
-                    fs.rename_overwrite(&self.temp, &self.remote)
-                } else {
-                    fs.rename(&self.temp, &self.remote)
-                };
-                match commit {
-                    Ok(()) => StepOutcome::Finished(TaskOutcome::Completed(format!(
-                        "已上传 {} 字节到 {}",
-                        self.sent,
-                        self.remote.display()
-                    ))),
-                    Err(error) if self.target_exists && self.overwrite => {
-                        // 用户已确认覆盖但服务端拒绝覆盖 rename（ADR-002）：
-                        // 丢弃临时文件，按用户决策回退为直接写入目标
-                        let _ = fs.unlink(&self.temp);
-                        match fs.open_write_truncate(&self.remote) {
-                            Ok(()) => {
-                                self.writing_temp = false;
-                                self.sink_open = true;
-                                self.sent = 0;
-                                self.chunk_len = 0;
-                                self.chunk_sent = 0;
-                                match std::fs::File::open(&self.local) {
-                                    Ok(file) => self.source = Some(file),
-                                    Err(reopen_error) => {
-                                        return StepOutcome::Finished(TaskOutcome::Failed(
-                                            format!(
-                                                "上传失败：覆盖提交被拒绝（{error}），回退直写也失败：{reopen_error}"
-                                            ),
-                                        ));
-                                    }
-                                }
-                                self.phase = UploadPhase::Stream;
-                                StepOutcome::Progressed {
-                                    done: 0,
-                                    total: Some(self.total),
-                                }
-                            }
-                            Err(open_error) => StepOutcome::Finished(TaskOutcome::Failed(format!(
-                                "上传失败：{error}；回退直接写入也失败：{open_error}"
-                            ))),
-                        }
-                    }
-                    Err(error) => {
-                        let cleanup = discard_remote_temp(fs, true, &self.temp);
-                        StepOutcome::Finished(TaskOutcome::Failed(format!(
-                            "上传失败：提交 rename 失败：{error}{cleanup}"
+                // 提交、回退直写与失败清理都在策略里（ADR-002）
+                match self
+                    .temp
+                    .commit(fs, &self.remote, self.target_exists && self.overwrite)
+                {
+                    Ok(RemoteCommit::Renamed) => StepOutcome::Finished(TaskOutcome::Completed(
+                        format!("已上传 {} 字节到 {}", self.sent, self.remote.display()),
+                    )),
+                    Ok(RemoteCommit::WroteDirect) => {
+                        StepOutcome::Finished(TaskOutcome::Completed(format!(
+                            "已上传 {} 字节到 {}（直接写入）",
+                            self.sent,
+                            self.remote.display()
                         )))
                     }
+                    Ok(RemoteCommit::FellBack { refused }) => {
+                        // 覆盖 rename 被拒已回退直写：目标已截断打开，重传一遍
+                        self.sink_open = true;
+                        self.sent = 0;
+                        self.chunk_len = 0;
+                        self.chunk_sent = 0;
+                        match std::fs::File::open(&self.local) {
+                            Ok(file) => self.source = Some(file),
+                            Err(reopen_error) => {
+                                return StepOutcome::Finished(TaskOutcome::Failed(format!(
+                                    "上传失败：覆盖提交被拒绝（{refused}），回退直写也失败：{reopen_error}"
+                                )));
+                            }
+                        }
+                        self.phase = UploadPhase::Stream;
+                        StepOutcome::Progressed {
+                            done: 0,
+                            total: Some(self.total),
+                        }
+                    }
+                    Err(message) => StepOutcome::Finished(TaskOutcome::Failed(message)),
                 }
             }
         }
-    }
-}
-
-/// 尽力删除远端临时文件；失败时返回要拼进终态的提示（ADR-002 要求带路径）。
-fn discard_remote_temp(fs: &mut dyn RemoteFs, writing_temp: bool, temp: &Path) -> String {
-    if !writing_temp {
-        return "；目标文件处于直接写入的中间状态".to_owned();
-    }
-    match fs.unlink(temp) {
-        Ok(()) => String::new(),
-        Err(_) => format!("；临时文件未能删除：{}", temp.display()),
     }
 }
 
@@ -599,11 +519,11 @@ struct DownloadTask {
     remote: PathBuf,
     local: PathBuf,
     overwrite: bool,
-    temp: PathBuf,
+    /// 本地临时文件的提交与清理策略；本机只管阶段与流
+    temp: LocalTempFile,
     total: u64,
     received: u64,
     source_open: bool,
-    sink: Option<std::fs::File>,
     chunk: Vec<u8>,
     phase: DownloadPhase,
 }
@@ -640,14 +560,8 @@ impl DownloadTask {
                         self.local.display()
                     )));
                 }
-                match std::fs::File::create(&self.temp) {
-                    Ok(file) => self.sink = Some(file),
-                    Err(error) => {
-                        return StepOutcome::Finished(TaskOutcome::Failed(format!(
-                            "下载失败：写不了本地临时文件 {}：{error}",
-                            self.temp.display()
-                        )));
-                    }
+                if let Err(message) = self.temp.create() {
+                    return StepOutcome::Finished(TaskOutcome::Failed(message));
                 }
                 self.phase = DownloadPhase::Stream;
                 StepOutcome::Progressed {
@@ -673,16 +587,8 @@ impl DownloadTask {
                         }
                     }
                     Ok(StreamProgress::Done(count)) => {
-                        let Some(sink) = self.sink.as_mut() else {
-                            return StepOutcome::Finished(TaskOutcome::Failed(
-                                "下载失败：本地临时文件已不可写".to_owned(),
-                            ));
-                        };
-                        if let Err(error) = sink.write_all(&self.chunk[..count]) {
-                            return StepOutcome::Finished(TaskOutcome::Failed(format!(
-                                "下载失败：写入本地临时文件出错：{error}（{}）",
-                                self.temp.display()
-                            )));
+                        if let Err(message) = self.temp.write(&self.chunk[..count]) {
+                            return StepOutcome::Finished(TaskOutcome::Failed(message));
                         }
                         self.received += count as u64;
                         StepOutcome::Progressed {
@@ -692,7 +598,7 @@ impl DownloadTask {
                     }
                     Ok(StreamProgress::Blocked) => StepOutcome::Blocked,
                     Err(error) => {
-                        let cleanup = discard_local_temp(&self.temp);
+                        let cleanup = self.temp.discard();
                         StepOutcome::Finished(TaskOutcome::Failed(format!(
                             "下载失败：{error}{cleanup}"
                         )))
@@ -700,41 +606,17 @@ impl DownloadTask {
                 }
             }
             DownloadPhase::Commit => {
-                let sync_result = self
-                    .sink
-                    .take()
-                    .map(|file| file.sync_all())
-                    .unwrap_or_else(|| Err(std::io::Error::other("临时文件已不可用")));
-                if let Err(error) = sync_result {
-                    let cleanup = discard_local_temp(&self.temp);
-                    return StepOutcome::Finished(TaskOutcome::Failed(format!(
-                        "下载失败：刷盘失败：{error}{cleanup}"
-                    )));
-                }
-                // 同目录 rename 在 macOS/Linux 上是原子替换；同一目录不存在跨卷问题
-                match std::fs::rename(&self.temp, &self.local) {
+                // 同目录 rename 的原子提交与失败清理都在策略里（ADR-002）
+                match self.temp.commit(&self.local) {
                     Ok(()) => StepOutcome::Finished(TaskOutcome::Completed(format!(
                         "已下载 {} 字节到 {}",
                         self.received,
                         self.local.display()
                     ))),
-                    Err(error) => {
-                        let cleanup = discard_local_temp(&self.temp);
-                        StepOutcome::Finished(TaskOutcome::Failed(format!(
-                            "下载失败：提交本地文件失败：{error}{cleanup}"
-                        )))
-                    }
+                    Err(message) => StepOutcome::Finished(TaskOutcome::Failed(message)),
                 }
             }
         }
-    }
-}
-
-fn discard_local_temp(temp: &Path) -> String {
-    match std::fs::remove_file(temp) {
-        Ok(()) => String::new(),
-        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(_) => format!("；本地临时文件未能删除：{}", temp.display()),
     }
 }
 
@@ -743,7 +625,7 @@ fn discard_local_temp(temp: &Path) -> String {
 /// 上传树里当前正在传的一个文件：远端临时写入 + rename 提交，与单文件上传同规则。
 struct TreeFileUpload {
     source: std::fs::File,
-    temp: PathBuf,
+    temp: RemoteTempFile,
     target: PathBuf,
     chunk: Vec<u8>,
     chunk_len: usize,
@@ -858,10 +740,7 @@ impl UploadTreeTask {
             return String::new();
         };
         fs.abandon();
-        match fs.unlink(&file.temp) {
-            Ok(()) => String::new(),
-            Err(_) => format!("；临时文件未能删除：{}", file.temp.display()),
-        }
+        file.temp.discard(fs)
     }
 }
 
@@ -869,9 +748,8 @@ impl TreeFileUpload {
     fn open(fs: &mut dyn RemoteFs, local: PathBuf, target: PathBuf) -> Result<Self, String> {
         let source = std::fs::File::open(&local)
             .map_err(|error| format!("上传失败：打不开本地文件 {}：{error}", local.display()))?;
-        let temp = remote_sibling_temp(&target, "upload", next_temp_suffix());
-        fs.open_write_exclusive(&temp)
-            .map_err(|error| format!("上传失败：写远端临时文件 {}：{error}", temp.display()))?;
+        let mut temp = RemoteTempFile::new(&target, "upload", next_temp_suffix());
+        temp.begin(fs)?;
         Ok(Self {
             source,
             temp,
@@ -911,25 +789,18 @@ impl TreeFileUpload {
             }
             Ok(StreamProgress::Blocked) => TreeFileStep::Blocked,
             Err(error) => {
-                let _ = fs.unlink(&self.temp);
-                TreeFileStep::Failed(format!("上传失败：{error}"))
+                let cleanup = self.temp.discard(fs);
+                TreeFileStep::Failed(format!("上传失败：{error}{cleanup}"))
             }
         }
     }
 
     fn commit(&mut self, fs: &mut dyn RemoteFs) -> TreeFileStep {
-        if let Err(error) = fs.finish() {
-            let _ = fs.unlink(&self.temp);
-            return TreeFileStep::Failed(format!("上传失败：{error}"));
+        // 树上传不确认覆盖：目标冲突即失败（合并语义，ADR-005）
+        match self.temp.commit(fs, &self.target, false) {
+            Ok(_) => TreeFileStep::Done,
+            Err(message) => TreeFileStep::Failed(message),
         }
-        if let Err(error) = fs.rename(&self.temp, &self.target) {
-            let _ = fs.unlink(&self.temp);
-            return TreeFileStep::Failed(format!(
-                "上传失败：提交 {} 失败：{error}",
-                self.target.display()
-            ));
-        }
-        TreeFileStep::Done
     }
 }
 
@@ -946,8 +817,7 @@ enum TreeFileStep {
 
 /// 下载树里当前正在传的一个文件：本地临时写入 + 原子替换，与单文件下载同规则。
 struct TreeFileDownload {
-    sink: Option<std::fs::File>,
-    temp: PathBuf,
+    temp: LocalTempFile,
     target: PathBuf,
     chunk: Vec<u8>,
 }
@@ -1090,8 +960,7 @@ impl DownloadTreeTask {
         let Some(file) = self.current.as_mut() else {
             return String::new();
         };
-        file.sink = None;
-        discard_local_temp(&file.temp)
+        file.temp.discard()
     }
 }
 
@@ -1099,11 +968,9 @@ impl TreeFileDownload {
     fn open(fs: &mut dyn RemoteFs, remote: PathBuf, target: PathBuf) -> Result<Self, String> {
         fs.open_read(&remote)
             .map_err(|error| format!("下载失败：{error}"))?;
-        let temp = local_sibling_temp(&target, "download", next_temp_suffix());
-        let sink = std::fs::File::create(&temp)
-            .map_err(|error| format!("下载失败：写不了本地临时文件 {}：{error}", temp.display()))?;
+        let mut temp = LocalTempFile::new(&target, "download", next_temp_suffix());
+        temp.create()?;
         Ok(Self {
-            sink: Some(sink),
             temp,
             target,
             chunk: vec![0; CHUNK],
@@ -1112,40 +979,20 @@ impl TreeFileDownload {
 
     fn step(&mut self, fs: &mut dyn RemoteFs) -> TreeFileStep {
         match fs.read(&mut self.chunk) {
-            Ok(StreamProgress::Done(0)) => {
-                let sync_result = self
-                    .sink
-                    .take()
-                    .map(|file| file.sync_all())
-                    .unwrap_or_else(|| Err(std::io::Error::other("临时文件已不可用")));
-                if let Err(error) = sync_result {
-                    let _ = std::fs::remove_file(&self.temp);
-                    return TreeFileStep::Failed(format!("下载失败：刷盘失败：{error}"));
-                }
-                if let Err(error) = std::fs::rename(&self.temp, &self.target) {
-                    let _ = std::fs::remove_file(&self.temp);
-                    return TreeFileStep::Failed(format!(
-                        "下载失败：提交 {} 失败：{error}",
-                        self.target.display()
-                    ));
-                }
-                TreeFileStep::Done
-            }
+            Ok(StreamProgress::Done(0)) => match self.temp.commit(&self.target) {
+                Ok(()) => TreeFileStep::Done,
+                Err(message) => TreeFileStep::Failed(message),
+            },
             Ok(StreamProgress::Done(count)) => {
-                let Some(sink) = self.sink.as_mut() else {
-                    return TreeFileStep::Failed("下载失败：本地临时文件已不可写".to_owned());
-                };
-                if let Err(error) = sink.write_all(&self.chunk[..count]) {
-                    return TreeFileStep::Failed(format!(
-                        "下载失败：写入本地临时文件出错：{error}"
-                    ));
+                if let Err(message) = self.temp.write(&self.chunk[..count]) {
+                    return TreeFileStep::Failed(message);
                 }
                 TreeFileStep::Progress(count as u64)
             }
             Ok(StreamProgress::Blocked) => TreeFileStep::Blocked,
             Err(error) => {
-                let _ = std::fs::remove_file(&self.temp);
-                TreeFileStep::Failed(format!("下载失败：{error}"))
+                let cleanup = self.temp.discard();
+                TreeFileStep::Failed(format!("下载失败：{error}{cleanup}"))
             }
         }
     }
@@ -1560,19 +1407,27 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
 
-    use super::{
-        RemoteFs, RemoteStat, StepOutcome, StreamProgress, TransferTask, local_sibling_temp,
-        remote_sibling_temp,
-    };
+    use super::{RemoteFs, RemoteStat, StepOutcome, StreamProgress, TransferTask};
     use crate::sftp::TaskOutcome;
+    use crate::transport::sftp_temp::{LocalTempFile, RemoteTempFile};
 
-    /// 内存桩：记录操作日志，可模拟「服务端不支持覆盖 rename」与「写阻塞」。
-    /// 符号链接在桩里就是普通文件条目（is_dir=false），「不跟随」体现为
-    /// 删除链接不动它指向的目标。
+    /// 单文件上传的临时文件路径（任务 id 即临时名标识）。
+    fn upload_temp_of(remote: &Path, id: crate::sftp::TaskId) -> PathBuf {
+        RemoteTempFile::new(remote, "upload", id)
+            .temp()
+            .to_path_buf()
+    }
+
+    /// 内存桩：记录操作日志，可模拟「服务端不支持覆盖 rename」「写/读失败」
+    /// 「清理失败」与「写阻塞」。符号链接在桩里就是普通文件条目（is_dir=false），
+    /// 「不跟随」体现为删除链接不动它指向的目标。
     struct StubFs {
         files: HashMap<PathBuf, Vec<u8>>,
         dirs: HashSet<PathBuf>,
         fail_rename_overwrite: bool,
+        fail_writes: bool,
+        fail_reads: bool,
+        fail_unlink: bool,
         block_writes: usize,
         open: Option<OpenState>,
         log: Vec<String>,
@@ -1592,6 +1447,9 @@ mod tests {
                 files: HashMap::new(),
                 dirs,
                 fail_rename_overwrite: false,
+                fail_writes: false,
+                fail_reads: false,
+                fail_unlink: false,
                 block_writes: 0,
                 open: None,
                 log: Vec::new(),
@@ -1707,6 +1565,9 @@ mod tests {
             if !open.writable {
                 return Err("写端不可写".to_owned());
             }
+            if self.fail_writes {
+                return Err("写失败".to_owned());
+            }
             if self.block_writes > 0 {
                 self.block_writes -= 1;
                 return Ok(StreamProgress::Blocked);
@@ -1721,6 +1582,9 @@ mod tests {
             let Some(open) = self.open.as_mut() else {
                 return Err("没有打开的文件".to_owned());
             };
+            if self.fail_reads {
+                return Err("读失败".to_owned());
+            }
             let Some(content) = self.files.get(&open.path) else {
                 return Err("文件在读的过程中消失了".to_owned());
             };
@@ -1773,6 +1637,9 @@ mod tests {
         }
 
         fn unlink(&mut self, path: &Path) -> Result<(), String> {
+            if self.fail_unlink {
+                return Err(format!("{} 删不掉", path.display()));
+            }
             self.files
                 .remove(path)
                 .map(|_| ())
@@ -1888,10 +1755,7 @@ mod tests {
         );
         assert_eq!(fs.files.get(&remote).unwrap(), &content);
         // 临时文件经 rename 提交，不复存在
-        assert!(
-            !fs.files
-                .contains_key(&remote_sibling_temp(&remote, "upload", 1))
-        );
+        assert!(!fs.files.contains_key(&upload_temp_of(&remote, 1)));
         assert!(
             fs.log
                 .iter()
@@ -1969,8 +1833,7 @@ mod tests {
             fs.log
         );
         assert!(
-            !fs.files
-                .contains_key(&remote_sibling_temp(&remote, "upload", 1)),
+            !fs.files.contains_key(&upload_temp_of(&remote, 1)),
             "被拒绝的临时文件应被清理"
         );
     }
@@ -2000,8 +1863,7 @@ mod tests {
         );
         assert!(!fs.files.contains_key(&remote), "取消不应留下目标文件");
         assert!(
-            !fs.files
-                .contains_key(&remote_sibling_temp(&remote, "upload", 1)),
+            !fs.files.contains_key(&upload_temp_of(&remote, 1)),
             "取消应清理临时文件"
         );
     }
@@ -2083,7 +1945,9 @@ mod tests {
             "下载内容应与远端一致"
         );
         assert!(
-            !local_sibling_temp(&local.path, "download", 1).exists(),
+            !LocalTempFile::new(&local.path, "download", 1)
+                .temp()
+                .exists(),
             "本地临时文件应已提交消失"
         );
 
@@ -2169,6 +2033,28 @@ mod tests {
         );
     }
 
+    /// ADR-002：清理失败时终态必须包含临时文件路径。树上传原先把 unlink
+    /// 结果整个 `let _ =` 丢掉，清理失败用户不知情。
+    #[test]
+    fn tree_upload_names_the_temp_file_when_cleanup_fails() {
+        let local = LocalDir::new("tree-cleanup");
+        local.put("a.bin", &[7u8; 64]);
+        let mut fs = StubFs::new();
+        fs.put_dir("/remote");
+        fs.fail_writes = true;
+        fs.fail_unlink = true;
+
+        let mut task = TransferTask::upload_tree(1, local.path.clone(), PathBuf::from("/remote"));
+        let outcome = run_to_finish(&mut task, &mut fs, 32);
+
+        assert!(
+            matches!(&outcome, TaskOutcome::Failed(text)
+                if text.contains("临时文件未能删除")
+                    && text.contains(".a.bin.upload-")),
+            "清理失败的终态必须带上临时文件路径：{outcome:?}"
+        );
+    }
+
     #[test]
     fn download_tree_recreates_the_remote_tree_locally() {
         let mut fs = StubFs::new();
@@ -2216,6 +2102,48 @@ mod tests {
         let outcome = run_to_finish(&mut task, &mut fs, 512);
         assert!(matches!(outcome, TaskOutcome::Completed(_)), "{outcome:?}");
         assert_eq!(std::fs::read(target.join("one.txt")).unwrap(), b"one");
+    }
+
+    /// ADR-002 同款守卫，本地轴：树下载读失败后的清理失败必须带路径。
+    /// 删不掉的临时文件用只读目录模拟（Unix 权限语义）。
+    #[cfg(unix)]
+    #[test]
+    fn download_tree_names_the_temp_file_when_cleanup_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fs = StubFs::new();
+        fs.put_file("/tree/a.txt", b"content");
+        let local = LocalDir::new("down-tree-cleanup");
+        let target = local.path.join("copy");
+
+        let mut task =
+            TransferTask::download_tree(1, PathBuf::from("/tree"), target.clone(), false);
+        // 推进到当前文件的临时文件已创建（此后一步才会读远端内容）
+        for _ in 0..8 {
+            let _ = task.step(&mut fs);
+            if task.current_file().is_some() {
+                break;
+            }
+        }
+        assert!(task.current_file().is_some(), "应已打开树内文件");
+        fs.fail_reads = true;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555))
+            .expect("收紧目标目录权限");
+
+        let outcome = match task.step(&mut fs) {
+            StepOutcome::Finished(outcome) => outcome,
+            _ => panic!("读失败应一步到终态"),
+        };
+        // 恢复权限，让 LocalDir 的 Drop 能清理
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("恢复目标目录权限");
+
+        assert!(
+            matches!(&outcome, TaskOutcome::Failed(text)
+                if text.contains("本地临时文件未能删除")
+                    && text.contains(".a.txt.download-")),
+            "清理失败的终态必须带上本地临时文件路径：{outcome:?}"
+        );
     }
 
     #[test]

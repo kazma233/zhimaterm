@@ -14,6 +14,7 @@ pub(super) mod local;
 pub(super) mod monitor;
 pub(crate) mod poll;
 pub(super) mod sftp_task;
+pub(super) mod sftp_temp;
 pub(super) mod ssh;
 #[cfg(test)]
 mod tests;
