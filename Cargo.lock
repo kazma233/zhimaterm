@@ -8105,6 +8105,7 @@ dependencies = [
  "smol",
  "socket2",
  "ssh2",
+ "windows-sys 0.61.2",
  "zhimaterm-base",
  "zhimaterm-local",
  "zhimaterm-recording",

@@ -54,7 +54,7 @@ impl ZhimaTermApp {
         let distros = zhimaterm_local::wsl::list_distros();
         if !distros.is_empty() {
             // 开会话是外壳的编排动作，经回调注入模态（ADR-007 修订七）
-            let on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)> = Rc::new(|name, window, cx| {
+            let on_pick: shell::WslPickHandler = Rc::new(|name, window, cx| {
                 super::update_app(window, cx, |app, window, cx| {
                     app.open_wsl_distro(name, window, cx)
                 });

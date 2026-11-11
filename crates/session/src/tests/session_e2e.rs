@@ -2926,7 +2926,7 @@ fn credentials_are_overwritten_before_release() {
 mod wsl {
     use std::time::Duration;
 
-    use super::{rendered, type_line, wait_for_exit, wait_for_frame};
+    use super::{type_line, wait_for_exit, wait_for_frame};
     use crate::{
         ExitReason, LocalShell, Session, SessionConfig, SessionEvents, SessionTarget, StartupSize,
     };

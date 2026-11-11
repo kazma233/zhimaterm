@@ -26,6 +26,14 @@ socket2 = "0.5"
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# perf 验收用例按父进程 id 数子进程、查句柄数（Toolhelp 快照 + 句柄计数）
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
+
 [[bin]]
 name = "zhimaterm-ssh-sftp-probe"
 path = "src/bin/ssh_sftp_probe.rs"

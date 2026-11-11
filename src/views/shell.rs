@@ -555,6 +555,11 @@ fn shortcut_group(
         ))
 }
 
+/// WSL 发行版选中回调：外壳注入的开会话动作（ADR-007 修订七），视图层
+/// 不依赖 app。
+#[cfg(windows)]
+pub(crate) type WslPickHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// WSL 发行版选择模态（ADR-021）：多个发行版时点开入口出现。条目两行——
 /// 发行版名（等宽字体）+ 家族/版本副行（缺哪项省哪项），默认发行版置顶带
 /// 「默认」标记，其余按名排（顺序由枚举层保证）。点条目即开会话，
@@ -569,14 +574,14 @@ fn shortcut_group(
 pub struct WslModal {
     distros: Vec<zhimaterm_local::wsl::WslDistro>,
     /// 点条目后的开会话动作：外壳注入（ADR-007 修订七），视图层不依赖 app。
-    on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
+    on_pick: WslPickHandler,
 }
 
 #[cfg(windows)]
 impl WslModal {
     pub fn new(
         distros: Vec<zhimaterm_local::wsl::WslDistro>,
-        on_pick: Rc<dyn Fn(&str, &mut Window, &mut App)>,
+        on_pick: WslPickHandler,
     ) -> Self {
         Self { distros, on_pick }
     }
