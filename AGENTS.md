@@ -37,7 +37,7 @@ src/                根包（bin）             外壳与视图：
 
 ```sh
 cargo run --bin zhimaterm          # 开发运行
-cargo test                         # 单元测试（模块内联，无需外部环境）
+cargo test --workspace             # 单元测试（模块内联，无需外部环境；根包是普通包，不带 --workspace 只会跑根包）
 cargo fmt                          # 每次改完代码执行，原样接受 rustfmt 输出
 cargo clippy --workspace --all-targets   # 静态检查，对本仓代码要求 0 warning
 task install                       # 构建release + 按平台做桌面集成（task uninstall 卸载）
@@ -50,7 +50,7 @@ task install                       # 构建release + 按平台做桌面集成（
 构建机需要 Zig 0.17.x（自行安装，在 PATH 或设 `ZIG` 环境变量）；
 首次构建联网下载固定源码包（sha256 校验），离线构建设 `GHOSTTY_SOURCE_DIR` 指向本地 Ghostty 源码树。
 
-**收尾检查（改了代码就必须跑）**：`cargo fmt` → `cargo clippy --workspace --all-targets` → `cargo test`，三项全绿才算改完。
+**收尾检查（改了代码就必须跑）**：`cargo fmt` → `cargo clippy --workspace --all-targets` → `cargo test --workspace`，三项全绿才算改完。
 
 - `--all-targets` 不能省：不带它 `#[cfg(test)]` 里的代码不参与编译与 lint。
 - clippy 对本仓代码要求 **0 warning**；有 warning 就改代码消掉，不留给后来人。
@@ -88,7 +88,7 @@ task install                       # 构建release + 按平台做桌面集成（
 ## 测试
 
 - 完整实现配完整测试：改动涉及的行为分区都要有测试守住；断言可观察行为，不复述实现。
-- 改完代码必须跑完收尾检查（`cargo fmt` → `cargo clippy --workspace --all-targets` → `cargo test`）并确认全绿才收工；任一项不绿就继续改到绿，不交付「待修」状态。
+- 改完代码必须跑完收尾检查（`cargo fmt` → `cargo clippy --workspace --all-targets` → `cargo test --workspace`）并确认全绿才收工；任一项不绿就继续改到绿，不交付「待修」状态。
 - 修复问题时先展示可复现的失败，再展示修复后的成功；无法完成失败前验证时明确报告。
 - 主张范围匹配证据，缺少证据的结论保持未知；继续尝试无法产生新证据时，增加日志或最小复现等观测手段。
 
@@ -96,7 +96,7 @@ task install                       # 构建release + 按平台做桌面集成（
 
 - Conventional Commits：`<type>(scope): short summary`，如 `feat:`、`fix:`、`refactor:`、`docs:`。
 - 提交信息只说明最终实际行为；中间尝试与已撤销方案不写入提交信息或 PR 描述。
-- PR 说明改了什么与为什么、关联任务、API/UI 影响、本地验证步骤（如 `cargo fmt` + `cargo clippy --workspace --all-targets` + `cargo test`）。
+- PR 说明改了什么与为什么、关联任务、API/UI 影响、本地验证步骤（如 `cargo fmt` + `cargo clippy --workspace --all-targets` + `cargo test --workspace`）。
 
 ## 文档体系
 
