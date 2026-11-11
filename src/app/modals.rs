@@ -668,11 +668,11 @@ impl ZhimaTermApp {
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
-        let placeholder = tab.auto_label(index, cx);
+        let placeholder = tab.auto_label(cx);
         let current = tab.name.clone().unwrap_or_default();
         let dialog = Dialog::prompt(
             "重命名会话",
-            "名字只显示在侧栏这一行，盖过前台程序标题与会话编号；留空恢复自动标题。",
+            "名字只显示在侧栏这一行，盖过前台程序标题与工作目录标题；留空恢复自动标题。",
             &placeholder,
             font::terminal_font(&self.font.family),
             cx,

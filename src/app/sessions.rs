@@ -17,11 +17,24 @@ use super::modals::modal_action;
 use super::{MAX_SESSIONS, Tab, ZhimaTermApp};
 
 impl ZhimaTermApp {
-    /// 新开一个本地会话标签并切过去。
+    /// 新开一个本地会话标签并切过去：目录继承新开那一刻焦点格的 cwd
+    /// （ADR-054），拿不到时由设置默认回落。
     pub(super) fn open_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_local_session(None, window, cx);
+    }
+
+    /// 开本地会话的共用入口：`inherited` 显式带入要继承的目录（关空补开时
+    /// 是刚关掉的标签焦点格的目录，移除前采集）；None = 现查焦点格。
+    fn open_local_session(
+        &mut self,
+        inherited: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = inherited.or_else(|| self.focused_cwd(cx));
         self.open_session_with(
             SessionTarget::Local {
-                shell: self.default_local_shell(),
+                shell: self.default_local_shell(cwd),
             },
             None,
             window,
@@ -29,9 +42,18 @@ impl ZhimaTermApp {
         );
     }
 
+    /// 新开那一刻焦点格的 cwd（ADR-054）：SSH/WSL 焦点与尚未上报的格为 None。
+    fn focused_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
+        self.tabs
+            .get(self.active)
+            .and_then(Tab::focused_view)
+            .and_then(|view| view.read(cx).cwd())
+    }
+
     /// 设置里的默认本地 Shell 与工作目录（ADR-036）：路径可用性已在设置表单
     /// 校验，这里直接按用户选择构造；手改配置写坏了由会话启动失败显式报错。
-    fn default_local_shell(&self) -> LocalShell {
+    /// `inherited`（ADR-054）是发起格的当前目录，可采集时盖过设置默认。
+    fn default_local_shell(&self, inherited: Option<std::path::PathBuf>) -> LocalShell {
         let (shell, cwd) = match self.settings.settings() {
             Some(store) => (
                 store.local_shell_or_default().map(std::path::PathBuf::from),
@@ -41,6 +63,7 @@ impl ZhimaTermApp {
             ),
             None => (None, None),
         };
+        let cwd = inherited.or(cwd);
         match shell {
             Some(program) => LocalShell::Program { program, cwd },
             None => LocalShell::Default { cwd },
@@ -101,9 +124,7 @@ impl ZhimaTermApp {
 
         let number = self.created + 1;
         self.created = number;
-        let display_number = self.label_created + 1;
-        self.label_created = display_number;
-        let view = self.new_view(number, display_number, target, cx);
+        let view = self.new_view(number, target, cx);
         let pane = 1;
         let mut views = HashMap::new();
         views.insert(pane, view.clone());
@@ -119,7 +140,6 @@ impl ZhimaTermApp {
     pub(super) fn new_view(
         &self,
         number: usize,
-        display_number: usize,
         target: SessionTarget,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
@@ -190,19 +210,7 @@ impl ZhimaTermApp {
             }),
             saved_connection,
         };
-        cx.new(|cx| {
-            TerminalView::new(
-                cx,
-                metrics,
-                font,
-                number,
-                display_number,
-                target,
-                params,
-                scrollback,
-                hooks,
-            )
-        })
+        cx.new(|cx| TerminalView::new(cx, metrics, font, number, target, params, scrollback, hooks))
     }
 
     /// 分割聚焦格（ADR-014）：新格的会话类型跟随原格（SSH 同目标新连接，
@@ -226,9 +234,7 @@ impl ZhimaTermApp {
         let target = focused_view.read(cx).split_target();
         let number = self.created + 1;
         self.created = number;
-        let display_number = self.label_created + 1;
-        self.label_created = display_number;
-        let view = self.new_view(number, display_number, target, cx);
+        let view = self.new_view(number, target, cx);
         let tab = &mut self.tabs[self.active];
         tab.views.insert(pane, view.clone());
         // 新格获得键盘焦点与树焦点
@@ -248,10 +254,13 @@ impl ZhimaTermApp {
         let Some(tab) = self.tabs.get_mut(tab_index) else {
             return;
         };
+        // 关掉的格的目录先取走：树清空后的补开要继承它（ADR-054），而视图
+        // 马上要移出映射，事后取不到
+        let inherited = tab.views.get(&pane).and_then(|view| view.read(cx).cwd());
         tab.views.remove(&pane);
         let Some(next_pane) = tab.tree.close(pane) else {
             // 树已清空：整个标签收掉
-            self.close_session(tab_index, window, cx);
+            self.close_session_inheriting(tab_index, inherited, window, cx);
             return;
         };
         if tab_index == self.active {
@@ -433,15 +442,31 @@ impl ZhimaTermApp {
 
     /// 关闭标签。至少保留一个：关掉最后一个时会立刻新开一个。
     fn close_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let inherited = self
+            .tabs
+            .get(index)
+            .and_then(Tab::focused_view)
+            .and_then(|view| view.read(cx).cwd());
+        self.close_session_inheriting(index, inherited, window, cx);
+    }
+
+    /// `close_session` 的实作：`inherited` 是补开时要继承的目录（ADR-054）——
+    /// 调用方在标签还完整时采集（直接关标签取焦点格；关最后一格时格已被
+    /// `close_pane` 移出映射，由它先取好传入）。
+    fn close_session_inheriting(
+        &mut self,
+        index: usize,
+        inherited: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
             return;
         }
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            // 显示编号重新从 1 开始；持久化编号继续递增，不复用回滚文件键
-            self.label_created = 0;
-            self.open_session(window, cx);
+            self.open_local_session(inherited, window, cx);
             return;
         }
 

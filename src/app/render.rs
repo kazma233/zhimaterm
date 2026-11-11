@@ -278,8 +278,8 @@ impl Render for ZhimaTermApp {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                // 标题：用户起的名字优先，否则聚焦格的自动标题（ADR-047）
-                let label = tab.label(index, cx);
+                // 标题：用户起的名字优先，否则聚焦格的自动标题（ADR-047/053）
+                let label = tab.label(cx);
                 let (source, exited, bell, log_warning) = tab
                     .focused_view()
                     .map(|view| {

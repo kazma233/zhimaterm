@@ -139,7 +139,7 @@ pub struct SettingsForm {
     shell_choice: ShellChoice,
     /// 自定义 Shell 路径输入（仅「自定义」项选中时显示）
     custom_shell: Entity<TextInput>,
-    /// 默认工作目录（空 = home）
+    /// 默认工作目录（空 = home）：新会话的回落值，焦点格有目录时被继承优先（ADR-054）
     workdir: Entity<TextInput>,
     /// macOS 上 ⌥ 键当 Alt（ADR-033）。默认关：保持系统原生特殊字符输入。
     option_as_alt: bool,
@@ -729,7 +729,7 @@ impl ModalView for SettingsModal {
             ))
             .child(field_column(
                 tokens,
-                "工作目录（留空 = home）",
+                "默认工作目录（留空 = home；新会话优先沿用当前会话目录）",
                 form.workdir.clone(),
             ));
         if form.shell_custom() {

@@ -62,7 +62,7 @@
 - [ADR-039：本地格重启恢复](decisions/039-restore-cwd-and-scrollback.md)：宿主侧 cwd 采集、回滚文件与分界行、容量/失败边界。
 - [ADR-040：本地格回滚全彩恢复](decisions/040-full-color-scrollback.md)：样式 run 转录、语义色与真彩色、版本化 JSONL、旧格式回退。
 - [ADR-041：侧栏底部动作行与主题色板入口](decisions/041-sidebar-actions-and-theme-swatch.md)：会话入口单行、设置移至顶栏、主题入口只留色板。
-- [ADR-042：会话显示编号在空列表时重置](decisions/042-display-number-reset.md)：显示编号与回滚键分离、最后一个会话关闭后从 1 重新开始。
+- [ADR-042：会话显示编号在空列表时重置](decisions/042-display-number-reset.md)：显示编号与回滚键分离、最后一个会话关闭后从 1 重新开始（已废弃，由 ADR-053 取代）。
 - [ADR-043：弹窗焦点作用域](decisions/043-modal-focus-scope.md)：弹窗外壳是焦点归属层——打开不落输入框、点空白回到无焦点态、Tab 焦点环、关闭归还焦点。
 - [ADR-044：统一浮层栈与 ModalView 接入规范](decisions/044-overlay-stack-and-modal-view.md)：OverlayHost 栈是浮层唯一归属（同物种互斥替换、跨物种叠放），业务模态实现 trait 任意视图一行呼出；通用 Dialog；操作记录与「记录」模态入口收到底栏。
 - [ADR-045：全局记录门面（recorder）](decisions/045-global-recorder-facade.md)：输出日志与操作记录的统一埋点入口，注册表按格注册/注销，句柄不再层层穿透。
@@ -73,6 +73,8 @@
 - [ADR-050：终端核心后端抽象与 termwiz 后端](decisions/050-terminal-backend-abstraction.md)：语义收共享层（快照/选区/搜索/转录只有一份）、字节→网格收后端（TerminalCore trait）；设置项选新会话后端、重连沿用原格；契约 + resize 差分测试保证换后端行为一致，已知有意分歧入表。
 - [ADR-051：ghostty 后端——libghostty-vt 作为第三个终端核心](decisions/051-ghostty-vt-backend.md)：仓内薄绑定 ffi/ghostty-vt-sys（Zig 编译、绑定预生成提交）、批量视口物化 + grid_ref 慢路径、回看偏移映射进视口、同步输出定格、颜色查询应答转共享层；始终编译、macOS 先行验证。
 - [ADR-052：Resize 尾沿节流](decisions/052-resize-trailing-edge-throttle.md)：连续 resize 按 50ms 静默期节流（模型 reflow 与 PTY/SIGWINCH 同步节流、单次零延迟），投递失败回滚判重键；配套性能用例守住收敛上限。
+- [ADR-053：侧栏自动标题改用工作目录](decisions/053-sidebar-cwd-title.md)：OSC 标题 > 工作目录（home 前缀缩写 `~`）> 来源标签；废弃 ADR-042 显示编号机制，`created`/叶编号不动。
+- [ADR-054：新开本地会话继承发起格的工作目录](decisions/054-new-session-inherits-cwd.md)：⌘T/本地入口、分屏、关空补开都落在焦点格当前目录；设置默认目录退为回落（修订 ADR-036/014）。
 
 ## 背景与调研（`context/`）
 

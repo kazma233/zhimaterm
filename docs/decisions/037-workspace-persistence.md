@@ -69,3 +69,6 @@ requirements §7 要求持久化标签布局与窗口状态，一直未实现；
 
 工作区 v2 增加 `label_created` 与叶的 `label_number`，只用于侧栏「会话 N」文案；
 旧文件缺字段时回退到持久化编号。回滚文件仍用 `created`/叶编号，不复用。见 ADR-042。
+
+> 2026-11-11 修订：`label_created`/`label_number` 已随 ADR-053（自动标题改用
+> 工作目录）删除；新代码读旧文件忽略这两个字段，`created`/叶 `number` 不变。

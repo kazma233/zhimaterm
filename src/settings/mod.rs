@@ -56,6 +56,7 @@ pub struct Settings {
     /// 存绝对路径；以登录 Shell 语义启动（argv[0] 前缀 `-`，读 profile）。
     pub local_shell: Option<String>,
     /// None = 工作目录落在 home。存绝对路径，新建本地会话时校验。
+    /// 是新会话的回落目录——焦点格有 cwd 时被继承优先（ADR-054）。
     pub local_workdir: Option<String>,
     /// 终端核心后端（ADR-050）。存名字，与主题的回落纪律一致：名字不存在
     /// 时回落默认。只影响新会话。
@@ -137,7 +138,8 @@ impl Settings {
         self.local_shell.as_deref()
     }
 
-    /// 生效本地工作目录（ADR-036）：None = home。
+    /// 生效本地工作目录（ADR-036）：None = home。新会话的回落值——
+    /// 焦点格有 cwd 时继承优先（ADR-054）。
     pub fn local_workdir_or_default(&self) -> Option<&str> {
         self.local_workdir.as_deref()
     }

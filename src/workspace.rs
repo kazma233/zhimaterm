@@ -8,7 +8,9 @@
 //! 偏好；窗口几何变化防抖写，布局变化即时写。
 //!
 //! 下面的 `Saved*` 类型就是磁盘 schema：改字段前先对照 `WORKSPACE_VERSION`
-//! 的兼容策略（新增字段配 `#[serde(default)]`，不兼容变更升版本回退空布局）。
+//! 的兼容策略（新增字段配 `#[serde(default)]`，删除字段双向兼容——新代码
+//! 忽略未知字段、旧代码按 default 回退，见 ADR-053；不兼容变更升版本回退
+//! 空布局）。
 
 use std::path::PathBuf;
 
@@ -74,9 +76,6 @@ pub struct Workspace {
     pub active_tab: usize,
     /// 累计会话计数：重启后继续编号，新格不会与恢复的格重号
     pub created: usize,
-    /// 侧栏显示编号的累计计数：最后一个标签关闭时归零，只决定 `会话 N` 文案；
-    /// 回滚文件与工作区叶仍用 `created`/叶编号，不复用旧键
-    pub label_created: usize,
 }
 
 /// 窗口几何：保存侧只写窗口态的坐标（最大化/全屏在保存前已压平，见 `WindowState`）。
@@ -117,9 +116,6 @@ pub enum SavedNode {
         /// 会话编号：回滚文件以它为键（ADR-039）；v1 文件没有，按 0 处理并重新分配
         #[serde(default)]
         number: usize,
-        /// 侧栏显示编号（`会话 N`）；旧文件没有，恢复时回退到 `number`
-        #[serde(default)]
-        label_number: usize,
         /// 最后工作目录（ADR-039）：None = 沿用设置里的默认值
         #[serde(default)]
         cwd: Option<String>,
@@ -131,8 +127,6 @@ pub enum SavedNode {
         distro: String,
         #[serde(default)]
         number: usize,
-        #[serde(default)]
-        label_number: usize,
     },
     Split {
         axis: SavedAxis,
@@ -211,14 +205,6 @@ impl SavedNode {
     pub fn leaf_number(&self) -> usize {
         match self {
             Self::Local { number, .. } | Self::Wsl { number, .. } => *number,
-            Self::Split { .. } => 0,
-        }
-    }
-
-    /// 侧栏显示编号；旧文件没有该字段时为 0，由恢复方回退到持久化编号。
-    pub fn leaf_label_number(&self) -> usize {
-        match self {
-            Self::Local { label_number, .. } | Self::Wsl { label_number, .. } => *label_number,
             Self::Split { .. } => 0,
         }
     }
@@ -349,7 +335,6 @@ mod tests {
     fn local(_pane: u64) -> Option<SavedNode> {
         Some(SavedNode::Local {
             number: 1,
-            label_number: 1,
             cwd: None,
         })
     }
@@ -372,7 +357,6 @@ mod tests {
         let pruned = SavedNode::from_layout(&spec, &mut |pane| {
             (pane == 1).then_some(SavedNode::Local {
                 number: 1,
-                label_number: 1,
                 cwd: None,
             })
         })
@@ -381,7 +365,6 @@ mod tests {
             pruned,
             SavedNode::Local {
                 number: 1,
-                label_number: 1,
                 cwd: None
             }
         );
@@ -409,13 +392,11 @@ mod tests {
             ratio: 0.25,
             first: Box::new(SavedNode::Local {
                 number: 3,
-                label_number: 3,
                 cwd: Some("/tmp".into()),
             }),
             second: Box::new(SavedNode::Wsl {
                 distro: "Ubuntu".into(),
                 number: 4,
-                label_number: 4,
             }),
         };
         let mut next = 1;
@@ -432,7 +413,6 @@ mod tests {
             ratio: 0.5,
             first: Box::new(SavedNode::Local {
                 number: 1,
-                label_number: 1,
                 cwd: None,
             }),
             second: Box::new(SavedNode::Split {
@@ -441,11 +421,9 @@ mod tests {
                 first: Box::new(SavedNode::Wsl {
                     distro: "Ubuntu".into(),
                     number: 2,
-                    label_number: 2,
                 }),
                 second: Box::new(SavedNode::Local {
                     number: 3,
-                    label_number: 3,
                     cwd: None,
                 }),
             }),
@@ -554,7 +532,6 @@ mod tests {
                 super::SavedTab {
                     root: SavedNode::Local {
                         number: 1,
-                        label_number: 1,
                         cwd: Some("/tmp".into()),
                     },
                     name: Some("生产库".into()),
@@ -562,7 +539,6 @@ mod tests {
                 super::SavedTab {
                     root: SavedNode::Local {
                         number: 2,
-                        label_number: 2,
                         cwd: None,
                     },
                     name: None,
@@ -570,7 +546,6 @@ mod tests {
             ],
             active_tab: 0,
             created: 3,
-            label_created: 3,
         };
         workspace.save_at(path.clone()).expect("保存应成功");
         let reloaded = Workspace::load_at(path.clone())
@@ -588,7 +563,8 @@ mod tests {
     }
 
     /// 标签名字是 ADR-047 追加的字段：此前写出的文件没有它，读回时标签按
-    /// 「没起名」处理，整份文件照常可读。
+    /// 「没起名」处理，整份文件照常可读。样例里带着 ADR-053 已删除的
+    /// `label_number`——未知字段被忽略，同时守住删字段的旧文件兼容。
     #[test]
     fn tabs_saved_before_names_existed_load_as_unnamed() {
         let json = format!(

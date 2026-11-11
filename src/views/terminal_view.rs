@@ -218,9 +218,6 @@ pub struct TerminalView {
     history_sub: Option<gpui::Subscription>,
     /// 回滚持久化文件的键与工作区叶标识（ADR-039）：进程内只增不复用
     number: usize,
-    /// 侧栏显示编号（`会话 N`）：最后一个标签关闭后从 1 重来，
-    /// 与持久化编号分开，避免复用回滚文件键（ADR-042）
-    display_number: usize,
     /// 回滚持久化文件（ADR-039）：重连时复用同一份；SSH 格为 None
     scrollback: Option<std::path::PathBuf>,
 }
@@ -242,7 +239,6 @@ impl TerminalView {
         metrics: CellMetrics,
         font: FontConfig,
         number: usize,
-        display_number: usize,
         target: SessionTarget,
         params: SessionParams,
         scrollback: Option<std::path::PathBuf>,
@@ -374,19 +370,23 @@ impl TerminalView {
             pane,
             history_sub,
             number,
-            display_number,
         };
         view.ensure_clock(cx);
         view
     }
 
-    /// 侧边栏用的名字：前台程序设置的标题优先，否则用显示编号。
+    /// 侧边栏用的名字（ADR-053）：前台程序设置的标题优先，否则工作目录
+    /// （home 前缀缩写 `~`，cd 即跟随），都没有时退到来源标签（WSL 恒为
+    /// 发行版名——宿主侧采集不到它的工作目录）。
     pub fn label(&self) -> String {
-        self.state
-            .data()
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("会话 {}", self.display_number))
+        let data = self.state.data();
+        if let Some(title) = &data.title {
+            return title.clone();
+        }
+        if let Some(cwd) = &data.cwd {
+            return sidebar_cwd(cwd, zhimaterm_base::config_paths::home_dir().as_deref());
+        }
+        self.source.clone()
     }
 
     /// 回看标记的视口位置：锚定行 + display_offset 即它在视口里的行号；
@@ -694,15 +694,28 @@ impl TerminalView {
         self.state.data().reconnect_target.is_some()
     }
 
+    /// 焦点格的当前工作目录（ADR-039 采样）：新开本地会话继承它（ADR-054）。
+    /// SSH 不追踪、WSL 宿主侧采集不到、采样未到时均为 None。
+    pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        self.state.data().cwd.clone()
+    }
+
     /// 分屏新格要用的会话目标（ADR-014）：跟随本格的类型——SSH 格用同一目标
     /// （凭据只在内存里，随新格独立持有），本地格开同一 shell（WSL 格即同一
-    /// 发行版，ADR-021）。
+    /// 发行版，ADR-021）。本地新格的目录继承本格**当前** cwd（ADR-054），
+    /// 尚未上报的格保留构造目录。
     pub fn split_target(&self) -> SessionTarget {
         match &self.state.data().reconnect_target {
             Some(target) => SessionTarget::Ssh(target.clone()),
-            None => SessionTarget::Local {
-                shell: self.local_shell.clone(),
-            },
+            None => {
+                let shell = self.local_shell.clone();
+                let cwd = self
+                    .cwd()
+                    .or_else(|| shell.cwd().map(std::path::PathBuf::from));
+                SessionTarget::Local {
+                    shell: shell.with_cwd(cwd),
+                }
+            }
         }
     }
 
@@ -789,7 +802,6 @@ impl TerminalView {
             LocalShell::Default { .. } | LocalShell::Program { .. } => {
                 Some(crate::workspace::SavedNode::Local {
                     number: self.number,
-                    label_number: self.display_number,
                     cwd: self
                         .state
                         .data()
@@ -802,7 +814,6 @@ impl TerminalView {
             LocalShell::Wsl { distro } => Some(crate::workspace::SavedNode::Wsl {
                 distro: distro.clone(),
                 number: self.number,
-                label_number: self.display_number,
             }),
         }
     }
@@ -2658,6 +2669,49 @@ fn hover_notify_needed(old_link: &Option<Arc<str>>, new_link: &Option<Arc<str>>)
     old_link != new_link || new_link.is_some()
 }
 
+/// 侧栏标题里的工作目录（ADR-053）：home 前缀按组件边界缩写为 `~`
+/// （home 本身就是 `~`，其余段用平台分隔符接上——Unix `~/x`、Windows
+/// `~\x`，避免混排）；非 home 路径原样（Windows 自然带 `C:\` 盘符）；
+/// home 拿不到（`HOME`/`USERPROFILE` 都未设）时同样原样。
+fn sidebar_cwd(cwd: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| home_abbrev(cwd, home)) {
+        Some(abbrev) => abbrev,
+        None => cwd.display().to_string(),
+    }
+}
+
+/// cwd 在 home 子树内的 `~` 缩写；None = 不在（调用方原样显示）。
+/// 逐组件比较保证边界（`/Users/fanggeek` 不是 `/Users/fang` 的子目录）。
+fn home_abbrev(cwd: &std::path::Path, home: &std::path::Path) -> Option<String> {
+    let mut rest = cwd.iter();
+    for part in home.iter() {
+        match rest.next() {
+            Some(cwd_part) if path_parts_equal(cwd_part, part) => {}
+            _ => return None,
+        }
+    }
+    let mut abbreviated = String::from("~");
+    for part in rest {
+        abbreviated.push(std::path::MAIN_SEPARATOR);
+        abbreviated.push_str(&part.to_string_lossy());
+    }
+    Some(abbreviated)
+}
+
+/// 路径组件相等：Windows 路径大小写不敏感（`C:\Users` 与 `c:\users` 是同一
+/// 目录，cmd 的 cd 保留手打大小写而 PEB 如实上报），逐组件小写比较；其余
+/// 平台路径大小写敏感，按字节比较。
+fn path_parts_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
 #[cfg(test)]
 mod center_notice_tests {
     use super::center_notice;
@@ -2746,5 +2800,41 @@ mod center_notice_tests {
         assert!(!close_needs_confirmation(true, false, false, false));
         assert!(close_needs_confirmation(true, false, true, false));
         assert!(close_needs_confirmation(true, false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_cwd_tests {
+    use super::sidebar_cwd;
+    use std::path::Path;
+
+    /// home 前缀按组件边界缩写（ADR-053）：home 本身是 `~`，home 下的路径
+    /// 用平台分隔符接在 `~` 后（Unix 是 `~/…`）；前缀只差字符串不差组件的
+    /// 不算 home 子目录。Windows 侧另有大小写不敏感比较与 `~\` 接法，仅在
+    /// Windows 编译（本仓在 macOS/Linux 上验收）。
+    #[test]
+    fn home_prefix_is_abbreviated_on_component_boundaries() {
+        let home = Path::new("/Users/fang");
+        assert_eq!(sidebar_cwd(Path::new("/Users/fang"), Some(home)), "~");
+        assert_eq!(
+            sidebar_cwd(Path::new("/Users/fang/owner/zhimaterm"), Some(home)),
+            "~/owner/zhimaterm"
+        );
+        // /Users/fanggeek 与 /Users/fang 只是字符串前缀相同，不是子目录
+        assert_eq!(
+            sidebar_cwd(Path::new("/Users/fanggeek"), Some(home)),
+            "/Users/fanggeek"
+        );
+        // 非 home 路径原样（Windows 上即带盘符的 C:\Work 形态）
+        assert_eq!(sidebar_cwd(Path::new("/tmp"), Some(home)), "/tmp");
+    }
+
+    /// home 拿不到（`HOME`/`USERPROFILE` 都未设）时路径原样显示，不猜测。
+    #[test]
+    fn paths_show_verbatim_when_home_is_unknown() {
+        assert_eq!(
+            sidebar_cwd(Path::new("/Users/fang/proj"), None),
+            "/Users/fang/proj"
+        );
     }
 }

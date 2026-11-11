@@ -22,10 +22,8 @@ impl ZhimaTermApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut restored = 0;
-        // 持久化编号接着上次的计数走，新格不会与恢复的格重号；
-        // 显示编号单独恢复，旧文件没有时回退到持久化编号
+        // 持久化编号接着上次的计数走，新格不会与恢复的格重号
         self.created = saved.created;
-        self.label_created = saved.label_created;
         for tab in &saved.tabs {
             if self.tabs.len() >= MAX_SESSIONS {
                 break;
@@ -39,10 +37,8 @@ impl ZhimaTermApp {
             let panes = tree.panes();
             let mut views = HashMap::new();
             for (leaf, pane) in leaves.into_iter().zip(panes) {
-                let (number, display_number) =
-                    restored_numbers(leaf.leaf_number(), leaf.leaf_label_number(), self.created);
+                let number = restored_number(leaf.leaf_number(), self.created);
                 self.created = self.created.max(number);
-                self.label_created = self.label_created.max(display_number);
                 let target = SessionTarget::Local {
                     shell: restored_shell(
                         leaf,
@@ -54,7 +50,7 @@ impl ZhimaTermApp {
                             .and_then(|store| store.local_workdir_or_default()),
                     ),
                 };
-                let view = self.new_view(number, display_number, target, cx);
+                let view = self.new_view(number, target, cx);
                 // worker 上报真实目录之前，先把保存的值记在视图上：恢复过程中
                 // 的第一次工作区落盘不能把 cwd 抹成 null（ADR-039）
                 view.update(cx, |view, _| {
@@ -102,7 +98,6 @@ impl ZhimaTermApp {
             tabs,
             active_tab: self.active,
             created: self.created,
-            label_created: self.label_created,
         }
     }
 
@@ -197,19 +192,13 @@ impl ZhimaTermApp {
 }
 
 /// 按树序收集保存节点里的叶（与 `SavedNode::to_layout` 的格编号顺序一致）。
-/// 恢复叶的编号分配（ADR-037/042）：v2 文件直取保存值；v1 文件缺编号（0）时按
-/// 当前计数分配（回滚文件以编号为键，不能重号）；显示编号缺省回退到持久化编号。
-/// 调用方据此把两个计数推进到 max。
-fn restored_numbers(saved_number: usize, saved_label: usize, created: usize) -> (usize, usize) {
-    let number = match saved_number {
+/// 恢复叶的编号分配（ADR-037）：v2 文件直取保存值；v1 文件缺编号（0）时按
+/// 当前计数分配（回滚文件以编号为键，不能重号）。调用方据此把计数推进到 max。
+fn restored_number(saved_number: usize, created: usize) -> usize {
+    match saved_number {
         0 => created + 1,
         saved => saved,
-    };
-    let display_number = match saved_label {
-        0 => number,
-        saved => saved,
-    };
-    (number, display_number)
+    }
 }
 /// 恢复的格用什么 Shell：WSL 格按原发行版恢复（WSL 只在 Windows 编译，
 /// 其余平台回落普通本地 Shell）；普通格的 cwd 优先上次值（ADR-039，目录
@@ -248,19 +237,16 @@ fn restored_shell(
 mod tests {
     use super::*;
 
-    /// 保存叶的显示编号缺省（v1 文件）时回退到持久化编号；编号也缺时按计数分配。
+    /// v1 文件没有叶编号（serde 默认 0）：按当前计数分配新编号。
     #[test]
-    fn v1_files_fall_back_to_counters_and_the_persistent_number() {
-        // v1 文件：编号与显示编号都没有（serde 默认 0）——按当前计数分配新编号
-        assert_eq!(restored_numbers(0, 0, 7), (8, 8));
-        // 有编号但没有显示编号：显示编号回退到持久化编号，不重新分配
-        assert_eq!(restored_numbers(5, 0, 7), (5, 5));
+    fn v1_files_without_numbers_allocate_from_the_counter() {
+        assert_eq!(restored_number(0, 7), 8);
     }
 
     /// v2 文件的编号原样恢复：回滚文件以编号为键，重启后不能换号。
     #[test]
     fn v2_numbers_restore_directly() {
-        assert_eq!(restored_numbers(12, 3, 12), (12, 3));
+        assert_eq!(restored_number(12, 12), 12);
     }
 
     // 恢复的格用什么 Shell（ADR-036/039）：cwd 三级链（上次值 → 设置默认 →
@@ -271,7 +257,6 @@ mod tests {
         use crate::workspace::SavedNode;
         let plain = |cwd: Option<&str>| SavedNode::Local {
             number: 3,
-            label_number: 3,
             cwd: cwd.map(str::to_owned),
         };
         // 没有任何偏好：平台默认 Shell、无目录
@@ -307,7 +292,6 @@ mod tests {
         let wsl = SavedNode::Wsl {
             distro: "Ubuntu".to_owned(),
             number: 5,
-            label_number: 5,
         };
         #[cfg(windows)]
         assert!(matches!(

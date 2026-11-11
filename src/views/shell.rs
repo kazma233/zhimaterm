@@ -579,10 +579,7 @@ pub struct WslModal {
 
 #[cfg(windows)]
 impl WslModal {
-    pub fn new(
-        distros: Vec<zhimaterm_local::wsl::WslDistro>,
-        on_pick: WslPickHandler,
-    ) -> Self {
+    pub fn new(distros: Vec<zhimaterm_local::wsl::WslDistro>, on_pick: WslPickHandler) -> Self {
         Self { distros, on_pick }
     }
 }

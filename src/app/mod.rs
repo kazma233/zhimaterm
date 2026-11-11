@@ -57,18 +57,17 @@ impl Tab {
         self.views.get(&self.tree.focused())
     }
 
-    /// 自动标题：聚焦格的名字（前台程序标题，否则 `会话 N`）；没有格时退到标签序号。
-    fn auto_label(&self, index: usize, cx: &App) -> String {
+    /// 自动标题：聚焦格的名字（前台程序标题 > 工作目录 > 来源标签，ADR-053）；
+    /// 没有格的分支实际不可达——树清空即删标签——文案与渲染侧 source 兜底对齐。
+    fn auto_label(&self, cx: &App) -> String {
         self.focused_view()
             .map(|view| view.read(cx).label())
-            .unwrap_or_else(|| format!("标签 {}", index + 1))
+            .unwrap_or_else(|| "—".to_owned())
     }
 
     /// 侧栏行显示的标题：用户起的名字优先，否则自动标题。
-    fn label(&self, index: usize, cx: &App) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.auto_label(index, cx))
+    fn label(&self, cx: &App) -> String {
+        self.name.clone().unwrap_or_else(|| self.auto_label(cx))
     }
 }
 pub struct ZhimaTermApp {
@@ -94,8 +93,6 @@ pub struct ZhimaTermApp {
     applied_title: Option<String>,
     /// 累计创建过的会话数：回滚文件键与工作区叶标识，只增不复用
     created: usize,
-    /// 侧栏显示编号的累计计数：最后一个标签关闭时归零（ADR-042）
-    label_created: usize,
     /// 会话栏当前宽度（拖右缘手柄调整，范围见 shell::SIDEBAR_*）
     sidebar_width: f32,
     /// 会话栏宽度拖拽中：（按下时指针 x，按下时宽度）
@@ -202,7 +199,6 @@ impl ZhimaTermApp {
             settings_error,
             applied_title: None,
             created: 0,
-            label_created: 0,
             sidebar_width: shell::SIDEBAR_DEFAULT_WIDTH,
             sidebar_resizing: None,
             sidebar_menu: None,
@@ -241,8 +237,6 @@ impl ZhimaTermApp {
             .map(|saved| app.restore_workspace(saved, window, cx))
             .unwrap_or(false);
         if !restored {
-            // 没有可恢复的标签等同空列表：显示编号从 1 开始
-            app.label_created = 0;
             app.open_session(window, cx);
         }
         // 工作区读成功才清理孤儿回滚文件：读失败时删文件等于把用户历史清空

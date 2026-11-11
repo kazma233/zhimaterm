@@ -89,6 +89,27 @@ impl LocalShell {
             false
         }
     }
+
+    /// 启动目录：Default/Program 的 `cwd`；WSL 的目录在子系统里、宿主侧
+    /// 没有，恒为 None。
+    pub fn cwd(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Default { cwd } | Self::Program { cwd, .. } => cwd.as_deref(),
+            #[cfg(windows)]
+            Self::Wsl { .. } => None,
+        }
+    }
+
+    /// 换启动目录（ADR-054 的新会话继承）：Default/Program 生效；WSL 没有
+    /// 宿主侧目录，原样返回。
+    pub fn with_cwd(self, cwd: Option<std::path::PathBuf>) -> Self {
+        match self {
+            Self::Default { .. } => Self::Default { cwd },
+            Self::Program { program, .. } => Self::Program { program, cwd },
+            #[cfg(windows)]
+            wsl @ Self::Wsl { .. } => wsl,
+        }
+    }
 }
 
 /// SSH 目标：连接四要素、认证信息与转发配置。凭据只在内存里活到会话结束。
@@ -841,6 +862,51 @@ mod session_tests {
             .description(),
             "WSL · dev"
         );
+    }
+
+    /// 新会话继承的目录覆盖（ADR-054）：Default/Program 的启动目录可读可换；
+    /// WSL 无宿主侧目录，`cwd` 恒 None 且 `with_cwd` 原样返回（变体仅
+    /// Windows 存在，语义由同门控用例守住）。
+    #[test]
+    fn shell_cwd_is_readable_and_replaceable() {
+        let shell = LocalShell::Default {
+            cwd: Some("/from/settings".into()),
+        };
+        assert_eq!(shell.cwd(), Some(std::path::Path::new("/from/settings")));
+        assert!(matches!(
+            shell.with_cwd(Some("/inherited".into())),
+            LocalShell::Default {
+                cwd: Some(ref path)
+            } if path == std::path::Path::new("/inherited")
+        ));
+
+        let program = LocalShell::Program {
+            program: "/bin/zsh".into(),
+            cwd: None,
+        };
+        assert_eq!(program.cwd(), None);
+        assert!(matches!(
+            program.with_cwd(Some("/inherited".into())),
+            LocalShell::Program {
+                program: ref p,
+                cwd: Some(ref path)
+            } if p == std::path::Path::new("/bin/zsh")
+                && path == std::path::Path::new("/inherited")
+        ));
+    }
+
+    /// WSL 无宿主侧目录：读恒 None、覆盖原样返回（ADR-054）。
+    #[cfg(windows)]
+    #[test]
+    fn wsl_shell_has_no_host_cwd_and_ignores_override() {
+        let wsl = LocalShell::Wsl {
+            distro: "dev".into(),
+        };
+        assert_eq!(wsl.cwd(), None);
+        assert!(matches!(
+            wsl.with_cwd(Some("C:\\ignored".into())),
+            LocalShell::Wsl { ref distro } if distro == "dev"
+        ));
     }
 
     /// 自动重连资格只认意外断线：用户主动退出（exit / 关闭）不得触发自动重连，
