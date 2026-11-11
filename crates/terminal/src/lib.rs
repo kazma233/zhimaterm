@@ -21,6 +21,7 @@ mod transcript;
 use serde::{Deserialize, Serialize};
 
 use regex::Regex;
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -116,8 +117,23 @@ pub struct TerminalRun {
     /// 按格子几何绘制，不走字体字形。为真时这段只含几何绘制字符，不含
     /// 普通文字。
     pub block: bool,
-    /// 该段所属的超链接（OSC 8 的 uri）。None 表示普通文本。
-    pub link: Option<Arc<str>>,
+    /// 该段命中的可点击目标（OSC 8 超链接或纯文本识别）。None 表示普通文本。
+    pub link: Option<TerminalLink>,
+}
+
+/// 一段文本命中的可点击目标。URL 与本地文件路径是两类动作：打开动作
+/// 分派、安全边界（路径仅本地会话响应，ADR-055）与行号定位都按变体走，
+/// 视图不猜字符串形态。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalLink {
+    Url(Arc<str>),
+    /// 纯文本识别出的路径原文（`~` 未展开，展开与存在性验证在视图层）与
+    /// 可选的 `:行[:列]` 定位后缀。
+    FilePath {
+        path: Arc<str>,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 }
 
 impl TerminalRun {
@@ -165,6 +181,148 @@ fn trim_trailing_blanks(runs: &mut Vec<TerminalRun>, scheme: &ColorScheme) {
 /// 使 "…"、<…>、markdown 链接的边界不进 URL。
 static PLAIN_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)(?:https?|ftp)://[^\s<>"'`]+"#).unwrap());
+
+/// 纯文本路径识别（ADR-055）：绝对 POSIX 路径、`~/` 家目录前缀与
+/// Windows 盘符三种形态，段字符集含 unicode 字母（中文文件名），
+/// 尾部可选 `:行[:列]` 定位后缀交给编辑器。相对路径不识别——屏幕旧行
+/// 对应的 cwd 无法追溯，误报远多于收益。
+static PLAIN_PATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:/|~/|[A-Za-z]:[\\/])(?:[\w.\-@+]+[\\/])*[\w.\-@+]+(?::(\d{1,7})(?::(\d{1,7}))?)?",
+    )
+    .unwrap()
+});
+
+/// 路径识别的文本后缀白名单（ADR-055）：编辑器语义是打开文本，白名单
+/// 把二进制与无意义匹配拦在识别层，三平台（本地/远程会话）口径一致。
+static TEXT_SUFFIXES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "rs",
+        "py",
+        "js",
+        "mjs",
+        "cjs",
+        "ts",
+        "tsx",
+        "jsx",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "c",
+        "h",
+        "cpp",
+        "hpp",
+        "cc",
+        "cxx",
+        "java",
+        "kt",
+        "swift",
+        "m",
+        "mm",
+        "go",
+        "rb",
+        "php",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "lua",
+        "pl",
+        "r",
+        "cs",
+        "fs",
+        "scala",
+        "sql",
+        "html",
+        "htm",
+        "xml",
+        "css",
+        "scss",
+        "sass",
+        "less",
+        "md",
+        "markdown",
+        "rst",
+        "txt",
+        "csv",
+        "tsv",
+        "log",
+        "env",
+        "properties",
+        "gradle",
+        "vue",
+        "svelte",
+        "cmake",
+        "mk",
+        "lock",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// 无后缀（含 dotfile）的知名文本文件名白名单：按完整名匹配，与
+/// [`TEXT_SUFFIXES`] 互补覆盖 Makefile、`.gitignore` 这类无后缀形态。
+static TEXT_FILENAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "makefile",
+        "dockerfile",
+        "license",
+        "readme",
+        "changelog",
+        "contributing",
+        "authors",
+        "notice",
+        ".gitignore",
+        ".gitattributes",
+        ".dockerignore",
+        ".editorconfig",
+        ".env",
+        ".bashrc",
+        ".zshrc",
+        ".zprofile",
+        ".profile",
+        ".bash_profile",
+        ".vimrc",
+        ".gitconfig",
+        ".npmrc",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// 路径 basename 是否在文本白名单内。dotfile 与无后缀名按完整名查，
+/// 其余按最后一个点切出的后缀查（大小写不敏感）。
+fn is_text_basename(name: &str) -> bool {
+    if name.starts_with('.') || !name.contains('.') {
+        TEXT_FILENAMES.contains(name.to_ascii_lowercase().as_str())
+    } else {
+        name.rsplit_once('.')
+            .is_some_and(|(_, suffix)| TEXT_SUFFIXES.contains(suffix.to_ascii_lowercase().as_str()))
+    }
+}
+
+/// 段字符是否属于 [`PLAIN_PATH`] 的段字符集 `[\w.\-@+]` 的 ASCII 部分：
+/// 用于判断匹配是否贴在更长 token 的中段（`x~/a`、`ab/usr/bin` 都不是
+/// 独立路径）。与 URL 的同类检查一致只看 ASCII——中文文件名在段内
+/// （unicode `\w`）识别，但中文前缀不把后续绝对路径当词中片段。
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '@' | '+')
+}
+
+/// 去掉路径匹配尾部的句点/逗号/分号（`句子末尾的 /path/to/file.rs.`）。
+/// 冒号不在其中——`:` 已被行号捕组消化，落在尾部的孤立冒号属于文件名。
+fn trim_path_tail(path: &str) -> &str {
+    path.trim_end_matches(['.', ',', ';'])
+}
+
+/// 拼出 path 本体的字节长度：整条匹配去掉 `:行[:列]` 后缀（每段前各带一个冒号）。
+fn path_part_len(line: Option<regex::Match<'_>>, column: Option<regex::Match<'_>>) -> usize {
+    line.map_or(0, |m| m.as_str().len() + 1) + column.map_or(0, |m| m.as_str().len() + 1)
+}
 
 /// 去掉匹配尾部的句子标点。闭括号只在打破配对时才剥，
 /// 否则 wiki 风格的 `…/Foo_(bar)` 会被切掉合法的尾括号。
@@ -746,7 +904,7 @@ impl TerminalModel {
         let viewport_cursor_line = cursor_state.line + display_offset as i32;
         let mut rows = Vec::with_capacity(self.size.lines);
         let mut cursor_cell = None;
-        // 两个复用 scratch：格文本（开新段才克隆，段内合并零分配）与 URL
+        // 两个复用 scratch：格文本（开新段才克隆，段内合并零分配）与链接
         // 识别的行文本/格偏移（跨行复用，见 plain_url_links 的快门）
         let mut cell_text = String::new();
         let mut url_text = String::new();
@@ -761,10 +919,11 @@ impl TerminalModel {
                 .map_or(&[], |buffer| buffer.cells.as_slice());
             // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史
             let grid_line = row as i32 - display_offset as i32;
-            let plain_links = self.plain_url_links(cells, &mut url_text, &mut url_offsets);
+            let mut plain_links = self.plain_url_links(cells, &mut url_text, &mut url_offsets);
+            self.plain_path_links(&url_text, &url_offsets, &mut plain_links);
             let mut runs: Vec<TerminalRun> = Vec::new();
             let mut current: Option<RunStyle> = None;
-            let mut current_link: Option<Arc<str>> = None;
+            let mut current_link: Option<TerminalLink> = None;
             let mut previous_wide = false;
 
             for (column, cell) in backend::display_cells(cells) {
@@ -817,10 +976,10 @@ impl TerminalModel {
                 }
 
                 // 链接也是段的一部分：鼠标悬停与点击都按段判定，跨链接不能合并。
-                // 显式 OSC 8 优先，纯文本识别兜底，两者都以 uri 参与段切分。
+                // 显式 OSC 8 优先，纯文本识别兜底（URL 表先填、路径表补空位）。
                 // 快门命中的行链接表为空，get 安全取用。
                 let link = match &cell.link {
-                    Some(hyperlink) => Some(hyperlink.clone()),
+                    Some(hyperlink) => Some(TerminalLink::Url(hyperlink.clone())),
                     None => plain_links.get(column).cloned().flatten(),
                 };
 
@@ -892,7 +1051,7 @@ impl TerminalModel {
         cells: &[GridCell],
         text: &mut String,
         offsets: &mut Vec<(usize, usize, usize)>,
-    ) -> Vec<Option<Arc<str>>> {
+    ) -> Vec<Option<TerminalLink>> {
         text.clear();
         offsets.clear();
         // 行文本与每个格的字节起点/列号/占格数（跳过宽字符尾格，与快照切分一致）
@@ -907,7 +1066,7 @@ impl TerminalModel {
         if !text.contains("://") {
             return Vec::new();
         }
-        let mut links = vec![None::<Arc<str>>; self.size.columns];
+        let mut links = vec![None::<TerminalLink>; self.size.columns];
 
         for found in PLAIN_URL.find_iter(text) {
             let url = trim_url_tail(found.as_str());
@@ -931,10 +1090,66 @@ impl TerminalModel {
             let (_, end_col, end_width) = offsets[last];
             let shared: Arc<str> = Arc::from(url);
             for slot in &mut links[start_col..end_col + end_width] {
-                *slot = Some(shared.clone());
+                *slot = Some(TerminalLink::Url(shared.clone()));
             }
         }
         links
+    }
+
+    /// 行内纯文本路径 → 原地补进 URL 表的空位（[`plain_url_links`] 先填，
+    /// 路径只占 URL 没碰过的列，`https://…/x` 的 path 段不会二次识别）。
+    /// 复用同一份行文本与格偏移；匹配整体（含 `:行[:列]` 后缀）映射到列，
+    /// 悬停与点击在整条上生效。
+    ///
+    /// 白名单外后缀/文件名在这里拦下（[`is_text_basename`]），`~` 展开与
+    /// 存在性验证不做——那是视图层对本地会话的职责（ADR-055）。
+    fn plain_path_links(
+        &self,
+        text: &str,
+        offsets: &[(usize, usize, usize)],
+        links: &mut Vec<Option<TerminalLink>>,
+    ) {
+        if !text.contains(['/', '~']) && !text.contains(":\\") {
+            return;
+        }
+        for found in PLAIN_PATH.captures_iter(text) {
+            let whole = found.get(0).expect("整体捕获组恒存在");
+            let line = found.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+            let column = found.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+            // path 是剥掉 `:行[:列]` 后缀与尾部句点后的本体
+            let body_len = whole.as_str().len() - path_part_len(found.get(1), found.get(2));
+            let path = trim_path_tail(&whole.as_str()[..body_len]);
+            // 前贴路径字符说明是更长 token 的中段（如 `x~/a`、`ab/usr/bin`），不是独立路径
+            let start = whole.start();
+            if text[..start].chars().next_back().is_some_and(is_path_char) {
+                continue;
+            }
+            let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            if !is_text_basename(basename) {
+                continue;
+            }
+            // URL 快门命中的行链接表是空的：第一条有效路径匹配才物化全列空表
+            if links.is_empty() {
+                links.resize(self.size.columns, None);
+            }
+            // 命中范围 = trim 后的本体加 `:行[:列]` 后缀；剥掉的尾点与 URL 的
+            // trim 一样留在链接外
+            let end = start + path.len() + (whole.as_str().len() - body_len);
+            let first = offsets.partition_point(|(byte, _, _)| *byte <= start) - 1;
+            let last = offsets.partition_point(|(byte, _, _)| *byte < end) - 1;
+            let (_, start_col, _) = offsets[first];
+            let (_, end_col, end_width) = offsets[last];
+            let shared: Arc<str> = Arc::from(path);
+            for slot in &mut links[start_col..end_col + end_width] {
+                if slot.is_none() {
+                    *slot = Some(TerminalLink::FilePath {
+                        path: shared.clone(),
+                        line,
+                        column,
+                    });
+                }
+            }
+        }
     }
 
     /// 当前搜索匹配映射到视口坐标：匹配不在视口内时为 None。
@@ -956,7 +1171,7 @@ impl TerminalModel {
 mod tests {
     use super::{
         CellSide, CursorKind, MouseDispatch, SearchDirection, SearchHighlight, SearchOutcome,
-        SelectionKind, TermRequest, TerminalModel, TerminalSnapshot, UnderlineKind,
+        SelectionKind, TermRequest, TerminalLink, TerminalModel, TerminalSnapshot, UnderlineKind,
     };
     use zhimaterm_base::input::{KeyInput, MouseAction, MouseButton, MouseGesture, WheelDirection};
 
@@ -1901,7 +2116,10 @@ mod tests {
         assert_eq!(runs.len(), 3, "链接把行切成三段");
         assert_eq!(runs[0].link, None);
         assert_eq!(runs[1].text, "link");
-        assert_eq!(runs[1].link.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::Url("https://example.com".into()))
+        );
         assert_eq!(runs[2].link, None);
     }
 
@@ -1920,7 +2138,10 @@ mod tests {
         assert_eq!(runs[0].link, None);
         assert_eq!(runs[1].text, "https://example.com/a?b=1");
         assert_eq!(runs[1].columns, "https://example.com/a?b=1".len());
-        assert_eq!(runs[1].link.as_deref(), Some("https://example.com/a?b=1"));
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::Url("https://example.com/a?b=1".into()))
+        );
         assert_eq!(runs[2].text, " end");
         assert_eq!(runs[2].link, None);
     }
@@ -1936,14 +2157,20 @@ mod tests {
         let runs = &model.snapshot().rows[0];
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[1].text, "https://example.com/x");
-        assert_eq!(runs[1].link.as_deref(), Some("https://example.com/x"));
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::Url("https://example.com/x".into()))
+        );
         assert_eq!(runs[2].text, ".");
 
         let runs = &model.snapshot().rows[1];
         // 「看」是宽字符单独成段（快照既有规则）
         assert_eq!(runs.len(), 4);
         assert_eq!(runs[2].text, "https://example.com/y");
-        assert_eq!(runs[2].link.as_deref(), Some("https://example.com/y"));
+        assert_eq!(
+            runs[2].link,
+            Some(TerminalLink::Url("https://example.com/y".into()))
+        );
         assert_eq!(runs[3].text, "。");
     }
 
@@ -1959,8 +2186,10 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "https://en.wikipedia.org/wiki/Foo_(bar)");
         assert_eq!(
-            runs[0].link.as_deref(),
-            Some("https://en.wikipedia.org/wiki/Foo_(bar)")
+            runs[0].link,
+            Some(TerminalLink::Url(
+                "https://en.wikipedia.org/wiki/Foo_(bar)".into()
+            ))
         );
 
         let runs = &model.snapshot().rows[1];
@@ -1968,7 +2197,10 @@ mod tests {
         assert_eq!(runs[0].text, "[see](");
         assert_eq!(runs[0].link, None);
         assert_eq!(runs[1].text, "https://example.com/md");
-        assert_eq!(runs[1].link.as_deref(), Some("https://example.com/md"));
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::Url("https://example.com/md".into()))
+        );
         assert_eq!(runs[2].text, ")");
         assert_eq!(runs[2].link, None);
     }
@@ -1982,7 +2214,10 @@ mod tests {
         let runs = &model.snapshot().rows[0];
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "https://shadowed.example");
-        assert_eq!(runs[0].link.as_deref(), Some("https://explicit.example"));
+        assert_eq!(
+            runs[0].link,
+            Some(TerminalLink::Url("https://explicit.example".into()))
+        );
     }
 
     #[test]
@@ -2003,7 +2238,10 @@ mod tests {
             "https://example.com/wide".len(),
             "URL 起点按格数对齐，没有被宽字符偏移"
         );
-        assert_eq!(runs[2].link.as_deref(), Some("https://example.com/wide"));
+        assert_eq!(
+            runs[2].link,
+            Some(TerminalLink::Url("https://example.com/wide".into()))
+        );
     }
 
     #[test]
@@ -2018,11 +2256,17 @@ mod tests {
         assert_eq!(runs[0].text, "file:///etc/passwd example.com ");
         assert!(runs[0].link.is_none());
         assert_eq!(runs[1].text, "ftp://mirror.example/p");
-        assert_eq!(runs[1].link.as_deref(), Some("ftp://mirror.example/p"));
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::Url("ftp://mirror.example/p".into()))
+        );
 
         let runs = &model.snapshot().rows[1];
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].link.as_deref(), Some("https://ok.example"));
+        assert_eq!(
+            runs[0].link,
+            Some(TerminalLink::Url("https://ok.example".into()))
+        );
     }
 
     #[test]
@@ -2033,6 +2277,166 @@ mod tests {
         let runs = &model.snapshot().rows[0];
         assert_eq!(runs.len(), 1);
         assert!(runs[0].link.is_none(), "词中片段不是独立链接");
+    }
+
+    #[test]
+    fn plain_text_paths_are_detected_in_the_snapshot() {
+        let mut model = TerminalModel::new(60, 3);
+        model.advance(b"see /tmp/src/main.rs:12:5 end\x1b[2;1H");
+
+        let runs = &model.snapshot().rows[0];
+        assert_eq!(runs.len(), 3, "路径与两侧同样式文本靠链接边界切成三段");
+        assert_eq!(runs[0].text, "see ");
+        assert_eq!(runs[0].link, None);
+        assert_eq!(runs[1].text, "/tmp/src/main.rs:12:5");
+        assert_eq!(
+            runs[1].columns,
+            "/tmp/src/main.rs:12:5".len(),
+            "命中范围含定位后缀整条"
+        );
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::FilePath {
+                path: "/tmp/src/main.rs".into(),
+                line: Some(12),
+                column: Some(5),
+            })
+        );
+        assert_eq!(runs[2].text, " end");
+        assert_eq!(runs[2].link, None);
+    }
+
+    #[test]
+    fn plain_text_path_forms_and_boundaries() {
+        let mut model = TerminalModel::new(60, 5);
+        // 家目录前缀 + 尾部句点；行号只到行
+        model.advance(b"~/notes/todo.md. /tmp/a.rs:12\x1b[2;1H");
+        // 词中 `~` 与词中 `/` 都不是独立路径；相对路径不识别
+        model.advance(b"x~/a.rs ab/usr/b.rs src/c.rs\x1b[3;1H");
+        // Windows 盘符两种分隔
+        model.advance(b"see C:\\Users\\x\\main.rs D:/go/mod.go\x1b[4;1H");
+        model.advance(b"\x1b[5;1H");
+
+        let runs = &model.snapshot().rows[0];
+        assert_eq!(runs.len(), 3);
+        assert_eq!(
+            runs[0].link,
+            Some(TerminalLink::FilePath {
+                path: "~/notes/todo.md".into(),
+                line: None,
+                column: None,
+            })
+        );
+        assert_eq!(runs[1].text, ". ", "剥掉的尾点与间隔空格合并为普通段");
+        assert_eq!(
+            runs[2].link,
+            Some(TerminalLink::FilePath {
+                path: "/tmp/a.rs".into(),
+                line: Some(12),
+                column: None,
+            })
+        );
+
+        let runs = &model.snapshot().rows[1];
+        assert_eq!(runs.len(), 1, "词中片段与相对路径都不识别");
+        assert!(runs[0].link.is_none());
+
+        let runs = &model.snapshot().rows[2];
+        assert_eq!(runs.len(), 4, "see + 空格分隔的两条路径切成四段");
+        assert_eq!(
+            runs[1].link,
+            Some(TerminalLink::FilePath {
+                path: "C:\\Users\\x\\main.rs".into(),
+                line: None,
+                column: None,
+            })
+        );
+        assert_eq!(
+            runs[3].link,
+            Some(TerminalLink::FilePath {
+                path: "D:/go/mod.go".into(),
+                line: None,
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn plain_text_path_text_allowlist() {
+        let mut model = TerminalModel::new(60, 4);
+        // passwd/ls 无后缀不在白名单；日期不以 / 开头不匹配；11 不在白名单
+        model.advance(b"/etc/passwd /bin/ls 2026/11/11\x1b[2;1H");
+        // 知名无后缀文件名与 dotfile 在白名单内
+        model.advance(b"/repo/Makefile ~/.gitignore\x1b[3;1H");
+        // 后缀大小写不敏感
+        model.advance(b"/doc/README.MD\x1b[4;1H");
+
+        let runs = &model.snapshot().rows[0];
+        assert_eq!(runs.len(), 1, "白名单外后缀与文件名整行不切段");
+        assert!(runs[0].link.is_none());
+
+        let runs = &model.snapshot().rows[1];
+        assert_eq!(runs.len(), 3);
+        assert_eq!(
+            runs[0].link,
+            Some(TerminalLink::FilePath {
+                path: "/repo/Makefile".into(),
+                line: None,
+                column: None,
+            })
+        );
+        assert_eq!(
+            runs[2].link,
+            Some(TerminalLink::FilePath {
+                path: "~/.gitignore".into(),
+                line: None,
+                column: None,
+            })
+        );
+
+        let runs = &model.snapshot().rows[2];
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].link.is_some(), "后缀白名单大小写不敏感");
+    }
+
+    #[test]
+    fn plain_text_path_inside_url_is_not_relinked() {
+        let mut model = TerminalModel::new(60, 2);
+        model.advance(b"https://example.com/a.rs\x1b[2;1H");
+
+        let runs = &model.snapshot().rows[0];
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].link,
+            Some(TerminalLink::Url("https://example.com/a.rs".into())),
+            "URL 的 path 段归 URL，不产生二次路径链接"
+        );
+    }
+
+    #[test]
+    fn plain_text_path_after_wide_characters_keeps_column_bounds() {
+        let mut model = TerminalModel::new(60, 3);
+        model.advance("中文/tmp/文件.rs:3".as_bytes());
+        model.advance(b"\x1b[2;1H");
+
+        let runs = &model.snapshot().rows[0];
+        // 路径段内的宽字符按快照既有规则强制单独成段：中、文、/tmp/、文、件、.rs:3
+        assert_eq!(runs.len(), 6);
+        assert_eq!(runs[2].text, "/tmp/");
+        assert_eq!(runs[2].columns, 5);
+        assert_eq!(runs[5].text, ".rs:3");
+        assert_eq!(
+            runs[2].columns + runs[3].columns + runs[4].columns + runs[5].columns,
+            14,
+            "命中段总格数 = 10 个半角格 + 2 个宽字符各 2 格"
+        );
+        let expected = Some(TerminalLink::FilePath {
+            path: "/tmp/文件.rs".into(),
+            line: Some(3),
+            column: None,
+        });
+        assert_eq!(runs[2].link, expected);
+        assert_eq!(runs[5].link, expected, "同一匹配的每个段携带同一链接");
     }
 
     #[test]

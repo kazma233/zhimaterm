@@ -17,6 +17,7 @@ use gpui::{
     ScrollEvent, UTF16Selection, Window, canvas, div, point, px, size,
 };
 
+use crate::editor::{self, EditorChoice};
 use crate::views::grid;
 use crate::views::session_state::{FocusAction, SessionEffect, SessionSignal, fold_signal};
 use crate::views::shell;
@@ -35,7 +36,7 @@ use zhimaterm_session::{
     PointerShape, RuntimeParams, Session, SessionConfig, SessionEvent, SessionTarget, StartupSize,
 };
 use zhimaterm_terminal::backend::BackendKind;
-use zhimaterm_terminal::{SearchDirection, TerminalSnapshot};
+use zhimaterm_terminal::{SearchDirection, TerminalLink, TerminalSnapshot};
 
 // 连接看门狗与自动重连（ADR-013）的裁决都在 session 域的重连计划
 // （`zhimaterm_session::reconnect`），这里只保留每秒时钟的驱动。
@@ -103,6 +104,17 @@ enum MonitorState {
     },
 }
 
+/// 文件路径点击的确认浮层载荷（ADR-055）：⌘/Ctrl+点击命中路径时记下
+/// 锚点与已验证的目标，用户确认后才 spawn 编辑器。
+struct ConfirmOpen {
+    /// 窗口坐标（与 context_menu 同语义，渲染时换算容器内坐标）
+    anchor: gpui::Point<gpui::Pixels>,
+    /// `~` 展开后且验证存在的绝对路径
+    path: std::path::PathBuf,
+    line: Option<u32>,
+    column: Option<u32>,
+}
+
 pub struct TerminalView {
     focus: FocusHandle,
     /// 会话结束后的落焦容器（非输入）：死会话裸键要经焦点派发路径到达应用
@@ -147,7 +159,12 @@ pub struct TerminalView {
     surface_bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
     /// 指针悬停的格与其上的超链接，用来决定下划线与指针形状
     hovered: Option<(usize, usize)>,
-    hovered_link: Option<Arc<str>>,
+    hovered_link: Option<TerminalLink>,
+    /// 文件路径点击的确认浮层（ADR-055）：锚点（窗口坐标，同 context_menu
+    /// 语义）与已展开并验证存在的待开目标；None = 浮层没开
+    confirm_open: Option<ConfirmOpen>,
+    /// 文件路径的打开档位（settings 推送，ADR-055）：确认后按它 spawn 编辑器
+    editor: EditorChoice,
     /// 本地格的 shell 目标副本：分屏新格跟随本格类型（ADR-021，WSL 即同发行版）
     local_shell: LocalShell,
     /// 每秒时钟是否在跑（连接秒表、看门狗与自动重连倒计时共用，见 ensure_clock）
@@ -336,6 +353,8 @@ impl TerminalView {
             ))),
             hovered: None,
             hovered_link: None,
+            confirm_open: None,
+            editor: EditorChoice::System,
             local_shell,
             clock_running: false,
             connecting_started: Instant::now(),
@@ -845,6 +864,12 @@ impl TerminalView {
         self.session.set_params(runtime);
     }
 
+    /// 设置里的编辑器档位（ADR-055）：应用层在会话建立与设置应用时推送，
+    /// 打开确认时按它 spawn——设置变更对活动会话即时生效，无需重开。
+    pub fn set_editor(&mut self, editor: EditorChoice) {
+        self.editor = editor;
+    }
+
     /// 当前转发规则（含运行中增删）。本地格没有转发，返回空表。
     pub fn forwards(&self) -> &[zhimaterm_session::ForwardRule] {
         self.state
@@ -1157,10 +1182,11 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         use crate::views::terminal_keys::{KeyRoute, route_key};
-        // 守卫顺序（菜单 → 搜索 → 死会话 → 焦点 → 连接中）在纯函数里，见
-        // `terminal_keys::route_key`；这里只执行动作
+        // 守卫顺序（确认浮层 → 菜单 → 搜索 → 死会话 → 焦点 → 连接中）在
+        // 纯函数里，见 `terminal_keys::route_key`；这里只执行动作
         let route = route_key(
             self.state.data(),
+            self.confirm_open.is_some(),
             self.context_menu.is_some(),
             self.search_open,
             self.focus.is_focused(window),
@@ -1168,6 +1194,11 @@ impl TerminalView {
             &event.keystroke,
         );
         match route {
+            KeyRoute::CloseConfirmOpen => {
+                self.confirm_open = None;
+                cx.stop_propagation();
+                cx.notify();
+            }
             KeyRoute::CloseContextMenu => {
                 self.context_menu = None;
                 cx.stop_propagation();
@@ -1437,8 +1468,8 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 某一格上的超链接。
-    fn link_at(&self, column: usize, row: usize) -> Option<Arc<str>> {
+    /// 某一格上的链接目标（OSC 8 或纯文本识别）。
+    fn link_at(&self, column: usize, row: usize) -> Option<TerminalLink> {
         let runs = self.snapshot.as_ref()?.rows.get(row)?;
         let mut start = 0;
         for run in runs {
@@ -1448,6 +1479,16 @@ impl TerminalView {
             start += run.columns;
         }
         None
+    }
+
+    /// 链接在本格是否可行动：URL 恒可打开；文件路径只在本地会话响应且
+    /// 展开后目标存在（ADR-055——远端路径本地不可达，屏幕原文也可能是
+    /// 任意输出的误报，存在性是最后一道闸门）。
+    fn actionable_link(&self, link: &TerminalLink) -> bool {
+        match link {
+            TerminalLink::Url(_) => true,
+            TerminalLink::FilePath { path, .. } => self.local && editor::expand_home(path).exists(),
+        }
     }
 
     /// 悬停位置变化时更新链接态。重画经 [`hover_notify_needed`] 门控：悬停
@@ -1461,7 +1502,9 @@ impl TerminalView {
         }
 
         self.hovered = hovered;
-        let new_link = hovered.and_then(|(column, row)| self.link_at(column, row));
+        let new_link = hovered
+            .and_then(|(column, row)| self.link_at(column, row))
+            .filter(|link| self.actionable_link(link));
         let repaint = hover_notify_needed(&self.hovered_link, &new_link);
         self.hovered_link = new_link;
         if repaint {
@@ -1490,20 +1533,40 @@ impl TerminalView {
             return;
         }
 
-        // ⌘/Ctrl + 点击落在链接上就打开它：这一下不给终端，既不选区也不上报
+        // ⌘/Ctrl + 点击落在链接上就处理它：这一下不给终端，既不选区也不上报。
+        // URL 直接交给系统打开；文件路径先过本地格与存在性闸门，再进确认
+        // 浮层（ADR-055）——打开本地文件是显式动作，不允许单击直达
         if is_link_modifier(event.modifiers)
             && let Some((column, row, _)) =
                 grid::cell_at(self.surface_bounds.get(), event.position, self.metrics)
-            && let Some(link) = self.link_at(column, row)
+            && let Some(link) = self
+                .link_at(column, row)
+                .filter(|link| self.actionable_link(link))
         {
-            cx.open_url(&link);
-            // 本地格没有底栏（ADR-016）：回执只在远端格进状态文案
-            if !self.local {
-                fold_signal(
-                    &mut self.state,
-                    SessionSignal::Receipt(format!("已打开链接：{link}")),
-                    Instant::now(),
-                );
+            match link {
+                TerminalLink::Url(url) => {
+                    cx.open_url(&url);
+                    // 本地格没有底栏（ADR-016）：回执只在远端格进状态文案
+                    if !self.local {
+                        fold_signal(
+                            &mut self.state,
+                            SessionSignal::Receipt(format!("已打开链接：{url}")),
+                            Instant::now(),
+                        );
+                    }
+                }
+                TerminalLink::FilePath { path, line, column } => {
+                    let path = editor::expand_home(&path);
+                    if path.exists() {
+                        self.context_menu = None;
+                        self.confirm_open = Some(ConfirmOpen {
+                            anchor: event.position,
+                            path,
+                            line,
+                            column,
+                        });
+                    }
+                }
             }
             cx.notify();
             return;
@@ -1880,6 +1943,108 @@ fn render_context_menu(
     ]
 }
 
+/// 文件路径点击的确认浮层（ADR-055）：指针锚定小卡片（与右键菜单同一
+/// 挂载与定位机制），说明「用哪个编辑器打开哪个文件」，确认后才 spawn。
+/// 打开失败静默——本地格没有回执通道，设置保存时的校验挡住绝大多数坏值。
+/// `anchor` 是指针在挂载容器坐标系里的位置（窗口坐标减容器 origin）。
+fn render_confirm_open(
+    confirm: &ConfirmOpen,
+    editor: &EditorChoice,
+    anchor: gpui::Point<gpui::Pixels>,
+    container: gpui::Size<gpui::Pixels>,
+    cx: &mut Context<TerminalView>,
+) -> Vec<gpui::AnyElement> {
+    use zhimaterm_base::ui::{panel, popover_shadow};
+    let tokens = zhimaterm_base::theme::tokens(cx);
+    // 目标一行写清（含定位后缀），编辑器档位给出打开后的归属
+    let mut target = confirm.path.display().to_string();
+    if let Some(line) = confirm.line {
+        target.push_str(&format!(":{line}"));
+        if let Some(column) = confirm.column {
+            target.push_str(&format!(":{column}"));
+        }
+    }
+    let open_path = confirm.path.clone();
+    let (open_line, open_column) = (confirm.line, confirm.column);
+    let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
+        this.confirm_open = None;
+        // 失败不回执：见本函数文档（ADR-055 的静默取舍）
+        editor::open(&this.editor, &open_path, open_line, open_column);
+        cx.notify();
+    });
+    let cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
+        this.confirm_open = None;
+        cx.notify();
+    });
+    // 卡片宽度固定、高度按内容量级估算（定位夹取用）；路径长时截断显示
+    let card = div()
+        .id("terminal-confirm-open")
+        .absolute()
+        .w(px(280.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .p(px(10.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(gpui::rgb(tokens.border_default))
+        .bg(gpui::rgb(tokens.bg_focus))
+        .shadow(popover_shadow(&tokens))
+        .occlude()
+        // 截住点击：不冒泡到遮罩（那里点击是收起浮层）
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .text_size(ui_rems(11.))
+                .text_color(gpui::rgb(tokens.fg))
+                .child(format!("在 {} 中打开", editor.label())),
+        )
+        .child(
+            div()
+                .text_size(ui_rems(10.))
+                .text_color(gpui::rgb(tokens.fg_muted))
+                .truncate()
+                .child(target),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(6.))
+                .child(panel::secondary_button(
+                    &tokens,
+                    "confirm-open-cancel",
+                    "取消",
+                    None,
+                    cancel,
+                ))
+                .child(panel::primary_button(
+                    &tokens,
+                    "confirm-open-accept",
+                    "打开",
+                    None,
+                    open,
+                )),
+        );
+    let position = menu::clamped_menu_position(anchor, container, gpui::size(px(280.), px(110.)));
+    let entity = cx.entity();
+    vec![
+        menu::context_menu_backdrop(move |_, cx| {
+            entity.update(cx, |view, cx| {
+                view.confirm_open = None;
+                cx.notify();
+            });
+        })
+        .into_any_element(),
+        div()
+            .absolute()
+            .left(position.x)
+            .top(position.y)
+            .child(card)
+            .into_any_element(),
+    ]
+}
+
 /// 浮层里的运行中操作（ADR-038）：视图把点击带回应用层，浮层本身不碰会话。
 /// 浮层里的点击动作：把点击事件回传给应用层
 type OverlayClick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -2190,6 +2355,26 @@ impl TerminalView {
                         let bounds = self.container_bounds.get();
                         (bounds.size.width > px(0.))
                             .then(|| render_context_menu(click - bounds.origin, bounds.size, cx))
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            // 文件路径的确认浮层（ADR-055）：与右键菜单互斥，最后挂载盖住一切
+            .children(
+                self.confirm_open
+                    .as_ref()
+                    .and_then(|confirm| {
+                        let bounds = self.container_bounds.get();
+                        (bounds.size.width > px(0.)).then(|| {
+                            // 指针容器内坐标，与菜单同一换算
+                            render_confirm_open(
+                                confirm,
+                                &self.editor,
+                                confirm.anchor - bounds.origin,
+                                bounds.size,
+                                cx,
+                            )
+                        })
                     })
                     .into_iter()
                     .flatten(),
@@ -2665,7 +2850,7 @@ impl zhimaterm_recording::history::LoggingTarget for ViewLoggingTarget {
 /// 悬停移动是否需要重画：链接身份变化（含 None↔Some）必须重画；悬停在
 /// 链上的移动也重画——下划线画在悬停所在段上，同一 URL 被样式切成多段时
 /// 段变视觉就变。两者之外的移动（无链接区）没有任何视觉效应，不重画。
-fn hover_notify_needed(old_link: &Option<Arc<str>>, new_link: &Option<Arc<str>>) -> bool {
+fn hover_notify_needed(old_link: &Option<TerminalLink>, new_link: &Option<TerminalLink>) -> bool {
     old_link != new_link || new_link.is_some()
 }
 
@@ -2717,6 +2902,7 @@ mod center_notice_tests {
     use super::center_notice;
     use super::hover_notify_needed;
     use std::sync::Arc;
+    use zhimaterm_terminal::TerminalLink;
 
     #[test]
     fn local_pane_hints_startup_in_the_center() {
@@ -2730,9 +2916,9 @@ mod center_notice_tests {
     /// 进出链接与链上移动（下划线跟段走）都重画。
     #[test]
     fn hover_movement_only_repaints_when_a_link_is_involved() {
-        let none: Option<Arc<str>> = None;
-        let a: Option<Arc<str>> = Some(Arc::from("https://example.com/a"));
-        let b: Option<Arc<str>> = Some(Arc::from("https://example.com/b"));
+        let none: Option<TerminalLink> = None;
+        let a: Option<TerminalLink> = Some(TerminalLink::Url(Arc::from("https://example.com/a")));
+        let b: Option<TerminalLink> = Some(TerminalLink::Url(Arc::from("https://example.com/b")));
 
         // 无链接区内移动：旧新都是 None，没有视觉效应
         assert!(!hover_notify_needed(&none, &none));

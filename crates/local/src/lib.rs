@@ -7,6 +7,7 @@
 //! 改本地终端功能只动这里。
 
 pub mod cwd;
+pub mod editors;
 pub mod probe;
 pub mod probe_panel;
 pub mod pty;

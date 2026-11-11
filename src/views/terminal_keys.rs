@@ -50,6 +50,8 @@ pub(crate) fn dead_session_text(can_reconnect: bool, text: &str) -> DeadSessionK
 /// keydown 的路由结果。顺序即语义：上层接管的不再向下传递。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyRoute {
+    /// 文件路径的确认浮层开着（ADR-055）：Esc 只收浮层。
+    CloseConfirmOpen,
     /// 右键菜单开着：Esc 只收菜单。
     CloseContextMenu,
     /// 搜索条展开：Esc 关闭（含清高亮）。
@@ -68,16 +70,22 @@ pub(crate) enum KeyRoute {
     Terminal,
 }
 
-/// 一条按键在会话视图里的归属。守卫顺序与旧实现逐条对应：菜单 → 搜索 →
-/// 死会话 → 焦点 → 连接中。
+/// 一条按键在会话视图里的归属。守卫顺序与旧实现逐条对应：确认浮层 →
+/// 菜单 → 搜索 → 死会话 → 焦点 → 连接中。
 pub(crate) fn route_key(
     state: &SessionViewStateData,
+    confirm_open: bool,
     context_menu_open: bool,
     search_open: bool,
     focused: bool,
     awaiting_first_frame: bool,
     keystroke: &Keystroke,
 ) -> KeyRoute {
+    // 确认浮层开着：Esc 只收浮层，其余按键照常进终端（浮层动作走鼠标）
+    if confirm_open && keystroke.key.as_str() == "escape" {
+        return KeyRoute::CloseConfirmOpen;
+    }
+
     // 右键菜单开着：Esc 只收菜单，其余按键照常进终端
     if context_menu_open && keystroke.key.as_str() == "escape" {
         return KeyRoute::CloseContextMenu;
@@ -237,26 +245,48 @@ mod tests {
         assert_eq!(dead_session_text(true, "esc"), DeadSessionKey::None);
     }
 
-    /// 守卫顺序即语义：菜单 Esc 优先于搜索，搜索优先于死会话，死会话优先
-    /// 于焦点与连接中。
+    /// 守卫顺序即语义：确认浮层与菜单的 Esc 优先于搜索，搜索优先于死会话，
+    /// 死会话优先于焦点与连接中。
     #[test]
     fn key_route_order_is_the_semantics() {
         let live = live_state();
         let dead = dead_state(true);
 
-        // 菜单 Esc 最高优先：即使搜索开着、会话已结束也先收菜单
+        // 确认浮层（ADR-055）最前：菜单也开着时 Esc 先收浮层
         assert_eq!(
-            route_key(dead.data(), true, true, true, false, &plain("escape")),
+            route_key(dead.data(), true, true, true, true, false, &plain("escape")),
+            KeyRoute::CloseConfirmOpen
+        );
+        // 菜单 Esc 次之：即使搜索开着、会话已结束也先收菜单
+        assert_eq!(
+            route_key(
+                dead.data(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                &plain("escape")
+            ),
             KeyRoute::CloseContextMenu
         );
         // 搜索 Esc/Enter 先于死会话裁决
         assert_eq!(
-            route_key(dead.data(), false, true, true, false, &plain("escape")),
+            route_key(
+                dead.data(),
+                false,
+                false,
+                true,
+                true,
+                false,
+                &plain("escape")
+            ),
             KeyRoute::CloseSearch
         );
         assert_eq!(
             route_key(
                 live.data(),
+                false,
                 false,
                 true,
                 false,
@@ -273,16 +303,17 @@ mod tests {
         );
         // 死会话：可重连的 R 走重连，其余键被吞
         assert_eq!(
-            route_key(dead.data(), false, false, true, false, &plain("r")),
+            route_key(dead.data(), false, false, false, true, false, &plain("r")),
             KeyRoute::Reconnect
         );
         assert_eq!(
-            route_key(dead.data(), false, false, true, false, &plain("x")),
+            route_key(dead.data(), false, false, false, true, false, &plain("x")),
             KeyRoute::Consumed
         );
         assert_eq!(
             route_key(
                 dead_state(false).data(),
+                false,
                 false,
                 false,
                 true,
@@ -293,12 +324,13 @@ mod tests {
         );
         // 焦点在别处：不消费；连接中 Ctrl+C 取消，其余吞掉
         assert_eq!(
-            route_key(live.data(), false, false, false, false, &plain("a")),
+            route_key(live.data(), false, false, false, false, false, &plain("a")),
             KeyRoute::NotFocused
         );
         assert_eq!(
             route_key(
                 live.data(),
+                false,
                 false,
                 false,
                 true,
@@ -314,12 +346,12 @@ mod tests {
             KeyRoute::CancelConnecting
         );
         assert_eq!(
-            route_key(live.data(), false, false, true, true, &plain("a")),
+            route_key(live.data(), false, false, false, true, true, &plain("a")),
             KeyRoute::Consumed
         );
         // 活会话、聚焦、有画面：进 PTY
         assert_eq!(
-            route_key(live.data(), false, false, true, false, &plain("a")),
+            route_key(live.data(), false, false, false, true, false, &plain("a")),
             KeyRoute::Terminal
         );
     }

@@ -75,6 +75,7 @@
 - [ADR-052：Resize 尾沿节流](decisions/052-resize-trailing-edge-throttle.md)：连续 resize 按 50ms 静默期节流（模型 reflow 与 PTY/SIGWINCH 同步节流、单次零延迟），投递失败回滚判重键；配套性能用例守住收敛上限。
 - [ADR-053：侧栏自动标题改用工作目录](decisions/053-sidebar-cwd-title.md)：OSC 标题 > 工作目录（home 前缀缩写 `~`）> 来源标签；废弃 ADR-042 显示编号机制，`created`/叶编号不动。
 - [ADR-054：新开本地会话继承发起格的工作目录](decisions/054-new-session-inherits-cwd.md)：⌘T/本地入口、分屏、关空补开都落在焦点格当前目录；设置默认目录退为回落（修订 ADR-036/014）。
+- [ADR-055：文件路径点击与编辑器打开](decisions/055-file-path-click-and-editor.md)：输出里的本地路径识别为链接（TerminalLink 分轨 URL），仅本地会话经确认浮层用配置编辑器打开（系统默认/VS Code/Zed/自定义，发现链重解析，VS Code/Zed 带行号）；SSH 不响应，延续 ADR-002 边界。
 
 ## 背景与调研（`context/`）
 

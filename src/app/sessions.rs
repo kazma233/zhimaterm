@@ -210,7 +210,14 @@ impl ZhimaTermApp {
             }),
             saved_connection,
         };
-        cx.new(|cx| TerminalView::new(cx, metrics, font, number, target, params, scrollback, hooks))
+        let editor = self.text_editor.clone();
+        cx.new(|cx| {
+            let mut view =
+                TerminalView::new(cx, metrics, font, number, target, params, scrollback, hooks);
+            // 编辑器档位随会话建立带上（ADR-055）；后续变更由 apply_settings 推送
+            view.set_editor(editor);
+            view
+        })
     }
 
     /// 分割聚焦格（ADR-014）：新格的会话类型跟随原格（SSH 同目标新连接，

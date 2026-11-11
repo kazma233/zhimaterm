@@ -89,6 +89,9 @@ pub struct ZhimaTermApp {
     /// 即冻结，写一律由 Store 拒掉，外壳没有 None 臂可漏。
     settings: settings::Store,
     settings_error: Option<String>,
+    /// 文件路径点击的编辑器档位（ADR-055）：启动从设置读入，设置应用时
+    /// 更新并推给全部会话视图；新会话建立时带上当前值
+    text_editor: crate::editor::EditorChoice,
     /// 已经写到窗口上的标题，避免每帧重复调用平台接口
     applied_title: Option<String>,
     /// 累计创建过的会话数：回滚文件键与工作区叶标识，只增不复用
@@ -180,6 +183,12 @@ impl ZhimaTermApp {
             settings_store.settings().and_then(|s| s.theme.as_deref()),
             cx,
         );
+        // 编辑器档位（ADR-055）解释一次存壳：新会话建立与设置应用都从这里带
+        let text_editor = crate::editor::EditorChoice::from_setting(
+            settings_store
+                .settings()
+                .and_then(|store| store.text_editor.as_deref()),
+        );
 
         let mut app = Self {
             tabs: Vec::new(),
@@ -197,6 +206,7 @@ impl ZhimaTermApp {
             ui_font_family,
             settings: settings_store,
             settings_error,
+            text_editor,
             applied_title: None,
             created: 0,
             sidebar_width: shell::SIDEBAR_DEFAULT_WIDTH,

@@ -276,12 +276,17 @@ impl ZhimaTermApp {
             terminal_backend: store
                 .map(|store| store.terminal_backend_or_default())
                 .unwrap_or_default(),
+            text_editor: store.and_then(|store| store.text_editor.clone()),
         };
         // 候选只在打开时取一次：系统字体列表与注册表不会在表单打开期间变化
         let lists = CandidateLists {
             terminal_fonts: font::installed_font_candidates(cx.text_system()),
             ui_fonts: font::system_font_candidates(cx.text_system()),
             shells: zhimaterm_local::shells::candidates(),
+            editors: zhimaterm_local::editors::candidates()
+                .into_iter()
+                .map(|(kind, _)| kind.id().to_owned())
+                .collect(),
         };
         let form = cx.new(|cx| SettingsForm::new(lists, current, cx));
         // 表单自改即重画（与连接表单同一机制，ADR-026）：渲染层直调表单实体，
@@ -378,9 +383,13 @@ impl ZhimaTermApp {
             option_as_alt: edited.option_as_alt,
             scrolling_history: edited.scrolling_history,
         };
+        // 编辑器档位（ADR-055）：立即推给全部已开会话（字体同一时机）
+        self.text_editor = crate::editor::EditorChoice::from_setting(edited.text_editor.as_deref());
+        let editor = self.text_editor.clone();
         for view in self.views() {
             view.update(cx, |view, cx| view.set_font(font.clone(), metrics, cx));
             view.update(cx, |view, _| view.set_runtime_params(runtime));
+            view.update(cx, |view, _| view.set_editor(editor.clone()));
         }
         // 界面字号 = rem 根：改一处，所有用 rem 标定的界面文字一起缩放
         self.ui_font_size = edited.ui_font_size;

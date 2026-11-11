@@ -17,6 +17,7 @@
 //!   - `zhimaterm-ssh`：SSH 连接管理领域（表单、保存连接、钥匙串、转发规则）
 
 mod app;
+mod editor;
 mod settings;
 mod views;
 mod workspace;

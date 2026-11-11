@@ -5,7 +5,7 @@
 //! kitty 键盘、同步输出、查询请求）。断言的是可观察行为（快照、复制文本、
 //! 上报字节），不是实现细节。新后端接入时把它加进 `backends()` 即可。
 
-use super::{TerminalModel, backend};
+use super::{TerminalLink, TerminalModel, backend};
 
 /// 参与契约测试的后端。新后端在这里加一行。
 fn backends() -> Vec<(&'static str, backend::BackendKind)> {
@@ -416,8 +416,23 @@ contract!(hyperlinks_reach_the_snapshot, |model, label| {
     let runs = &model.snapshot().rows[0];
     assert_eq!(runs.len(), 1, "{label}");
     assert_eq!(
-        runs[0].link.as_deref(),
-        Some("https://example.com"),
+        runs[0].link,
+        Some(TerminalLink::Url("https://example.com".into())),
+        "{label}"
+    );
+});
+
+contract!(plain_text_paths_reach_the_snapshot, |model, label| {
+    model.advance(b"err /tmp/src/main.rs:4:2\x1b[2;1H");
+    let runs = &model.snapshot().rows[0];
+    assert_eq!(runs.len(), 2, "{label}");
+    assert_eq!(
+        runs[1].link,
+        Some(TerminalLink::FilePath {
+            path: "/tmp/src/main.rs".into(),
+            line: Some(4),
+            column: Some(2),
+        }),
         "{label}"
     );
 });

@@ -61,6 +61,10 @@ pub struct Settings {
     /// 终端核心后端（ADR-050）。存名字，与主题的回落纪律一致：名字不存在
     /// 时回落默认。只影响新会话。
     pub terminal_backend: Option<String>,
+    /// 文件路径点击的打开档位（ADR-055）：None = 系统默认文本编辑器；
+    /// "vscode"/"zed" = 已安装编辑器档位（打开时走发现链重解析）；
+    /// 其余值 = 自定义可执行文件绝对路径（校验规则与 local_shell 一致）。
+    pub text_editor: Option<String>,
 }
 
 /// 设置表单的值：打开时的生效快照与「应用」出口共用一份字段。
@@ -80,6 +84,9 @@ pub struct SettingsValues {
     pub option_as_alt: bool,
     /// 新会话用的终端核心后端（ADR-050）。
     pub terminal_backend: BackendKind,
+    /// 文件路径点击的打开档位（ADR-055）：None = 系统默认。值域与
+    /// [`Settings::text_editor`] 一致，解释见 `editor::EditorChoice`。
+    pub text_editor: Option<String>,
 }
 
 impl SettingsValues {
@@ -97,6 +104,7 @@ impl SettingsValues {
             local_shell: self.local_shell.clone(),
             local_workdir: self.local_workdir.clone(),
             terminal_backend: Some(self.terminal_backend.name().to_owned()),
+            text_editor: self.text_editor.clone(),
         }
     }
 }
@@ -286,6 +294,33 @@ pub fn validate_local_workdir(text: &str) -> Result<Option<String>, String> {
     Ok(Some(path.to_owned()))
 }
 
+/// 校验文本编辑器档位（ADR-055）：空 = 系统默认；档位 id（vscode/zed）
+/// 原样保存——可执行文件在打开时按发现链现解析；其余值按自定义路径
+/// 校验（规则与 local_shell 同源：绝对路径、存在、可执行）。
+pub fn validate_text_editor(text: &str) -> Result<Option<String>, String> {
+    let value = text.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if zhimaterm_local::editors::EditorKind::from_id(value).is_some() {
+        return Ok(Some(value.to_owned()));
+    }
+    let candidate = std::path::Path::new(value);
+    if !candidate.is_absolute() {
+        return Err(format!("编辑器必须是绝对路径：{value}"));
+    }
+    if !candidate.is_file() {
+        return Err(format!("编辑器不存在或不是文件：{value}"));
+    }
+    if !is_executable(candidate) {
+        #[cfg(unix)]
+        return Err(format!("编辑器没有执行权限：{value}"));
+        #[cfg(windows)]
+        return Err(format!("编辑器必须是 .exe 或 .com 程序：{value}"));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 #[cfg(unix)]
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -437,6 +472,7 @@ mod tests {
             local_workdir: Some("/tmp".into()),
             option_as_alt: true,
             terminal_backend: zhimaterm_terminal::backend::BackendKind::Termwiz,
+            text_editor: Some("vscode".into()),
         };
         assert_eq!(
             values.to_settings(&existing),
@@ -451,8 +487,9 @@ mod tests {
                 local_shell: Some("/bin/zsh".into()),
                 local_workdir: Some("/tmp".into()),
                 terminal_backend: Some("termwiz".into()),
+                text_editor: Some("vscode".into()),
             },
-            "9 个编辑字段全部落盘，theme 从现有设置抄回"
+            "10 个编辑字段全部落盘，theme 从现有设置抄回"
         );
     }
 
@@ -473,6 +510,7 @@ mod tests {
             local_workdir: None,
             option_as_alt: false,
             terminal_backend: zhimaterm_terminal::backend::BackendKind::Alacritty,
+            text_editor: None,
         };
         assert_eq!(values.to_settings(&existing).ui_font_family, None);
     }
@@ -491,6 +529,7 @@ mod tests {
             local_shell: Some("/bin/zsh".into()),
             local_workdir: Some("/tmp".into()),
             terminal_backend: None,
+            text_editor: Some("zed".into()),
         };
         settings.save_at(path.clone()).expect("保存应成功");
 
@@ -699,6 +738,7 @@ mod tests {
             local_workdir: None,
             option_as_alt: false,
             terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
+            text_editor: None,
         };
         assert_eq!(
             store.apply(&edited).unwrap_err(),
@@ -737,6 +777,7 @@ mod tests {
             local_workdir: None,
             option_as_alt: true,
             terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
+            text_editor: None,
         };
         store.apply(&edited).expect("可写时应用应成功");
         let saved = Settings::load_at(path.clone()).expect("落盘应可读回");

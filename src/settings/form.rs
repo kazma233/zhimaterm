@@ -19,7 +19,7 @@ use gpui::{
 use crate::settings::{
     DEFAULT_SCROLLING_HISTORY, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_UI_FONT_SIZE,
     SettingsValues, validate_font_size, validate_local_shell, validate_local_workdir,
-    validate_scrolling_history, validate_ui_font_size,
+    validate_scrolling_history, validate_text_editor, validate_ui_font_size,
 };
 use zhimaterm_base::font;
 use zhimaterm_base::ui::card;
@@ -40,13 +40,15 @@ pub struct ModalActions {
     pub cancel: WindowAction,
 }
 
-/// 表单里的下拉：两个字体选择与本地 Shell 选择，共用一套 select 组件。
-/// 同一时间最多展开一个。
+/// 表单里的下拉：两个字体选择、本地 Shell、文本编辑器与终端核心，
+/// 共用一套 select 组件。同一时间最多展开一个。
 #[derive(Clone, Copy, PartialEq)]
 pub enum DropdownField {
     Terminal,
     Interface,
     Shell,
+    /// 文本编辑器档位（ADR-055）：路径点击的打开目标，立即生效。
+    Editor,
     /// 终端核心后端（ADR-050）：只影响新会话。
     Backend,
 }
@@ -58,6 +60,7 @@ impl DropdownField {
             Self::Terminal => "font-select-popover",
             Self::Interface => "ui-font-select-popover",
             Self::Shell => "shell-select-popover",
+            Self::Editor => "editor-select-popover",
             Self::Backend => "backend-select-popover",
         }
     }
@@ -82,16 +85,17 @@ impl DropdownState {
     }
 }
 
-/// 本地 Shell 的选择：系统默认 / 注册表候选 / 自定义路径。
+/// 注册表式下拉（Shell 与文本编辑器）的选择三态：系统默认 / 候选 / 自定义
+/// 路径。下标规则两边一致：labels = 系统默认 + 候选 + 自定义。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShellChoice {
+enum RegistryChoice {
     Default,
     Candidate(usize),
     Custom,
 }
 
-impl ShellChoice {
-    /// 在 `shell_labels`（系统默认 + 候选 + 自定义）里的下标。
+impl RegistryChoice {
+    /// 在 labels（系统默认 + 候选 + 自定义）里的下标。
     fn index(self, candidates: usize) -> usize {
         match self {
             Self::Default => 0,
@@ -121,10 +125,15 @@ pub struct CandidateLists {
     pub ui_fonts: Vec<String>,
     /// 本地 Shell 候选：系统注册表路径
     pub shells: Vec<String>,
+    /// 已安装编辑器的档位 id（vscode/zed，探测结果）：文本编辑器下拉候选
+    pub editors: Vec<String>,
 }
 
 /// 自定义 Shell 输入的占位路径：只作格式提示，不代表任何平台的默认。
 const CUSTOM_SHELL_PLACEHOLDER: &str = "/usr/local/bin/fish";
+
+/// 自定义编辑器输入的占位路径：同上，只作格式提示。
+const CUSTOM_EDITOR_PLACEHOLDER: &str = "/usr/local/bin/nvim";
 
 pub struct SettingsForm {
     /// 终端字号
@@ -136,9 +145,15 @@ pub struct SettingsForm {
     /// 本地 Shell 候选（系统注册表，打开表单时取一次）
     shells: Vec<String>,
     /// 选中的 Shell：系统默认 / 候选 / 自定义
-    shell_choice: ShellChoice,
+    shell_choice: RegistryChoice,
     /// 自定义 Shell 路径输入（仅「自定义」项选中时显示）
     custom_shell: Entity<TextInput>,
+    /// 已安装编辑器的档位 id（探测结果，打开表单时取一次）
+    editors: Vec<String>,
+    /// 选中的编辑器档位：系统默认 / 档位 / 自定义
+    editor_choice: RegistryChoice,
+    /// 自定义编辑器路径输入（仅「自定义」项选中时显示）
+    custom_editor: Entity<TextInput>,
     /// 默认工作目录（空 = home）：新会话的回落值，焦点格有目录时被继承优先（ADR-054）
     workdir: Entity<TextInput>,
     /// macOS 上 ⌥ 键当 Alt（ADR-033）。默认关：保持系统原生特殊字符输入。
@@ -149,10 +164,11 @@ pub struct SettingsForm {
     ui_candidates: Vec<String>,
     /// 校验或保存失败的原因：显示在表单底部，不弹窗
     error: Option<String>,
-    /// 四个下拉的选中项与锚点
+    /// 五个下拉的选中项与锚点
     terminal: DropdownState,
     interface: DropdownState,
     shell: DropdownState,
+    editor: DropdownState,
     backend: DropdownState,
     /// 展开着的下拉：单值即互斥（同一时间最多一个）
     open: Option<DropdownField>,
@@ -179,6 +195,12 @@ impl SettingsForm {
         let (shell_choice, custom_shell_text) =
             resolve_shell_choice(&shells, current.local_shell.as_deref());
         let shell_index = shell_choice.index(shells.len());
+        // 编辑器档位同构：未配置 = 系统默认；档位 id 在探测结果里 = 档位；
+        // 自定义路径（或档位编辑器后来被卸载）落「自定义…」回填路径
+        let editors = lists.editors;
+        let (editor_choice, custom_editor_text) =
+            resolve_editor_choice(&editors, current.text_editor.as_deref());
+        let editor_index = editor_choice.index(editors.len());
         let input_font = font::terminal_font(&current.font_family);
         let make = |placeholder: &str, cx: &mut Context<Self>| {
             cx.new(|cx| TextInput::new(cx, placeholder, false, input_font.clone()))
@@ -188,6 +210,7 @@ impl SettingsForm {
         let ui_size = make(&DEFAULT_UI_FONT_SIZE.to_string(), cx);
         let history = make(&DEFAULT_SCROLLING_HISTORY.to_string(), cx);
         let custom_shell = make(CUSTOM_SHELL_PLACEHOLDER, cx);
+        let custom_editor = make(CUSTOM_EDITOR_PLACEHOLDER, cx);
         let workdir = make("", cx);
         size.update(cx, |input, cx| {
             input.set_text(&current.font_size.to_string(), cx)
@@ -199,6 +222,7 @@ impl SettingsForm {
             input.set_text(&current.scrolling_history.to_string(), cx)
         });
         custom_shell.update(cx, |input, cx| input.set_text(&custom_shell_text, cx));
+        custom_editor.update(cx, |input, cx| input.set_text(&custom_editor_text, cx));
         workdir.update(cx, |input, cx| {
             input.set_text(current.local_workdir.as_deref().unwrap_or(""), cx)
         });
@@ -215,6 +239,9 @@ impl SettingsForm {
             shells,
             shell_choice,
             custom_shell,
+            editors,
+            editor_choice,
+            custom_editor,
             workdir,
             option_as_alt: current.option_as_alt,
             candidates,
@@ -223,6 +250,7 @@ impl SettingsForm {
             terminal: DropdownState::new(font_index),
             interface: DropdownState::new(ui_font_index),
             shell: DropdownState::new(shell_index),
+            editor: DropdownState::new(editor_index),
             backend: DropdownState::new(backend_index),
             open: None,
         }
@@ -251,6 +279,14 @@ impl SettingsForm {
             self.shell_value().unwrap_or_default()
         };
         let local_shell = validate_local_shell(&shell_text)?;
+        // 编辑器同构：系统默认/自定义 = 空串（自定义走输入框），档位 = id；
+        // 校验里档位 id 直接过、自定义路径按 local_shell 同规则把关
+        let editor_text = if self.editor_custom() {
+            self.custom_editor.read(cx).text().to_owned()
+        } else {
+            self.editor_value().unwrap_or_default()
+        };
+        let text_editor = validate_text_editor(&editor_text)?;
         let local_workdir = validate_local_workdir(self.workdir.read(cx).text())?;
         let terminal_backend = BackendKind::available()
             .get(self.backend.selected)
@@ -266,6 +302,7 @@ impl SettingsForm {
             local_workdir,
             option_as_alt: self.option_as_alt,
             terminal_backend,
+            text_editor,
         })
     }
 
@@ -284,15 +321,18 @@ impl SettingsForm {
     }
 
     /// 表单里输入框的焦点环：按视觉顺序排（ADR-043）。模态内的 Tab 沿它移动，
-    /// 走完一圈回到作用域根。自定义 Shell 路径只在选中「自定义…」时在场。
+    /// 走完一圈回到作用域根。自定义 Shell/编辑器路径只在选中「自定义…」时在场。
     pub fn focus_ring(&self, cx: &App) -> Vec<FocusHandle> {
-        // 与视觉顺序一致（ADR-043）：自定义 Shell 路径行画在 Shell 行与工作
-        // 目录行之间，环里也夹在 history 与 workdir 之间
+        // 与视觉顺序一致（ADR-043）：编辑器行在「终端」节（history 之后），
+        // 自定义 Shell 路径行画在 Shell 行与工作目录之间
         let mut ring = vec![
             self.ui_size.read(cx).focus_handle(),
             self.size.read(cx).focus_handle(),
             self.history.read(cx).focus_handle(),
         ];
+        if self.editor_custom() {
+            ring.push(self.custom_editor.read(cx).focus_handle());
+        }
         if self.shell_custom() {
             ring.push(self.custom_shell.read(cx).focus_handle());
         }
@@ -317,7 +357,11 @@ impl SettingsForm {
             DropdownField::Interface => self.interface.selected = index,
             DropdownField::Shell => {
                 self.shell.selected = index;
-                self.shell_choice = ShellChoice::from_index(index, self.shells.len());
+                self.shell_choice = RegistryChoice::from_index(index, self.shells.len());
+            }
+            DropdownField::Editor => {
+                self.editor.selected = index;
+                self.editor_choice = RegistryChoice::from_index(index, self.editors.len());
             }
             DropdownField::Backend => self.backend.selected = index,
         }
@@ -350,7 +394,7 @@ impl SettingsForm {
 
     /// 当前选中的是「自定义…」项（候选表之后的末位）。
     pub fn shell_custom(&self) -> bool {
-        self.shell_choice == ShellChoice::Custom
+        self.shell_choice == RegistryChoice::Custom
     }
 
     /// Shell 下拉的显示项：「系统默认」+ 注册表候选 + 「自定义…」。
@@ -373,8 +417,40 @@ impl SettingsForm {
     /// 选中项对应的 Shell 路径：系统默认与自定义 = None（自定义走输入框）。
     pub fn shell_value(&self) -> Option<String> {
         match self.shell_choice {
-            ShellChoice::Candidate(index) => self.shells.get(index).cloned(),
-            ShellChoice::Default | ShellChoice::Custom => None,
+            RegistryChoice::Candidate(index) => self.shells.get(index).cloned(),
+            RegistryChoice::Default | RegistryChoice::Custom => None,
+        }
+    }
+
+    /// 当前选中的编辑器是「自定义…」项。
+    pub fn editor_custom(&self) -> bool {
+        self.editor_choice == RegistryChoice::Custom
+    }
+
+    /// 编辑器下拉的显示项：「系统默认」+ 探测到的编辑器名 + 「自定义…」。
+    pub fn editor_labels(&self) -> Vec<String> {
+        let mut labels = Vec::with_capacity(self.editors.len() + 2);
+        labels.push("系统默认".to_owned());
+        labels.extend(self.editors.iter().filter_map(|id| {
+            zhimaterm_local::editors::EditorKind::from_id(id).map(|kind| kind.label().to_owned())
+        }));
+        labels.push("自定义…".to_owned());
+        labels
+    }
+
+    /// 选中项在 `editor_labels` 里的文字。
+    pub fn editor_label(&self) -> String {
+        self.editor_labels()
+            .get(self.editor.selected)
+            .cloned()
+            .unwrap_or_else(|| "系统默认".to_owned())
+    }
+
+    /// 选中项对应的编辑器档位 id：系统默认与自定义 = None（自定义走输入框）。
+    pub fn editor_value(&self) -> Option<String> {
+        match self.editor_choice {
+            RegistryChoice::Candidate(index) => self.editors.get(index).cloned(),
+            RegistryChoice::Default | RegistryChoice::Custom => None,
         }
     }
 
@@ -386,10 +462,14 @@ impl SettingsForm {
         self.terminal.selected = 0;
         self.interface.selected = 0;
         self.shell.selected = 0;
-        self.shell_choice = ShellChoice::Default;
+        self.shell_choice = RegistryChoice::Default;
+        self.editor.selected = 0;
+        self.editor_choice = RegistryChoice::Default;
         self.backend.selected = 0;
         self.open = None;
         self.custom_shell
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.custom_editor
             .update(cx, |input, cx| input.set_text("", cx));
         self.workdir.update(cx, |input, cx| input.set_text("", cx));
         self.option_as_alt = false;
@@ -408,12 +488,25 @@ impl SettingsForm {
 
 /// 配置的 Shell 落到哪一项：未配置 = 系统默认；命中候选 = 候选下标；
 /// 保存的路径不在系统候选里（手改或跨机器搬运）落到「自定义…」并回填路径。
-fn resolve_shell_choice(shells: &[String], configured: Option<&str>) -> (ShellChoice, String) {
+fn resolve_shell_choice(shells: &[String], configured: Option<&str>) -> (RegistryChoice, String) {
     match configured {
-        None => (ShellChoice::Default, String::new()),
+        None => (RegistryChoice::Default, String::new()),
         Some(path) => match shells.iter().position(|candidate| candidate == path) {
-            Some(index) => (ShellChoice::Candidate(index), String::new()),
-            None => (ShellChoice::Custom, path.to_owned()),
+            Some(index) => (RegistryChoice::Candidate(index), String::new()),
+            None => (RegistryChoice::Custom, path.to_owned()),
+        },
+    }
+}
+
+/// 配置的编辑器档位落到哪一项：与 Shell 同构——未配置 = 系统默认；档位 id
+/// 在探测结果里 = 档位；其余（自定义路径，或档位编辑器被卸载后 id 不再
+/// 探测得到）落「自定义…」回填原值。
+fn resolve_editor_choice(editors: &[String], configured: Option<&str>) -> (RegistryChoice, String) {
+    match configured {
+        None => (RegistryChoice::Default, String::new()),
+        Some(value) => match editors.iter().position(|candidate| candidate == value) {
+            Some(index) => (RegistryChoice::Candidate(index), String::new()),
+            None => (RegistryChoice::Custom, value.to_owned()),
         },
     }
 }
@@ -685,6 +778,35 @@ impl ModalView for SettingsModal {
                 },
             ));
         }
+        // 文本编辑器（ADR-055）：⌘/Ctrl+点击终端输出里的文件路径经确认后用它
+        // 打开；归「终端」节——设置应用即推给全部已开会话，立即生效
+        content = content.child(field_column(
+            tokens,
+            "文本编辑器",
+            plain_select_row(
+                tokens,
+                "select-text-editor",
+                &form.editor_label(),
+                form.is_open(DropdownField::Editor),
+                &form.editor.bounds,
+                {
+                    let form = self.form.clone();
+                    move |_, _, cx| {
+                        form.update(cx, |form, cx| {
+                            form.toggle_dropdown(DropdownField::Editor, cx)
+                        });
+                    }
+                },
+            ),
+        ));
+        if form.editor_custom() {
+            content = content.child(input::field(
+                tokens,
+                cx,
+                "自定义编辑器路径（绝对路径）",
+                &form.custom_editor,
+            ));
+        }
         content = content
             .child(zhimaterm_base::ui::horizontal_divider(tokens))
             .child(section_header(tokens, "新会话", Some("已开会话保持不变")))
@@ -814,7 +936,7 @@ impl ModalView for SettingsModal {
     }
 
     /// 展开时的选项浮层挂在遮罩层里、卡片之后（ADR-044 经 floaters 接入）：
-    /// 不受卡片 overflow_hidden 裁剪，也画在卡片上层。三个下拉互斥，同一时间
+    /// 不受卡片 overflow_hidden 裁剪，也画在卡片上层。下拉互斥，同一时间
     /// 最多一个浮层。浮层弹出方向按视口高判定：下方放不下时贴选择框上方展开。
     fn floaters(&self, _window: &Window, cx: &App) -> Vec<AnyElement> {
         let tokens = &zhimaterm_base::theme::tokens(cx);
@@ -843,6 +965,12 @@ impl ModalView for SettingsModal {
                 form.shell_labels(),
                 form.shell.selected,
                 form.shell.bounds.clone(),
+                None,
+            ),
+            DropdownField::Editor => (
+                form.editor_labels(),
+                form.editor.selected,
+                form.editor.bounds.clone(),
                 None,
             ),
             DropdownField::Backend => (
@@ -941,6 +1069,7 @@ mod tests {
             terminal_fonts: vec!["Mono A".to_owned(), "Mono B".to_owned()],
             ui_fonts: vec![font::SYSTEM_UI_FONT.to_owned(), "Sans B".to_owned()],
             shells: vec![test_paths::shell(), test_paths::alt_shell()],
+            editors: vec!["vscode".to_owned()],
         }
     }
 
@@ -957,6 +1086,7 @@ mod tests {
             local_workdir: None,
             terminal_backend: BackendKind::Alacritty,
             option_as_alt: true,
+            text_editor: Some("vscode".to_owned()),
         }
     }
 
@@ -976,11 +1106,14 @@ mod tests {
             );
             assert_eq!(edited.local_workdir, None);
             assert!(edited.option_as_alt);
+            // 编辑器档位经候选下标往返（ADR-055）
+            assert_eq!(edited.text_editor.as_deref(), Some("vscode"));
             let form = form.read(cx);
             assert_eq!(edited.font_family, "Mono B");
             assert_eq!(edited.ui_font_family.as_deref(), Some("Sans B"));
             assert_eq!(form.terminal.selected, 1);
             assert_eq!(form.shell.selected, 2);
+            assert_eq!(form.editor.selected, 1, "档位 id 在探测候选里选档位项");
         });
     }
 
@@ -1082,21 +1215,24 @@ mod tests {
         let shells = vec!["/bin/sh".to_owned(), "/bin/zsh".to_owned()];
         assert_eq!(
             resolve_shell_choice(&shells, None),
-            (ShellChoice::Default, String::new())
+            (RegistryChoice::Default, String::new())
         );
         assert_eq!(
             resolve_shell_choice(&shells, Some("/bin/zsh")),
-            (ShellChoice::Candidate(1), String::new())
+            (RegistryChoice::Candidate(1), String::new())
         );
         assert_eq!(
             resolve_shell_choice(&shells, Some("/opt/fish")),
-            (ShellChoice::Custom, "/opt/fish".to_owned())
+            (RegistryChoice::Custom, "/opt/fish".to_owned())
         );
-        assert_eq!(ShellChoice::Default.index(2), 0);
-        assert_eq!(ShellChoice::Candidate(1).index(2), 2);
-        assert_eq!(ShellChoice::Custom.index(2), 3);
-        assert_eq!(ShellChoice::from_index(0, 2), ShellChoice::Default);
-        assert_eq!(ShellChoice::from_index(2, 2), ShellChoice::Candidate(1));
-        assert_eq!(ShellChoice::from_index(3, 2), ShellChoice::Custom);
+        assert_eq!(RegistryChoice::Default.index(2), 0);
+        assert_eq!(RegistryChoice::Candidate(1).index(2), 2);
+        assert_eq!(RegistryChoice::Custom.index(2), 3);
+        assert_eq!(RegistryChoice::from_index(0, 2), RegistryChoice::Default);
+        assert_eq!(
+            RegistryChoice::from_index(2, 2),
+            RegistryChoice::Candidate(1)
+        );
+        assert_eq!(RegistryChoice::from_index(3, 2), RegistryChoice::Custom);
     }
 }
