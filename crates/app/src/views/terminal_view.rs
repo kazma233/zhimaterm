@@ -103,10 +103,8 @@ enum MonitorState {
 }
 
 /// 文件路径点击的确认浮层载荷（ADR-055）：⌘/Ctrl+点击命中路径时记下
-/// 锚点与已验证的目标，用户确认后才 spawn 编辑器。
+/// 已验证的目标，用户确认后才 spawn 编辑器。
 struct ConfirmOpen {
-  /// 窗口坐标（与 context_menu 同语义，渲染时换算容器内坐标）
-  anchor: gpui::Point<gpui::Pixels>,
   /// `~` 展开后且验证存在的绝对路径
   path: std::path::PathBuf,
   line: Option<u32>,
@@ -1422,12 +1420,7 @@ impl TerminalView {
           let path = editor::expand_home(&path);
           if path.exists() {
             self.context_menu = None;
-            self.confirm_open = Some(ConfirmOpen {
-              anchor: event.position,
-              path,
-              line,
-              column,
-            });
+            self.confirm_open = Some(ConfirmOpen { path, line, column });
           }
         }
       }
@@ -1785,15 +1778,12 @@ fn render_context_menu(
   ]
 }
 
-/// 文件路径点击的确认浮层（ADR-055）：指针锚定小卡片（与右键菜单同一
-/// 挂载与定位机制），说明「用哪个编辑器打开哪个文件」，确认后才 spawn。
+/// 文件路径点击的确认浮层（ADR-055）：容器居中的确认卡片（与右键菜单
+/// 同一挂载机制），说明「用哪个编辑器打开哪个文件」，确认后才 spawn。
 /// 打开失败静默——本地格没有回执通道，设置保存时的校验挡住绝大多数坏值。
-/// `anchor` 是指针在挂载容器坐标系里的位置（窗口坐标减容器 origin）。
 fn render_confirm_open(
   confirm: &ConfirmOpen,
   editor: &EditorChoice,
-  anchor: gpui::Point<gpui::Pixels>,
-  container: gpui::Size<gpui::Pixels>,
   cx: &mut Context<TerminalView>,
 ) -> Vec<gpui::AnyElement> {
   use zhimaterm_base::ui::{panel, popover_shadow};
@@ -1818,11 +1808,10 @@ fn render_confirm_open(
     this.confirm_open = None;
     cx.notify();
   });
-  // 卡片宽度固定、高度按内容量级估算（定位夹取用）；路径长时截断显示
+  // 卡片宽度固定，路径超宽时换行展示（不截断，用户要能核对完整目标）
   let card = div()
     .id("terminal-confirm-open")
-    .absolute()
-    .w(px(280.))
+    .w(px(420.))
     .flex()
     .flex_col()
     .gap(px(8.))
@@ -1845,7 +1834,6 @@ fn render_confirm_open(
       div()
         .text_size(ui_rems(10.))
         .text_color(gpui::rgb(tokens.fg_muted))
-        .truncate()
         .child(target),
     )
     .child(
@@ -1868,20 +1856,21 @@ fn render_confirm_open(
           open,
         )),
     );
-  let position = menu::clamped_menu_position(anchor, container, gpui::size(px(280.), px(110.)));
   let entity = cx.entity();
   vec![
     menu::context_menu_backdrop(move |_, cx| {
       entity.update(cx, |view, cx| {
         view.confirm_open = None;
         cx.notify();
-      });
+      })
     })
     .into_any_element(),
     div()
       .absolute()
-      .left(position.x)
-      .top(position.y)
+      .size_full()
+      .flex()
+      .items_center()
+      .justify_center()
       .child(card)
       .into_any_element(),
   ]
@@ -2181,13 +2170,7 @@ impl TerminalView {
         self
           .confirm_open
           .as_ref()
-          .and_then(|confirm| {
-            let bounds = self.container_bounds.get();
-            (bounds.size.width > px(0.)).then(|| {
-              // 指针容器内坐标，与菜单同一换算
-              render_confirm_open(confirm, &self.editor, confirm.anchor - bounds.origin, bounds.size, cx)
-            })
-          })
+          .map(|confirm| render_confirm_open(confirm, &self.editor, cx))
           .into_iter()
           .flatten(),
       )
