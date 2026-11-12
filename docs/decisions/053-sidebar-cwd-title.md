@@ -69,3 +69,26 @@ OSC 标题，所以本地会话的侧栏实际上常年显示「会话 1」「�
   `~\` 接法只在 Windows 编译，macOS/Linux 上无法验收（需 Windows 实机
   `cargo check --all-targets` 与手工验证）。UI 编排（cd 跟随、OSC 优先、
   兜底文案）按仓库惯例不设单测，手工验收项见 `docs/context/manual-acceptance.md`。
+
+## 修订（2026-11-11 晚，Windows 实机验收发现）
+
+**OSC 标题优先只适用于前台程序设置的标题；ConPTY 的开机默认标题按无
+标题处理。** Windows 实机验收发现：conhost 把控制台标题初始化为 spawn
+的 exe 绝对路径，并经 OSC 0 原样上报——这条「标题」是终端基础设施的
+默认值而非前台程序设置的标题，按决策 1 的优先级上报后会**永久遮住工作
+目录标题**（新开本地格恒显示 shell 路径；程序把标题还原成进入前值时，
+如 vim 退出，还原的也是这条开机标题）。
+
+修订：transport 层在 spawn 时以与 `lpApplicationName` 同源的解析
+（`zhimaterm_local::pty::search_path`）算出开机标题，经 `SessionExtras::
+boot_title` 交给 worker；worker 的请求分派对**等值**（trim 后）的 OSC
+标题降级为重置（`ControlEvent::Title(空串)`）——与收到 `ResetTitle`
+同语义，工作目录标题随之浮出。程序把标题显式设回同一串（vim 还原进入
+前标题）走同一判定，同样回落目录，语义自洽。
+
+- 平台与形态门控：只有 Windows 宿主 shell（`LocalShell::Default/Program`）
+  提供 `boot_title`；WSL 未观察到遮蔽、SSH 不走 ConPTY、Unix 无此机制，
+  均为 None，行为不变。
+- 单测：`plan_requests_filters_boot_title_to_reset`（等值/带空白等值降级
+  为重置、普通标题透传、无开机标题平台行为不变），Windows 实机复验见
+  `docs/context/manual-acceptance.md` 存档段。
