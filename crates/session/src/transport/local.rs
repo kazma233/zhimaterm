@@ -97,6 +97,20 @@ pub(super) fn open(columns: usize, lines: usize, shell: &LocalShell) -> Result<T
     command.env("TERM", "xterm-256color");
     // 真彩声明（ADR-032）：核心支持 SGR 38;2，不声明则按 COLORTERM 探测的程序会降到 256 色
     command.env("COLORTERM", "truecolor");
+    // 开机标题与 lpApplicationName 同源解析（spawn 内部即用此值），必须在
+    // command 被 move 进 spawn 前取出；pwsh 这类 PATH 命中的相对名解析后
+    // 才对得上 ConPTY 上报的绝对路径
+    #[cfg(windows)]
+    let boot_title = match shell {
+        LocalShell::Default { .. } | LocalShell::Program { .. } => Some(
+            pty::search_path(command.argv()[0].as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        LocalShell::Wsl { .. } => None,
+    };
+    #[cfg(not(windows))]
+    let boot_title = None;
     let (pty, reader, writer) =
         pty::spawn(command, pty_size(columns, lines, (0, 0))).context("创建本地 PTY 失败")?;
 
@@ -134,6 +148,7 @@ pub(super) fn open(columns: usize, lines: usize, shell: &LocalShell) -> Result<T
             probe,
             foreground_probe,
             shell_pid,
+            boot_title,
             ..SessionExtras::default()
         },
     );

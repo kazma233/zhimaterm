@@ -347,6 +347,8 @@ pub(super) fn run(
     let mut transport = transport;
     // 连接期附带产物（SFTP/监控/转发/LANG）一条路径取出，经控制事件交给 UI
     let extras = transport.take_extras();
+    // 开机标题只在请求分派时比对，先移出避免随 extras 全程携带
+    let boot_title = extras.boot_title;
     let reader = transport.take_reader();
     let (output_tx, output_rx) = smol::channel::bounded(OUTPUT_QUEUE_CAPACITY);
     let reader_thread = spawn_reader(reader, output_tx);
@@ -531,7 +533,7 @@ pub(super) fn run(
         //    这里执行。应答必须按前台程序的输出顺序写回 PTY，否则 DA1/DSR
         //    之类查询会让程序等在超时上。
         let requests = terminal.take_requests();
-        for action in plan_requests(requests, &terminal, state.cell_size) {
+        for action in plan_requests(requests, &terminal, state.cell_size, boot_title.as_deref()) {
             match action {
                 RequestAction::Pty(bytes) => write_bytes(&mut writer, bytes.as_bytes())?,
                 RequestAction::Control(event) => emit_control(&control, event),
@@ -1116,16 +1118,29 @@ enum RequestAction {
 /// 核心请求的分派（GLOSSARY「查询应答」）：纯决策无头可测——喂 `TermRequest`
 /// 变体断言动作。查询应答按请求序产出，颜色走共享层格式化，CSI 14t 在
 /// [`text_area_size_reply`] 单点拼装；鼠标指针形状按程序是否接管鼠标折算。
+/// `boot_title` 是 ConPTY 的开机标题（见 transport::local），等值的 OSC 标题
+/// 降级为重置。
 fn plan_requests(
     requests: Vec<TermRequest>,
     terminal: &TerminalModel,
     cell_size: (u16, u16),
+    boot_title: Option<&str>,
 ) -> Vec<RequestAction> {
     requests
         .into_iter()
         .map(|request| match request {
             TermRequest::PtyWrite(text) => RequestAction::Pty(text),
-            TermRequest::Title(title) => RequestAction::Control(ControlEvent::Title(title)),
+            TermRequest::Title(title) => {
+                // conhost 把控制台标题初始化为 spawn 的 exe 路径并经 OSC 0 原样
+                // 上报：那是基础设施默认值而非前台程序设置的标题，按「OSC 标题」
+                // 优先级上报会遮住工作目录标题（ADR-053）。等值降级为重置；程序
+                // 显式设回同一串（vim 还原进入前标题）同此语义。
+                if boot_title.is_some_and(|boot| title.trim() == boot) {
+                    RequestAction::Control(ControlEvent::Title(String::new()))
+                } else {
+                    RequestAction::Control(ControlEvent::Title(title))
+                }
+            }
             TermRequest::ResetTitle => RequestAction::Control(ControlEvent::Title(String::new())),
             TermRequest::Bell => RequestAction::Control(ControlEvent::Bell),
             TermRequest::ClipboardStore(text) => {
@@ -1451,6 +1466,7 @@ mod tests {
             ],
             &terminal,
             (8, 16),
+            None,
         );
         let mut actions = actions.into_iter();
         assert!(matches!(actions.next(), Some(RequestAction::Pty(text)) if text == "\x1b[?6c"));
@@ -1484,12 +1500,62 @@ mod tests {
 
         // 程序接管鼠标：指针换箭头
         terminal.advance(b"\x1b[?1000h");
-        let actions = plan_requests(vec![TermRequest::MouseCursorDirty], &terminal, (8, 16));
+        let actions = plan_requests(
+            vec![TermRequest::MouseCursorDirty],
+            &terminal,
+            (8, 16),
+            None,
+        );
         assert!(matches!(
             actions.first(),
             Some(RequestAction::Control(ControlEvent::Pointer(
                 PointerShape::Arrow
             )))
+        ));
+    }
+
+    /// ConPTY 开机标题过滤（ADR-053）：等值（含首尾空白）降级为重置——conhost
+    /// 把控制台标题初始化为 spawn 的 exe 路径并经 OSC 0 上报，是基础设施默认值
+    /// 而非前台程序设置的标题；程序显式设回同一串（vim 还原进入前标题）同此。
+    /// 其余标题原样透传，无开机标题的平台（Unix/WSL/SSH）行为不变。
+    #[test]
+    fn plan_requests_filters_boot_title_to_reset() {
+        let terminal = TerminalModel::with_backend(BackendKind::default(), 80, 24, 200);
+        let boot = r"C:\Windows\System32\cmd.exe";
+
+        let actions = plan_requests(
+            vec![
+                TermRequest::Title(boot.into()),
+                TermRequest::Title(format!("  {boot}  ")),
+                TermRequest::Title("vim".into()),
+                TermRequest::ResetTitle,
+            ],
+            &terminal,
+            (8, 16),
+            Some(boot),
+        );
+        let titles: Vec<String> = actions
+            .into_iter()
+            .filter_map(|action| match action {
+                RequestAction::Control(ControlEvent::Title(title)) => Some(title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![String::new(), String::new(), "vim".into(), String::new()]
+        );
+
+        // 无开机标题的平台：同样的串原样透传
+        let actions = plan_requests(
+            vec![TermRequest::Title(boot.into())],
+            &terminal,
+            (8, 16),
+            None,
+        );
+        assert!(matches!(
+            actions.first(),
+            Some(RequestAction::Control(ControlEvent::Title(title))) if title == boot
         ));
     }
 

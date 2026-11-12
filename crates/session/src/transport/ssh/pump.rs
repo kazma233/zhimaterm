@@ -306,6 +306,7 @@ pub(super) fn spawn_pump(
             probe: None,
             foreground_probe: None,
             shell_pid: None,
+            boot_title: None,
         },
     );
     Ok(transport)

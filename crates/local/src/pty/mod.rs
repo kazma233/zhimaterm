@@ -37,6 +37,12 @@ pub use unix::ForegroundProbe;
 #[cfg(windows)]
 pub use win::ForegroundProbe;
 
+/// 按 PATH×PATHEXT 解析可执行文件的绝对路径：与 `spawn` 的
+/// lpApplicationName 同一解析。Windows ConPTY 的初始控制台标题就是这条
+/// 路径（见 transport 层的 boot_title），调用方据此识别开机标题事件。
+#[cfg(windows)]
+pub use win::search_path;
+
 /// PTY 尺寸。像素尺寸按 UI 上报的格子尺寸计算：程序会用它算图片与字体比例
 /// （CSI 14t 也走同一份数据）；Windows ConPTY 只消费行列。
 #[derive(Clone, Copy, Debug, Default)]

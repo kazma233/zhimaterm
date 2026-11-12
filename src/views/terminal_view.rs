@@ -2866,7 +2866,7 @@ fn sidebar_cwd(cwd: &std::path::Path, home: Option<&std::path::Path>) -> String 
 }
 
 /// cwd 在 home 子树内的 `~` 缩写；None = 不在（调用方原样显示）。
-/// 逐组件比较保证边界（`/Users/fanggeek` 不是 `/Users/fang` 的子目录）。
+/// 逐组件比较保证边界（`/Users/tester2` 不是 `/Users/tester` 的子目录）。
 fn home_abbrev(cwd: &std::path::Path, home: &std::path::Path) -> Option<String> {
     let mut rest = cwd.iter();
     for part in home.iter() {
@@ -2995,32 +2995,54 @@ mod sidebar_cwd_tests {
     use std::path::Path;
 
     /// home 前缀按组件边界缩写（ADR-053）：home 本身是 `~`，home 下的路径
-    /// 用平台分隔符接在 `~` 后（Unix 是 `~/…`）；前缀只差字符串不差组件的
-    /// 不算 home 子目录。Windows 侧另有大小写不敏感比较与 `~\` 接法，仅在
-    /// Windows 编译（本仓在 macOS/Linux 上验收）。
+    /// 用平台分隔符接在 `~` 后（Unix 是 `~/…`、Windows 是 `~\…`）；前缀只差
+    /// 字符串不差组件的不算 home 子目录。Windows 另有大小写不敏感比较
+    /// （PEB 如实上报 cmd 手打的大小写）。
     #[test]
     fn home_prefix_is_abbreviated_on_component_boundaries() {
-        let home = Path::new("/Users/fang");
-        assert_eq!(sidebar_cwd(Path::new("/Users/fang"), Some(home)), "~");
+        // 路径形态与期望值随平台：分隔符来自 MAIN_SEPARATOR，不硬编码
+        let (home, sub, foreign, other) = if cfg!(windows) {
+            (
+                Path::new(r"C:\Users\tester"),
+                Path::new(r"C:\Users\tester\owner\zhimaterm"),
+                Path::new(r"C:\Users\tester2"),
+                Path::new(r"C:\tmp"),
+            )
+        } else {
+            (
+                Path::new("/Users/tester"),
+                Path::new("/Users/tester/owner/zhimaterm"),
+                Path::new("/Users/tester2"),
+                Path::new("/tmp"),
+            )
+        };
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(sidebar_cwd(home, Some(home)), "~");
         assert_eq!(
-            sidebar_cwd(Path::new("/Users/fang/owner/zhimaterm"), Some(home)),
-            "~/owner/zhimaterm"
+            sidebar_cwd(sub, Some(home)),
+            format!("~{sep}owner{sep}zhimaterm")
         );
-        // /Users/fanggeek 与 /Users/fang 只是字符串前缀相同，不是子目录
+        // foreign 与 home 只是字符串前缀相同，不是子目录，原样显示
         assert_eq!(
-            sidebar_cwd(Path::new("/Users/fanggeek"), Some(home)),
-            "/Users/fanggeek"
+            sidebar_cwd(foreign, Some(home)),
+            foreign.display().to_string()
         );
         // 非 home 路径原样（Windows 上即带盘符的 C:\Work 形态）
-        assert_eq!(sidebar_cwd(Path::new("/tmp"), Some(home)), "/tmp");
+        assert_eq!(sidebar_cwd(other, Some(home)), other.display().to_string());
+        // Windows：home 前缀逐组件小写比较，手打大小写也能缩写成 `~`
+        #[cfg(windows)]
+        assert_eq!(
+            sidebar_cwd(Path::new(r"C:\USERS\TESTER\owner"), Some(home)),
+            format!("~{sep}owner")
+        );
     }
 
     /// home 拿不到（`HOME`/`USERPROFILE` 都未设）时路径原样显示，不猜测。
     #[test]
     fn paths_show_verbatim_when_home_is_unknown() {
         assert_eq!(
-            sidebar_cwd(Path::new("/Users/fang/proj"), None),
-            "/Users/fang/proj"
+            sidebar_cwd(Path::new("/Users/tester/proj"), None),
+            "/Users/tester/proj"
         );
     }
 }

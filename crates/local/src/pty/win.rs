@@ -321,7 +321,9 @@ impl Child {
 
 /// argv[0] 的 PATH 解析：裸程序名（如 powershell.exe）解析成全路径，
 /// 绝对路径原样返回。PATHEXT 的扩展尝试沿用 portable-pty 的近似行为。
-fn search_path(exe: &OsStr) -> OsString {
+/// 按 PATH×PATHEXT 解析出 CreateProcessW 的 lpApplicationName：spawn 用它，
+/// ConPTY 的初始控制台标题也是它（worker 过滤开机标题需与 spawn 同源解析）。
+pub fn search_path(exe: &OsStr) -> OsString {
     if let Some(path) = std::env::var_os("PATH") {
         let extensions = std::env::var_os("PATHEXT").unwrap_or_else(|| ".EXE".into());
         for dir in std::env::split_paths(&path) {

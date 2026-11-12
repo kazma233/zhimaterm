@@ -36,6 +36,12 @@ pub(super) struct SessionExtras {
     /// 本地 shell 的 PID（ADR-039）：worker 定时读它的工作目录并持久化。
     /// WSL 与 SSH 为 None（目录在子系统/远端，宿主侧读不到）。
     pub shell_pid: Option<u32>,
+    /// Windows 宿主 shell 的 ConPTY 开机标题（spawn 的 exe 绝对路径）：conhost
+    /// 把控制台标题初始化为该值并经 OSC 0 上报，它是终端基础设施的默认值而
+    /// 非前台程序设置的标题，worker 对等值标题按重置处理（ADR-053）。程序显式
+    /// 设回同一串（vim 还原进入前标题）同样回落默认。WSL 未观察到遮蔽、SSH
+    /// 不走 ConPTY，均为 None。
+    pub boot_title: Option<String>,
     /// SSH 会话的转发状态事件流（ADR-011）。
     pub forward: Option<super::ForwardEvents>,
     /// SSH 会话的 LANG 下发结果（ADR-019）；客户端推不出 LANG 时为 None。
