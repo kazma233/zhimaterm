@@ -346,3 +346,18 @@ crates/connections  zhimaterm-connections  SSH 连接管理域（原 zhimaterm-s
   同一个 3000 行文件评审。方法保持 `TerminalModel` 固有实现，
   `encode_*`/`dispatch_mouse` 的 `pub` 不变，worker 零改动。
 - 纯搬移、零行为变化。
+
+## 修订（2026-11-12，十一）：根包升为 workspace 成员 crate，根 Cargo.toml 改纯 workspace
+
+对齐 wezterm/alacritty 的布局：根 `Cargo.toml` 不再同时是 package，只保留
+`[workspace]` 与 `[profile]`；原根包（外壳与视图，bin `zhimaterm`）整体搬为
+`crates/app`（crate 名 `zhimaterm-app`，bin-only，bin 名不变仍为 `zhimaterm`）。
+
+- 内部模块结构零改动（`app/`、`views/`、`settings/`、`workspace.rs`、
+  `editor.rs`、`main.rs` 照旧）；依赖图顶端位置不变，分层规则不受影响。
+- `build.rs`（winresource 图标嵌入）与 `icons/` 随 crate 走（图标只被 app
+  消费，落 `crates/app/icons/`，避免跨目录 `../../` 引用）；
+  `[package.metadata.packager]` 元数据随迁。
+- `Taskfile.yml` 的 build sources 与 macOS 版本号 grep 改指新路径。
+- 动机：消除「根 package + [workspace] 并存」的过渡形态，`cargo test` 等
+  命令以成员为单位心智一致；纯搬移、零行为变化。

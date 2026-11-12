@@ -45,7 +45,7 @@ ghost 渲染路径（`window.rs` prepaint 阶段的 `active_drag` 分支），
 drag_over 高亮也依赖同一 `active_drag` 状态（它有渲染、ghost 没有）——
 定性为 gpui-pre（本仓锁 `=0.3.10`）Windows 打包的内部行为，本仓改不了；
 升级依赖后复验。「幻影显示起的名字」的渲染层代码
-（`src/app/render.rs` DragGhost 用 `session.label`）有单测覆盖语义，
+（`crates/app/src/app/render.rs` DragGhost 用 `session.label`）有单测覆盖语义，
 macOS 侧可直接人工验证。
 
 ## 2026-11-11 晚间轮已验收/修复并移除的小节（结论存档）
@@ -118,6 +118,6 @@ degenerate 配置），跳板密码询问会被目标条目的凭据自动应答
 - `cargo test --workspace` 并发跑时 `tests::session_e2e` 的 8 个本地
   PTY 用例超时失败（干净 HEAD 同样失败，stash 对照确证）；单线程
   `-- --test-threads=1` 全部通过。多个 ConPTY/PowerShell 实例并行启动
-  在本机资源下超时，属并发敏感的环境问题——首次暴露是因为根包的
+  在本机资源下超时，属并发敏感的环境问题——首次暴露是因为 app crate 的
   `sidebar_cwd` 测试平台 bug（期望硬编码 `~/`，Windows 恒挂）一直
   fail-fast 挡住后续 target（该 bug 已随本轮修复平台化）。

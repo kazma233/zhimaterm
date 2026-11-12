@@ -42,32 +42,27 @@ pub const FONT_SIZE: f32 = 12.0;
 /// 校验错误（业务方经 `TextInput::set_error` 定义有没有、错什么）就贴在标签
 /// 右侧，红色，长文案就地换行、不挤动输入框。
 pub fn field(
-    tokens: &crate::theme::UiTokens,
-    cx: &gpui::App,
-    label: &str,
-    input: &gpui::Entity<TextInput>,
+  tokens: &crate::theme::UiTokens,
+  cx: &gpui::App,
+  label: &str,
+  input: &gpui::Entity<TextInput>,
 ) -> gpui::Div {
-    let mut head = div().flex().items_center().gap(px(6.)).child(
-        div()
-            .text_size(ui_rems(10.))
-            .text_color(gpui::rgb(tokens.fg_muted))
-            .child(label.to_owned()),
-    );
-    if let Some(error) = input.read(cx).error() {
-        // flex_1 + min_w(0)：长文案在标签右侧自行换行，不把这一行撑宽
-        head = head.child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .text_size(ui_rems(10.))
-                .text_color(gpui::rgb(tokens.danger))
-                .child(error.to_owned()),
-        );
-    }
+  let mut head = div().flex().items_center().gap(px(6.)).child(
     div()
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(head)
-        .child(input.clone())
+      .text_size(ui_rems(10.))
+      .text_color(gpui::rgb(tokens.fg_muted))
+      .child(label.to_owned()),
+  );
+  if let Some(error) = input.read(cx).error() {
+    // flex_1 + min_w(0)：长文案在标签右侧自行换行，不把这一行撑宽
+    head = head.child(
+      div()
+        .flex_1()
+        .min_w(px(0.))
+        .text_size(ui_rems(10.))
+        .text_color(gpui::rgb(tokens.danger))
+        .child(error.to_owned()),
+    );
+  }
+  div().flex().flex_col().gap(px(3.)).child(head).child(input.clone())
 }

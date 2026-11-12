@@ -20,7 +20,7 @@ tasks:
   build:
     desc: 构建 release 二进制
     sources:
-      - src/**/*.rs
+      - crates/**/*.rs
       - Cargo.toml
     cmds:
       - cargo build --release
@@ -41,7 +41,7 @@ tasks:
     platforms: [linux]
     cmds:
       - install -Dm755 target/release/{{.APP}} "$HOME/.local/bin/{{.APP}}"
-      - install -Dm644 icons/icon.png "$HOME/.local/share/icons/hicolor/512x512/apps/{{.ID}}.png"
+      - install -Dm644 crates/app/icons/icon.png "$HOME/.local/share/icons/hicolor/512x512/apps/{{.ID}}.png"
       - install -Dm644 packaging/{{.ID}}.desktop "$HOME/.local/share/applications/{{.ID}}.desktop"
       - command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
       - command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" || true
@@ -59,18 +59,18 @@ tasks:
   install-darwin:
     platforms: [darwin]
     vars:
-      # 取 Cargo.toml [package] 的 version;[package.metadata.packager] 里的
-      # 同名键在其后,grep -m1 固定命中前者。挂在本任务而非全局:
+      # 取 app crate [package] 的 version（根 Cargo.toml 是纯 workspace，
+      # 没有 version 字段）。挂在本任务而非全局：
       # 全局动态变量在 Windows 由 cmd 执行,grep/cut 与单引号引法都不可用
       VERSION:
-        sh: grep -m1 '^version' Cargo.toml | cut -d'"' -f2
+        sh: grep -m1 '^version' crates/app/Cargo.toml | cut -d'"' -f2
     cmds:
       - |
         set -e
         app="$HOME/Applications/{{.PRODUCT}}.app"
         mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
         cp target/release/{{.APP}} "$app/Contents/MacOS/{{.APP}}"
-        cp icons/icon.icns "$app/Contents/Resources/icon.icns"
+        cp crates/app/icons/icon.icns "$app/Contents/Resources/icon.icns"
         sed "s/@VERSION@/{{.VERSION}}/" packaging/Info.plist > "$app/Contents/Info.plist"
         if [ -n "{{.SIGN_IDENTITY}}" ]; then
           codesign --force --sign "{{.SIGN_IDENTITY}}" "$app"

@@ -4,10 +4,10 @@ ZhimaTerm 是面向开发者的 Rust 桌面终端（macOS/Linux/Windows）：本
 
 ## 仓库布局
 
-强制的分层边界落在 workspace 的 crate 上，根包是外壳与视图。依赖只允许
-`根包 → connections → session → terminal → base` 与 `session → local / recording`
+根 Cargo.toml 是纯 workspace（无根级 src/）。强制的分层边界落在 workspace 的 crate 上，app crate 是外壳与视图。依赖只允许
+`app → connections → session → terminal → base` 与 `session → local / recording`
 自上而下，反向引用由 Cargo 依赖图直接拒绝（[ADR-007](docs/decisions/007-module-boundaries.md)，
-2026-11-09 修订九）：
+2026-11-12 修订十一）：
 
 ```
 crates/base         zhimaterm-base         叶子与基础层：config_paths / font / input / theme / ui / wake
@@ -20,7 +20,7 @@ crates/session      zhimaterm-session      会话域：协议与内核（worker�
                                            重量级测试（tests/）、ssh-sftp 探针（bin/）
 crates/connections  zhimaterm-connections  SSH 连接管理域：connect / connections / keychain / forward_form
                                            （不实现 SSH 协议；协议在 zhimaterm-session::transport）
-src/                根包（bin）             外壳与视图：
+crates/app          zhimaterm-app          外壳与视图（workspace 唯一 bin，bin 名 zhimaterm）：
                     app/                    mod / sessions / workspace_io / modals / keys / render
                     views/                  跨业务共享渲染件（grid、terminal_view、sftp_panel、panes、
                                             session_state、terminal_keys、shell、theme_picker）
@@ -37,7 +37,7 @@ src/                根包（bin）             外壳与视图：
 
 ```sh
 cargo run --bin zhimaterm          # 开发运行
-cargo test --workspace             # 单元测试（模块内联，无需外部环境；根包是普通包，不带 --workspace 只会跑根包）
+cargo test --workspace             # 单元测试（模块内联，无需外部环境；根是纯 workspace，不带 --workspace 会报错）
 cargo fmt                          # 每次改完代码执行，原样接受 rustfmt 输出
 cargo clippy --workspace --all-targets   # 静态检查，对本仓代码要求 0 warning
 task install                       # 构建release + 按平台做桌面集成（task uninstall 卸载）

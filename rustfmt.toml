@@ -1,0 +1,9 @@
+# rustfmt 配置：除下面钉住的口味项外全用默认，仓库口径是「原样接受 rustfmt 输出」。
+# - 行宽 120 / 缩进 2 是口味选择；newline_style 钉 Unix 防三平台开发的 CRLF 脏 diff。
+# - edition / style_edition 显式钉住，避免未来工具链默认值漂移改变历史格式；
+#   格式升级只随 toolchain bump 提交发生（rust-toolchain.toml 与这里同步动）。
+max_width = 120
+newline_style = "Unix"
+tab_spaces = 2
+edition = "2024"
+style_edition = "2024"

@@ -82,7 +82,7 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
   - `serde`/`serde_json`：`connections.json`；`anyhow`：错误链；`gpui`：表单
     与模态渲染。
   - dev `gpui`（`test-support`）：连接表单的实体级单测。
-- 根包
+- app（`zhimaterm-app`）
   - `gpui` + `gpui_platform`（`font-kit`、`runtime_shaders`、`wayland`、`x11`）：
     桌面 UI 与窗口平台；`serde`/`serde_json`：设置与工作区；`anyhow`：
     错误链；`chrono`/`regex`/`unicode-segmentation`/`unicode-width`：视图层
@@ -121,8 +121,8 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
 
 ## 模块划分
 
-见 ADR-007（2026-11-09 修订九）：强制的分层边界落在 workspace crate，根包只留
-外壳与视图。依赖只允许自上而下，跨 crate 的反向引用由 Cargo 依赖图直接拒绝。
+见 ADR-007（2026-11-12 修订十一）：强制的分层边界落在 workspace crate，app crate 只装
+外壳与视图；根 Cargo.toml 是纯 workspace（无根级 src/）。依赖只允许自上而下，跨 crate 的反向引用由 Cargo 依赖图直接拒绝。
 
 ### crate 总览
 
@@ -133,11 +133,11 @@ crates/local        zhimaterm-local        本地终端域（PTY/Shell/WSL/探�
 crates/recording    zhimaterm-recording    会话留痕域
 crates/session      zhimaterm-session      会话域：内核、传输（SSH 协议/SFTP）、重量级测试与探针
 crates/connections  zhimaterm-connections  SSH 连接管理域（不实现 SSH 协议）
-src/                根包：设置、工作区、视图、外壳与入口
+crates/app          zhimaterm-app          外壳与视图（workspace 唯一 bin，bin 名 zhimaterm）
 ```
 
-依赖边：`根包 → connections → session → terminal → base`；`session → local`
-与 `session → recording`（两者只依赖 base，机制保持叶子地位）；根包另可用
+依赖边：`app → connections → session → terminal → base`；`session → local`
+与 `session → recording`（两者只依赖 base，机制保持叶子地位）；app 另可用
 全部 crate。SSH 协议本体（libssh2 会话、认证、pump）在
 `zhimaterm-session` 的 `transport::ssh`，连接的表单/保存/钥匙串在
 `zhimaterm-connections`。
@@ -238,7 +238,7 @@ forward_form.rs            运行中新增转发规则的小表单（ADR-038）�
 lib.rs                     crate 根：模块声明与对外 re-export
 ```
 
-### 根包（`src/`）
+### 外壳与视图（`crates/app/src/`）
 
 ```
 settings/                  外观与终端设置：读写、校验、原子落盘；form.rs 是设置表单与设置模态

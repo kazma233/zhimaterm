@@ -22,53 +22,53 @@ use std::ops::Deref;
 /// C 侧只触达调用方已知的字段。
 #[macro_export]
 macro_rules! sized {
-    ($ty:ty) => {{
-        let mut t = <$ty as ::std::default::Default>::default();
-        t.size = ::std::mem::size_of::<$ty>();
-        t
-    }};
+  ($ty:ty) => {{
+    let mut t = <$ty as ::std::default::Default>::default();
+    t.size = ::std::mem::size_of::<$ty>();
+    t
+  }};
 }
 
 impl<S> From<S> for bindings::String
 where
-    S: Deref<Target = str>,
+  S: Deref<Target = str>,
 {
-    fn from(value: S) -> Self {
-        Self {
-            ptr: value.as_ptr(),
-            len: value.len(),
-        }
+  fn from(value: S) -> Self {
+    Self {
+      ptr: value.as_ptr(),
+      len: value.len(),
     }
+  }
 }
 
 impl PartialEq for bindings::ColorRgb {
-    fn eq(&self, other: &Self) -> bool {
-        self.r == other.r && self.g == other.g && self.b == other.b
-    }
+  fn eq(&self, other: &Self) -> bool {
+    self.r == other.r && self.g == other.g && self.b == other.b
+  }
 }
 
 impl Eq for bindings::ColorRgb {}
 
 impl bindings::String {
-    /// 借用为原始字节。空串的指针 C 侧不保证非空，而
-    /// `slice::from_raw_parts` 零长度也要求非空指针，null 归一成空切片。
-    ///
-    /// # Safety
-    ///
-    /// 调用方保证关联生命周期内在 FFI 上下文里有效。
-    pub unsafe fn to_bytes<'a>(self) -> &'a [u8] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: 由调用方保证
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+  /// 借用为原始字节。空串的指针 C 侧不保证非空，而
+  /// `slice::from_raw_parts` 零长度也要求非空指针，null 归一成空切片。
+  ///
+  /// # Safety
+  ///
+  /// 调用方保证关联生命周期内在 FFI 上下文里有效。
+  pub unsafe fn to_bytes<'a>(self) -> &'a [u8] {
+    if self.ptr.is_null() {
+      return &[];
     }
+    // SAFETY: 由调用方保证
+    unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+  }
 
-    /// # Safety
-    ///
-    /// 同 [`String::to_bytes`]，且内容是合法 UTF-8。
-    pub unsafe fn to_str<'a>(self) -> &'a str {
-        // SAFETY: 由调用方保证
-        unsafe { std::str::from_utf8_unchecked(self.to_bytes()) }
-    }
+  /// # Safety
+  ///
+  /// 同 [`String::to_bytes`]，且内容是合法 UTF-8。
+  pub unsafe fn to_str<'a>(self) -> &'a str {
+    // SAFETY: 由调用方保证
+    unsafe { std::str::from_utf8_unchecked(self.to_bytes()) }
+  }
 }

@@ -9,68 +9,65 @@
 /// 执行项；文件不存在时返回空表，设置面板只剩「系统默认」与「自定义」。
 /// Windows 没有等价注册表，按 PATH 探测常见 Shell。
 pub fn candidates() -> Vec<String> {
-    #[cfg(unix)]
-    {
-        let Ok(text) = std::fs::read_to_string("/etc/shells") else {
-            return Vec::new();
-        };
-        let mut shells: Vec<String> = Vec::new();
-        for line in text.lines() {
-            let path = line.trim();
-            if path.is_empty() || path.starts_with('#') {
-                continue;
-            }
-            if !is_executable(path) {
-                continue;
-            }
-            if !shells.iter().any(|known| known == path) {
-                shells.push(path.to_owned());
-            }
-        }
-        shells
+  #[cfg(unix)]
+  {
+    let Ok(text) = std::fs::read_to_string("/etc/shells") else {
+      return Vec::new();
+    };
+    let mut shells: Vec<String> = Vec::new();
+    for line in text.lines() {
+      let path = line.trim();
+      if path.is_empty() || path.starts_with('#') {
+        continue;
+      }
+      if !is_executable(path) {
+        continue;
+      }
+      if !shells.iter().any(|known| known == path) {
+        shells.push(path.to_owned());
+      }
     }
-    #[cfg(windows)]
-    {
-        ["pwsh.exe", "powershell.exe", "cmd.exe"]
-            .iter()
-            .filter_map(|program| find_in_path(program))
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()
-    }
+    shells
+  }
+  #[cfg(windows)]
+  {
+    ["pwsh.exe", "powershell.exe", "cmd.exe"]
+      .iter()
+      .filter_map(|program| find_in_path(program))
+      .map(|path| path.to_string_lossy().into_owned())
+      .collect()
+  }
 }
 
 #[cfg(unix)]
 fn is_executable(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+  use std::os::unix::fs::PermissionsExt;
 
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+  std::fs::metadata(path)
+    .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    .unwrap_or(false)
 }
 
 #[cfg(windows)]
 fn find_in_path(program: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
+  let path = std::env::var_os("PATH")?;
+  std::env::split_paths(&path)
+    .map(|dir| dir.join(program))
+    .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::candidates;
+  use super::candidates;
 
-    #[test]
-    fn candidates_are_absolute_deduplicated_and_executable() {
-        for shell in candidates() {
-            assert!(
-                std::path::Path::new(&shell).is_absolute(),
-                "只有绝对路径能作为登录 Shell：{shell}"
-            );
-            assert!(
-                std::path::Path::new(&shell).is_file(),
-                "候选必须存在：{shell}"
-            );
-        }
+  #[test]
+  fn candidates_are_absolute_deduplicated_and_executable() {
+    for shell in candidates() {
+      assert!(
+        std::path::Path::new(&shell).is_absolute(),
+        "只有绝对路径能作为登录 Shell：{shell}"
+      );
+      assert!(std::path::Path::new(&shell).is_file(), "候选必须存在：{shell}");
     }
+  }
 }

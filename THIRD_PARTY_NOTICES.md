@@ -148,5 +148,5 @@ OpenSSL 采用 Apache-2.0，与本项目的 MIT 许可兼容。
 
 ## 3. 图标
 
-`icons/` 下的图标（`icon.png`、`icon-1024.png`、`icon.icns`、`icon.ico`）为本项目
+`crates/app/icons/` 下的图标（`icon.png`、`icon-1024.png`、`icon.icns`、`icon.ico`）为本项目
 自有资源，随源码以 MIT 许可发布。

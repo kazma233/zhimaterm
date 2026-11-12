@@ -24,130 +24,125 @@ mod tests;
 /// 不是事件，由 [`Transport::set_exit_signal`] 单独挂载。
 #[derive(Default)]
 pub(super) struct SessionExtras {
-    /// SSH 会话的 SFTP 句柄与任务事件流。
-    pub sftp: Option<(crate::sftp::SftpHandle, crate::sftp::SftpEvents)>,
-    /// SSH 会话的远端监控事件流。
-    pub monitor: Option<super::MonitorEvents>,
-    /// 本地默认 Shell 会话的进程探针句柄（ADR-028）；其余会话为 None。
-    pub probe: Option<zhimaterm_local::probe::ProbeHandle>,
-    /// 本地会话的前台进程探针（关闭二次确认）：UI 点击关闭那一刻用它查询
-    /// shell 前台是否有子程序。SSH 与 Windows 会话为 None。
-    pub foreground_probe: Option<zhimaterm_local::pty::ForegroundProbe>,
-    /// 本地 shell 的 PID（ADR-039）：worker 定时读它的工作目录并持久化。
-    /// WSL 与 SSH 为 None（目录在子系统/远端，宿主侧读不到）。
-    pub shell_pid: Option<u32>,
-    /// Windows 宿主 shell 的 ConPTY 开机标题（spawn 的 exe 绝对路径）：conhost
-    /// 把控制台标题初始化为该值并经 OSC 0 上报，它是终端基础设施的默认值而
-    /// 非前台程序设置的标题，worker 对等值标题按重置处理（ADR-053）。程序显式
-    /// 设回同一串（vim 还原进入前标题）同样回落默认。WSL 未观察到遮蔽、SSH
-    /// 不走 ConPTY，均为 None。
-    pub boot_title: Option<String>,
-    /// SSH 会话的转发状态事件流（ADR-011）。
-    pub forward: Option<super::ForwardEvents>,
-    /// SSH 会话的 LANG 下发结果（ADR-019）；客户端推不出 LANG 时为 None。
-    pub lang_status: Option<ssh::LangStatus>,
+  /// SSH 会话的 SFTP 句柄与任务事件流。
+  pub sftp: Option<(crate::sftp::SftpHandle, crate::sftp::SftpEvents)>,
+  /// SSH 会话的远端监控事件流。
+  pub monitor: Option<super::MonitorEvents>,
+  /// 本地默认 Shell 会话的进程探针句柄（ADR-028）；其余会话为 None。
+  pub probe: Option<zhimaterm_local::probe::ProbeHandle>,
+  /// 本地会话的前台进程探针（关闭二次确认）：UI 点击关闭那一刻用它查询
+  /// shell 前台是否有子程序。SSH 与 Windows 会话为 None。
+  pub foreground_probe: Option<zhimaterm_local::pty::ForegroundProbe>,
+  /// 本地 shell 的 PID（ADR-039）：worker 定时读它的工作目录并持久化。
+  /// WSL 与 SSH 为 None（目录在子系统/远端，宿主侧读不到）。
+  pub shell_pid: Option<u32>,
+  /// Windows 宿主 shell 的 ConPTY 开机标题（spawn 的 exe 绝对路径）：conhost
+  /// 把控制台标题初始化为该值并经 OSC 0 上报，它是终端基础设施的默认值而
+  /// 非前台程序设置的标题，worker 对等值标题按重置处理（ADR-053）。程序显式
+  /// 设回同一串（vim 还原进入前标题）同样回落默认。WSL 未观察到遮蔽、SSH
+  /// 不走 ConPTY，均为 None。
+  pub boot_title: Option<String>,
+  /// SSH 会话的转发状态事件流（ADR-011）。
+  pub forward: Option<super::ForwardEvents>,
+  /// SSH 会话的 LANG 下发结果（ADR-019）；客户端推不出 LANG 时为 None。
+  pub lang_status: Option<ssh::LangStatus>,
 }
 
 /// 一次会话的数据通路。读端与写端分别被读线程和主循环独占，
 /// 控制端只在主循环里使用，因此三部分之间不需要加锁。
 pub(super) struct Transport {
-    /// 阻塞读；读到 0 表示流结束
-    pub reader: Box<dyn Read + Send>,
-    /// 所有发往远端的字节都写这里
-    pub writer: Box<dyn Write + Send>,
-    control: Box<dyn Control + Send>,
-    /// 连接建立时就绪的附带产物，由 worker 取出后经控制事件交给 UI。
-    extras: SessionExtras,
-    /// 子进程退出信号：Windows ConPTY 在子进程退出后 master 的 EOF 可能长期
-    /// 不到达，worker 需要它做唤醒源（一次性，收到即失效）。其余平台为 None。
-    exit_signal: Option<smol::channel::Receiver<()>>,
+  /// 阻塞读；读到 0 表示流结束
+  pub reader: Box<dyn Read + Send>,
+  /// 所有发往远端的字节都写这里
+  pub writer: Box<dyn Write + Send>,
+  control: Box<dyn Control + Send>,
+  /// 连接建立时就绪的附带产物，由 worker 取出后经控制事件交给 UI。
+  extras: SessionExtras,
+  /// 子进程退出信号：Windows ConPTY 在子进程退出后 master 的 EOF 可能长期
+  /// 不到达，worker 需要它做唤醒源（一次性，收到即失效）。其余平台为 None。
+  exit_signal: Option<smol::channel::Receiver<()>>,
 }
 
 /// 尺寸与生命周期控制。
 pub(super) trait Control: Send {
-    /// 终端尺寸变化。像素尺寸来自 UI 实测的格尺寸，远端程序会用它算图片与字体比例。
-    fn resize(&mut self, columns: usize, lines: usize, cell_size: (u16, u16)) -> Result<()>;
+  /// 终端尺寸变化。像素尺寸来自 UI 实测的格尺寸，远端程序会用它算图片与字体比例。
+  fn resize(&mut self, columns: usize, lines: usize, cell_size: (u16, u16)) -> Result<()>;
 
-    /// 运行中增删转发规则（ADR-038）。建立结果经转发事件流回报；这里只返回
-    /// 同步失败——本地会话没有转发对端，不能返回成功假象（「不静默丢弃」），
-    /// 由 worker 转成 ListenFailed 事件。
-    fn forward(&mut self, command: forward::ForwardCommand) -> Result<()>;
+  /// 运行中增删转发规则（ADR-038）。建立结果经转发事件流回报；这里只返回
+  /// 同步失败——本地会话没有转发对端，不能返回成功假象（「不静默丢弃」），
+  /// 由 worker 转成 ListenFailed 事件。
+  fn forward(&mut self, command: forward::ForwardCommand) -> Result<()>;
 
-    /// 底层会话是否已结束（shell 终态与连接终态合一，见 ADR-005 阶段 5）。
-    /// 此后 shell 与 SFTP 都不再可用。
-    fn poll_exit(&mut self) -> Result<Option<super::SessionExit>>;
+  /// 底层会话是否已结束（shell 终态与连接终态合一，见 ADR-005 阶段 5）。
+  /// 此后 shell 与 SFTP 都不再可用。
+  fn poll_exit(&mut self) -> Result<Option<super::SessionExit>>;
 
-    /// 终止并回收底层资源。调用后不再有读写。
-    fn shutdown(self: Box<Self>);
+  /// 终止并回收底层资源。调用后不再有读写。
+  fn shutdown(self: Box<Self>);
 }
 
 impl Transport {
-    /// 三个数据端 + 连接期附带产物一次装配：附带产物不再有挂载中间态。
-    pub(super) fn new(
-        reader: Box<dyn Read + Send>,
-        writer: Box<dyn Write + Send>,
-        control: Box<dyn Control + Send>,
-        extras: SessionExtras,
-    ) -> Self {
-        Self {
-            reader,
-            writer,
-            control,
-            extras,
-            exit_signal: None,
-        }
+  /// 三个数据端 + 连接期附带产物一次装配：附带产物不再有挂载中间态。
+  pub(super) fn new(
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    control: Box<dyn Control + Send>,
+    extras: SessionExtras,
+  ) -> Self {
+    Self {
+      reader,
+      writer,
+      control,
+      extras,
+      exit_signal: None,
     }
+  }
 
-    /// 挂上子进程退出信号：只有本地传输层会调用。
-    pub(super) fn set_exit_signal(&mut self, signal: smol::channel::Receiver<()>) {
-        self.exit_signal = Some(signal);
-    }
+  /// 挂上子进程退出信号：只有本地传输层会调用。
+  pub(super) fn set_exit_signal(&mut self, signal: smol::channel::Receiver<()>) {
+    self.exit_signal = Some(signal);
+  }
 
-    pub(super) fn take_exit_signal(&mut self) -> Option<smol::channel::Receiver<()>> {
-        self.exit_signal.take()
-    }
+  pub(super) fn take_exit_signal(&mut self) -> Option<smol::channel::Receiver<()>> {
+    self.exit_signal.take()
+  }
 
-    /// 把读端交给读线程独占：worker 之后不再持有它。
-    pub(super) fn take_reader(&mut self) -> Box<dyn Read + Send> {
-        std::mem::replace(&mut self.reader, Box::new(std::io::empty()))
-    }
+  /// 把读端交给读线程独占：worker 之后不再持有它。
+  pub(super) fn take_reader(&mut self) -> Box<dyn Read + Send> {
+    std::mem::replace(&mut self.reader, Box::new(std::io::empty()))
+  }
 
-    /// 把写端交给主循环独占；返回 None 之前一直可写。
-    pub(super) fn take_writer(&mut self) -> Box<dyn Write + Send> {
-        std::mem::replace(&mut self.writer, Box::new(std::io::sink()))
-    }
+  /// 把写端交给主循环独占；返回 None 之前一直可写。
+  pub(super) fn take_writer(&mut self) -> Box<dyn Write + Send> {
+    std::mem::replace(&mut self.writer, Box::new(std::io::sink()))
+  }
 
-    /// 把连接期附带产物交给 worker 转发给 UI。
-    pub(super) fn take_extras(&mut self) -> SessionExtras {
-        std::mem::take(&mut self.extras)
-    }
+  /// 把连接期附带产物交给 worker 转发给 UI。
+  pub(super) fn take_extras(&mut self) -> SessionExtras {
+    std::mem::take(&mut self.extras)
+  }
 
-    pub(super) fn resize(
-        &mut self,
-        columns: usize,
-        lines: usize,
-        cell_size: (u16, u16),
-    ) -> Result<()> {
-        self.control.resize(columns, lines, cell_size)
-    }
+  pub(super) fn resize(&mut self, columns: usize, lines: usize, cell_size: (u16, u16)) -> Result<()> {
+    self.control.resize(columns, lines, cell_size)
+  }
 
-    /// 运行中增删转发规则（ADR-038）。
-    pub(super) fn add_forward(&mut self, rule: crate::ForwardRule) -> Result<()> {
-        self.control.forward(forward::ForwardCommand::Add(rule))
-    }
+  /// 运行中增删转发规则（ADR-038）。
+  pub(super) fn add_forward(&mut self, rule: crate::ForwardRule) -> Result<()> {
+    self.control.forward(forward::ForwardCommand::Add(rule))
+  }
 
-    pub(super) fn remove_forward(&mut self, id: crate::ForwardId) -> Result<()> {
-        self.control.forward(forward::ForwardCommand::Remove(id))
-    }
+  pub(super) fn remove_forward(&mut self, id: crate::ForwardId) -> Result<()> {
+    self.control.forward(forward::ForwardCommand::Remove(id))
+  }
 
-    pub(super) fn poll_exit(&mut self) -> Result<Option<super::SessionExit>> {
-        self.control.poll_exit()
-    }
+  pub(super) fn poll_exit(&mut self) -> Result<Option<super::SessionExit>> {
+    self.control.poll_exit()
+  }
 
-    /// 拿走控制端做收尾：关闭会话时用它终止进程或断开连接。
-    pub(super) fn control(self) -> Box<dyn Control + Send> {
-        self.control
-    }
+  /// 拿走控制端做收尾：关闭会话时用它终止进程或断开连接。
+  pub(super) fn control(self) -> Box<dyn Control + Send> {
+    self.control
+  }
 }
 
 /// 连接期密码询问所属的身份（ADR-018 修订）：此刻正在认证的主机与用户。
@@ -156,31 +151,31 @@ impl Transport {
 /// 的密码发给跳板机。
 #[derive(Clone, Debug)]
 pub struct PasswordAccount {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
+  pub host: String,
+  pub port: u16,
+  pub user: String,
 }
 
 /// 连接期向 UI 的询问（ADR-002 信任确认、ADR-048 修订临时密码）：实现方在
 /// 等待答复期间要继续消化会话命令（尺寸留给连接完成后用、关闭即中止），
 /// 见 worker 的 `UiAsks`。
 pub(crate) trait ConnectAsks {
-    /// 未知/变更的主机密钥：用户是否信任。
-    fn trust(&mut self, request: ssh::TrustRequest) -> Result<bool>;
-    /// 认证需要一把临时密码（agent/私钥都没成且手头没有）：`account` 是这次
-    /// 询问所属的身份。None = 用户取消。答复只用于本次认证，不落盘。
-    fn password(&mut self, account: &PasswordAccount) -> Result<Option<String>>;
+  /// 未知/变更的主机密钥：用户是否信任。
+  fn trust(&mut self, request: ssh::TrustRequest) -> Result<bool>;
+  /// 认证需要一把临时密码（agent/私钥都没成且手头没有）：`account` 是这次
+  /// 询问所属的身份。None = 用户取消。答复只用于本次认证，不落盘。
+  fn password(&mut self, account: &PasswordAccount) -> Result<Option<String>>;
 }
 
 /// 打开一个会话的传输层。
 pub(super) fn open(
-    target: &super::SessionTarget,
-    columns: usize,
-    lines: usize,
-    asks: &mut dyn ConnectAsks,
+  target: &super::SessionTarget,
+  columns: usize,
+  lines: usize,
+  asks: &mut dyn ConnectAsks,
 ) -> Result<Transport> {
-    match target {
-        super::SessionTarget::Local { shell } => local::open(columns, lines, shell),
-        super::SessionTarget::Ssh(target) => ssh::open(target, columns, lines, asks),
-    }
+  match target {
+    super::SessionTarget::Local { shell } => local::open(columns, lines, shell),
+    super::SessionTarget::Ssh(target) => ssh::open(target, columns, lines, asks),
+  }
 }
