@@ -595,14 +595,11 @@ impl GridPainter {
       ..self.font.clone()
     };
     let color: Hsla = rgb(foreground).into();
-    // 哈希做缓存键：命中时 gpui 不物化文本（by_hash 返回的 ShapedLine.text
-    // 是占位空串），文本 clone 只在内容真正变化的 run 上才付。字体风格经
-    // font_id 进 gpui 自己的布局缓存键，装饰线不进（每次重算），这里不必掺入
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    window.text_system().shape_line_by_hash(
-      hasher.finish(),
-      len,
+    // 0.3.12 起按值传文本（by_hash 的惰性物化入口已移除）：缓存命中与否都
+    // 会走一次文本物化，接受该成本。字体风格经 font_id 进 gpui 自己的布局
+    // 缓存键，装饰线不进（每次重算），这里不必掺入
+    window.text_system().shape_line(
+      SharedString::from(text.to_owned()),
       px(self.font_size),
       // 装饰颜色必须显式给：None 会被解析成默认黑色。下划线只要有样式就置
       // Some——流式路径的下划线回调靠它触发，双线/点线/虚线在回调里自己画
@@ -622,7 +619,6 @@ impl GridPainter {
         }),
       }],
       None,
-      || SharedString::from(text.to_owned()),
     )
   }
 }

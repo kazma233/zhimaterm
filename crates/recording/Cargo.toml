@@ -10,7 +10,7 @@ description = "ZhimaTerm 会话留痕域：输出日志、记录门面与任务/
 zhimaterm-base = { path = "../base" }
 anyhow = "1"
 chrono = "0.4"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

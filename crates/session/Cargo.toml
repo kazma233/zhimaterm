@@ -13,7 +13,7 @@ zhimaterm-local = { path = "../local" }
 zhimaterm-recording = { path = "../recording" }
 anyhow = "1"
 chrono = "0.4"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 libssh2-sys = "=0.3.3"
 serde_json = "=1.0.151"
 smol = "2"
@@ -24,7 +24,7 @@ libc = "0.2"
 socket2 = "0.5"
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # perf 验收用例按父进程 id 数子进程、查句柄数（Toolhelp 快照 + 句柄计数）

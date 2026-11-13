@@ -16,8 +16,8 @@ zhimaterm-session = { path = "../session" }
 zhimaterm-connections = { path = "../connections" }
 anyhow = "1"
 chrono = "0.4"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
 regex = "1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -35,7 +35,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
 [[bin]]
 name = "zhimaterm"

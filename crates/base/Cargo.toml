@@ -8,7 +8,7 @@ description = "ZhimaTerm 基础层：配置路径、输入语义、字体、主�
 
 [dependencies]
 anyhow = "1"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 smol = "2"
 unicode-segmentation = "1"
 
@@ -16,4 +16,4 @@ unicode-segmentation = "1"
 libc = "0.2"
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

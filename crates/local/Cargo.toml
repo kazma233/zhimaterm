@@ -9,7 +9,7 @@ description = "ZhimaTerm 本地终端域：自研 PTY、Shell 候选、工作目
 [dependencies]
 zhimaterm-base = { path = "../base" }
 anyhow = "1"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 smol = "2"
 
 [target.'cfg(unix)'.dependencies]
@@ -33,7 +33,7 @@ windows-sys = { version = "=0.61.2", features = [
 ] }
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
 [[bin]]
 name = "zhimaterm-pty-probe"

@@ -10,11 +10,11 @@ description = "ZhimaTerm SSH 连接管理域：连接表单与目标解析、保
 zhimaterm-base = { path = "../base" }
 zhimaterm-session = { path = "../session" }
 anyhow = "1"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
