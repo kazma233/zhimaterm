@@ -801,17 +801,24 @@ impl Render for SftpPanelView {
             menu::MenuKeyOutcome::Moved => {
               cx.stop_propagation();
               cx.notify();
+              return;
             }
             menu::MenuKeyOutcome::Picked(index) => {
               if let Some(menu::MenuEntry::Item(item)) = items.get(index) {
                 (item.on_pick)(window, cx);
               }
               cx.stop_propagation();
+              return;
             }
             menu::MenuKeyOutcome::Close => {
               panel.context_menu = None;
               cx.stop_propagation();
               cx.notify();
+              return;
+            }
+            menu::MenuKeyOutcome::Consumed => {
+              cx.stop_propagation();
+              return;
             }
             menu::MenuKeyOutcome::None => {}
           }

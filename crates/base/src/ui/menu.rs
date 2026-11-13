@@ -69,6 +69,9 @@ pub enum MenuKeyOutcome {
   Picked(usize),
   /// 裸 Esc 关闭菜单
   Close,
+  /// 菜单开着时的菜单键，但本次没有可执行动作（单条菜单重复按上下、无高亮
+  /// 时按 Enter）。仍要消费：菜单开着期间这些键不能漏给下层（终端 PTY）
+  Consumed,
   /// 与菜单无关的键
   None,
 }
@@ -96,8 +99,10 @@ fn step_item_index(entries: &[MenuEntry], from: Option<usize>, step: isize) -> O
 }
 
 /// 菜单开着期间的键盘裁决：Up/Down 循环移动高亮（跳过分隔线），裸 Enter
-/// 拾取高亮条目，裸 Esc 关闭；其余键原样放行。游标变更直接写进 `cursor`，
-/// 调用方按 [`MenuKeyOutcome`] 刷新或执行。纯逻辑，可单测。
+/// 拾取高亮条目，裸 Esc 关闭；Up/Down/Enter 即使没有可执行动作也返回
+/// [`MenuKeyOutcome::Consumed`]（菜单开着期间不得漏给下层）。其余键原样
+/// 放行。游标变更直接写进 `cursor`，调用方按 [`MenuKeyOutcome`] 刷新或执行。
+/// 纯逻辑，可单测。
 pub fn route_menu_keys(key: &Keystroke, entries: &[MenuEntry], cursor: &MenuCursor) -> MenuKeyOutcome {
   if !bare_key(key) {
     return MenuKeyOutcome::None;
@@ -109,7 +114,8 @@ pub fn route_menu_keys(key: &Keystroke, entries: &[MenuEntry], cursor: &MenuCurs
         cursor.set(next);
         MenuKeyOutcome::Moved
       } else {
-        MenuKeyOutcome::None
+        // 没有可移动的目标（单条菜单/全是分隔线）：键仍归菜单，不进终端
+        MenuKeyOutcome::Consumed
       }
     }
     "up" => {
@@ -118,12 +124,12 @@ pub fn route_menu_keys(key: &Keystroke, entries: &[MenuEntry], cursor: &MenuCurs
         cursor.set(next);
         MenuKeyOutcome::Moved
       } else {
-        MenuKeyOutcome::None
+        MenuKeyOutcome::Consumed
       }
     }
     "enter" => match cursor.get().filter(|&i| entries[i].is_item()) {
       Some(i) => MenuKeyOutcome::Picked(i),
-      None => MenuKeyOutcome::None,
+      None => MenuKeyOutcome::Consumed,
     },
     "escape" => MenuKeyOutcome::Close,
     _ => MenuKeyOutcome::None,
@@ -351,8 +357,11 @@ mod tests {
   fn enter_picks_the_highlighted_item_only() {
     let entries = three_item_entries();
     let cursor: MenuCursor = Default::default();
-    // 没有高亮时 Enter 不属于菜单
-    assert_eq!(route_menu_keys(&key("enter"), &entries, &cursor), MenuKeyOutcome::None);
+    // 没有高亮时 Enter 不拾取，但仍归菜单（不泄漏给终端）
+    assert_eq!(
+      route_menu_keys(&key("enter"), &entries, &cursor),
+      MenuKeyOutcome::Consumed
+    );
     route_menu_keys(&key("down"), &entries, &cursor);
     assert_eq!(
       route_menu_keys(&key("enter"), &entries, &cursor),
@@ -378,8 +387,11 @@ mod tests {
     let entries = vec![MenuEntry::item("仅一条", test_pick())];
     let cursor: MenuCursor = Default::default();
     assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::Moved);
-    assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::None);
-    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::None);
+    assert_eq!(
+      route_menu_keys(&key("down"), &entries, &cursor),
+      MenuKeyOutcome::Consumed
+    );
+    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::Consumed);
     assert_eq!(cursor.get(), Some(0));
   }
 }

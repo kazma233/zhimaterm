@@ -1095,21 +1095,31 @@ impl TerminalView {
     // `route_key` 也有兜底，这里全量接管保证键盘与鼠标同一套动作
     if self.context_menu.is_some() {
       let items = terminal_context_menu_items(cx);
+      // 处理完菜单键必须 return：stop_propagation 只挡祖先派发，不中断本函数
+      // 后续逻辑——否则按键继续走 route_key 写进 PTY，菜单与终端同时响应
       match menu::route_menu_keys(&event.keystroke, &items, &self.context_menu_cursor) {
         menu::MenuKeyOutcome::Moved => {
           cx.stop_propagation();
           cx.notify();
+          return;
         }
         menu::MenuKeyOutcome::Picked(index) => {
           if let Some(menu::MenuEntry::Item(item)) = items.get(index) {
             (item.on_pick)(window, cx);
           }
           cx.stop_propagation();
+          return;
         }
         menu::MenuKeyOutcome::Close => {
           self.context_menu = None;
           cx.stop_propagation();
           cx.notify();
+          return;
+        }
+        // 菜单开着时上下/Enter 一律不进终端，即使没有可执行动作
+        menu::MenuKeyOutcome::Consumed => {
+          cx.stop_propagation();
+          return;
         }
         menu::MenuKeyOutcome::None => {}
       }
@@ -1119,7 +1129,6 @@ impl TerminalView {
     let route = route_key(
       self.state.data(),
       self.confirm_open.is_some(),
-      self.context_menu.is_some(),
       self.search_open,
       self.focus.is_focused(window),
       self.snapshot.is_none(),
@@ -1128,11 +1137,6 @@ impl TerminalView {
     match route {
       KeyRoute::CloseConfirmOpen => {
         self.confirm_open = None;
-        cx.stop_propagation();
-        cx.notify();
-      }
-      KeyRoute::CloseContextMenu => {
-        self.context_menu = None;
         cx.stop_propagation();
         cx.notify();
       }

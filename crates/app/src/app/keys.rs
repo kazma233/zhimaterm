@@ -92,6 +92,10 @@ impl ZhimaTermApp {
         cx.stop_propagation();
         cx.notify();
       }
+      // 菜单开着时上下/Enter 一律不进终端（单条菜单重复按上下也消费）
+      menu::MenuKeyOutcome::Consumed => {
+        cx.stop_propagation();
+      }
       menu::MenuKeyOutcome::None => {}
     }
   }
