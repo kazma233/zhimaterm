@@ -862,11 +862,10 @@ impl TerminalModel {
     let viewport_cursor_line = cursor_state.line + display_offset as i32;
     let mut rows = Vec::with_capacity(self.size.lines);
     let mut cursor_cell = None;
-    // 两个复用 scratch：格文本（开新段才克隆，段内合并零分配）与链接
-    // 识别的行文本/格偏移（跨行复用，见 plain_url_links 的快门）
+    // 纯文本链接识别按软换行逻辑行拼接进行（ADR-002 修订），整视口一次预计算
+    let plain_links = self.viewport_plain_links();
+    // 格文本 scratch：开新段才克隆，段内合并零分配
     let mut cell_text = String::new();
-    let mut url_text = String::new();
-    let mut url_offsets: Vec<(usize, usize, usize)> = Vec::new();
 
     for row in 0..self.size.lines {
       // 视口帧的第 row 行就是画面第 row 行（回看偏移已反映在帧内）
@@ -877,8 +876,7 @@ impl TerminalModel {
         .map_or(&[], |buffer| buffer.cells.as_slice());
       // 视口第 row 行对应网格中的历史行 row - display_offset：负值即回看的历史
       let grid_line = row as i32 - display_offset as i32;
-      let mut plain_links = self.plain_url_links(cells, &mut url_text, &mut url_offsets);
-      self.plain_path_links(&url_text, &url_offsets, &mut plain_links);
+      let plain_links = &plain_links[row];
       let mut runs: Vec<TerminalRun> = Vec::new();
       let mut current: Option<RunStyle> = None;
       let mut current_link: Option<TerminalLink> = None;
@@ -995,34 +993,115 @@ impl TerminalModel {
     }
   }
 
-  /// 行内纯文本 URL → 按列的链接表（与 OSC 8 无关的 hints 识别）。
-  /// 只在单行内识别，折行的长 URL 各行各自成链。
+  /// 视口纯文本链接识别（与 OSC 8 无关的 hints 识别）→ 按视口行组织的
+  /// 链接表（每行按列，空表 = 该行无链接）。
   ///
-  /// 快门：[`PLAIN_URL`] 的任何匹配都含字面 `"://"`，行文本搜不到它就
-  /// 直接返回空表——绝大多数行没有链接，正则与按列的链接表对它们是
-  /// 每帧纯浪费。文本与格偏移拼进调用方的 scratch（跨行跨帧复用容量），
-  /// 只有命中快门的行才分配链接表。
-  fn plain_url_links(
-    &self,
-    cells: &[GridCell],
-    text: &mut String,
-    offsets: &mut Vec<(usize, usize, usize)>,
-  ) -> Vec<Option<TerminalLink>> {
-    text.clear();
-    offsets.clear();
-    // 行文本与每个格的字节起点/列号/占格数（跳过宽字符尾格，与快照切分一致）
-    for (column, cell) in backend::display_cells(cells) {
-      let wide = cell.width == 2;
-      offsets.push((text.len(), column, if wide { 2 } else { 1 }));
-      text.push(cell.c);
-      if let Some(zerowidth) = &cell.zerowidth {
-        text.push_str(zerowidth);
+  /// 按软换行**逻辑行**拼接识别（ADR-002/055 2026-11-13 修订）：沿 wrap
+  /// 标记把折断的各物理行拼回完整文本（[`joins_next_line`]，硬换行不拼），
+  /// 命中的每一段都指向同一链接目标，⌘/Ctrl+点击任一段都打开完整 URL。
+  /// resize reflow 会改变折行划分，因此识别保持每次快照无状态重算，不缓存。
+  ///
+  /// 视口边界可能把逻辑行切开（回看历史时 URL 的开头在视口上方）：分组
+  /// 沿 wrap 链越过视口边界读全逻辑行，只有视口内的行列参与链接回填，
+  /// 否则可见的半截 URL 因缺 scheme 识别不出来。
+  ///
+  /// 快门：绝大多数逻辑行没有链接，`://` 与路径字符都搜不到就直接跳过，
+  /// 正则与按列的链接表对它们是每帧纯浪费；只有真正命中的行才分配链接表。
+  fn viewport_plain_links(&self) -> Vec<Vec<Option<TerminalLink>>> {
+    let offset = self.viewport.offset as i32;
+    let top = -offset;
+    let bottom = self.size.lines as i32 - 1 - offset;
+    // 视口首行所在逻辑行的起点：往上跨过折行（链外即独立硬换行行）
+    let mut line = top;
+    while line > self.core.topmost_line() && self.joins_next_line(line - 1) {
+      line -= 1;
+    }
+
+    let mut rows = vec![Vec::new(); self.size.lines];
+    // 逻辑行的拼接文本与每个格的（字节起点、视口行号或视口外标记、列号、
+    // 占格数），跳过宽字符尾格，与快照切分一致
+    let mut text = String::new();
+    let mut offsets: Vec<(usize, Option<usize>, usize, usize)> = Vec::new();
+    let mut has_viewport_row = false;
+    // 视口外的行经 read_row 现读（只有视口边界切开的逻辑行才走到）
+    let mut buffer = RowBuffer::default();
+
+    while line <= self.core.bottommost_line() {
+      let viewport_row = (top..=bottom).contains(&line).then_some((line + offset) as usize);
+      let cells: &[GridCell] = match viewport_row {
+        Some(row) => self
+          .viewport
+          .rows
+          .get(row)
+          .map_or(&[], |row_buffer| row_buffer.cells.as_slice()),
+        // 视口外的行只出文本参与识别，不回填链接
+        None => {
+          self.core.read_row(line, &mut buffer);
+          buffer.cells.as_slice()
+        }
+      };
+      for (column, cell) in backend::display_cells(cells) {
+        offsets.push((text.len(), viewport_row, column, usize::from(cell.width == 2) + 1));
+        text.push(cell.c);
+        if let Some(zerowidth) = &cell.zerowidth {
+          text.push_str(zerowidth);
+        }
       }
+      has_viewport_row |= viewport_row.is_some();
+      // 逻辑行到此为止：识别并回填；之后的逻辑行起点已在视口下方，
+      // 不再可能有视口行，直接收工
+      if !self.joins_next_line(line) {
+        if has_viewport_row {
+          self.detect_plain_links(&text, &offsets, &mut rows);
+        }
+        if line >= bottom {
+          break;
+        }
+        text.clear();
+        offsets.clear();
+        has_viewport_row = false;
+      }
+      line += 1;
     }
-    if !text.contains("://") {
-      return Vec::new();
+    rows
+  }
+
+  /// 物理行是否与下一行同属一条逻辑行：只认软换行的 wrap 标记。硬换行
+  /// （程序自己输出的换行，含 TUI/markdown 渲染器按终端宽度排版的换行）
+  /// 一律不拼——业界无共识（kitty 默认路径跨行、其新 regex 路径与
+  /// ghostty 不跨行），猜测拼接有误拼风险，ADR-002 2026-11-13 修订不包含。
+  fn joins_next_line(&self, line: i32) -> bool {
+    line < self.core.bottommost_line() && self.core.row_wrapped(line)
+  }
+
+  /// 一条逻辑行的拼接文本上跑 URL 与路径识别，命中区间经 `offsets` 回填到
+  /// 视口内各物理行的链接表（视口外的行不回填）。
+  fn detect_plain_links(
+    &self,
+    text: &str,
+    offsets: &[(usize, Option<usize>, usize, usize)],
+    rows: &mut [Vec<Option<TerminalLink>>],
+  ) {
+    if !text.contains("://") && !text.contains(['/', '~']) && !text.contains(":\\") {
+      return;
     }
-    let mut links = vec![None::<TerminalLink>; self.size.columns];
+    let fill = |rows: &mut [Vec<Option<TerminalLink>>], start, end, link: TerminalLink, only_empty: bool| {
+      let first = offsets.partition_point(|(byte, ..)| *byte <= start) - 1;
+      let last = offsets.partition_point(|(byte, ..)| *byte < end) - 1;
+      for (_, row, column, width) in &offsets[first..=last] {
+        // 视口外的行只参与文本拼接，不回填链接
+        let Some(row) = row else { continue };
+        let links = &mut rows[*row];
+        if links.is_empty() {
+          links.resize(self.size.columns, None);
+        }
+        for slot in &mut links[*column..*column + width] {
+          if !only_empty || slot.is_none() {
+            *slot = Some(link.clone());
+          }
+        }
+      }
+    };
 
     for found in PLAIN_URL.find_iter(text) {
       let url = trim_url_tail(found.as_str());
@@ -1030,7 +1109,8 @@ impl TerminalModel {
       if !url.contains("://") {
         continue;
       }
-      // scheme 紧贴字母数字说明是更长 token 的中段（如 xhttps://），不是独立链接
+      // scheme 紧贴字母数字说明是更长 token 的中段（如 xhttps://），不是独立链接；
+      // 拼接后这一检查同时守护折行边界：上一物理行的行尾贴着 scheme 与否按同一规则判
       let start = found.start();
       if text[..start]
         .chars()
@@ -1039,30 +1119,9 @@ impl TerminalModel {
       {
         continue;
       }
-      let end = start + url.len();
-      let first = offsets.partition_point(|(byte, _, _)| *byte <= start) - 1;
-      let last = offsets.partition_point(|(byte, _, _)| *byte < end) - 1;
-      let (_, start_col, _) = offsets[first];
-      let (_, end_col, end_width) = offsets[last];
-      let shared: Arc<str> = Arc::from(url);
-      for slot in &mut links[start_col..end_col + end_width] {
-        *slot = Some(TerminalLink::Url(shared.clone()));
-      }
+      fill(rows, start, start + url.len(), TerminalLink::Url(Arc::from(url)), false);
     }
-    links
-  }
 
-  /// 行内纯文本路径 → 原地补进 URL 表的空位（[`plain_url_links`] 先填，
-  /// 路径只占 URL 没碰过的列，`https://…/x` 的 path 段不会二次识别）。
-  /// 复用同一份行文本与格偏移；匹配整体（含 `:行[:列]` 后缀）映射到列，
-  /// 悬停与点击在整条上生效。
-  ///
-  /// 白名单外后缀/文件名在这里拦下（[`is_text_basename`]），`~` 展开与
-  /// 存在性验证不做——那是视图层对本地会话的职责（ADR-055）。
-  fn plain_path_links(&self, text: &str, offsets: &[(usize, usize, usize)], links: &mut Vec<Option<TerminalLink>>) {
-    if !text.contains(['/', '~']) && !text.contains(":\\") {
-      return;
-    }
     for found in PLAIN_PATH.captures_iter(text) {
       let whole = found.get(0).expect("整体捕获组恒存在");
       let line = found.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
@@ -1079,27 +1138,21 @@ impl TerminalModel {
       if !is_text_basename(basename) {
         continue;
       }
-      // URL 快门命中的行链接表是空的：第一条有效路径匹配才物化全列空表
-      if links.is_empty() {
-        links.resize(self.size.columns, None);
-      }
       // 命中范围 = trim 后的本体加 `:行[:列]` 后缀；剥掉的尾点与 URL 的
       // trim 一样留在链接外
       let end = start + path.len() + (whole.as_str().len() - body_len);
-      let first = offsets.partition_point(|(byte, _, _)| *byte <= start) - 1;
-      let last = offsets.partition_point(|(byte, _, _)| *byte < end) - 1;
-      let (_, start_col, _) = offsets[first];
-      let (_, end_col, end_width) = offsets[last];
-      let shared: Arc<str> = Arc::from(path);
-      for slot in &mut links[start_col..end_col + end_width] {
-        if slot.is_none() {
-          *slot = Some(TerminalLink::FilePath {
-            path: shared.clone(),
-            line,
-            column,
-          });
-        }
-      }
+      fill(
+        rows,
+        start,
+        end,
+        TerminalLink::FilePath {
+          path: Arc::from(path),
+          line,
+          column,
+        },
+        // URL 识别先填且占列优先：`https://…/x.rs` 的 path 段不二次识别
+        true,
+      );
     }
   }
 
@@ -2170,6 +2223,70 @@ mod tests {
   }
 
   #[test]
+  fn url_soft_wrapped_mid_way_links_the_whole_url() {
+    // 20 列：URL 从行中段起被软换行折断（markdown 表格同类场景）
+    let mut model = TerminalModel::new(20, 3);
+    model.advance(b"see https://example.com/long");
+
+    let snapshot = model.snapshot();
+    let expected: super::Arc<str> = "https://example.com/long".into();
+    // 两段物理行都带同一完整 URL，⌘/Ctrl+点击任一段都打开完整链接
+    assert_eq!(row_text(&snapshot, 0), "see https://example.");
+    assert_eq!(row_text(&snapshot, 1), "com/long");
+    for row in 0..2 {
+      let link_runs: Vec<&str> = snapshot.rows[row]
+        .iter()
+        .filter(|run| run.link.is_some())
+        .map(|run| run.text.as_str())
+        .collect();
+      assert_eq!(link_runs.len(), 1, "第 {row} 行恰好一段是链接");
+      assert_eq!(
+        snapshot.rows[row].iter().find(|run| run.link.is_some()).unwrap().link,
+        Some(TerminalLink::Url(expected.clone()))
+      );
+    }
+  }
+
+  #[test]
+  fn url_does_not_merge_across_a_hard_newline() {
+    let mut model = TerminalModel::new(40, 3);
+    // 行尾正好是完整 URL、下一行行首也是 URL 字符：硬换行不拼接，各行独立识别
+    model.advance(b"see https://example.com/x\r\ny https://other.example/z");
+
+    let snapshot = model.snapshot();
+    let runs = &snapshot.rows[0];
+    assert_eq!(runs.last().unwrap().text, "https://example.com/x");
+    assert_eq!(
+      runs.last().unwrap().link,
+      Some(TerminalLink::Url("https://example.com/x".into()))
+    );
+    assert_eq!(
+      snapshot.rows[1].iter().find(|run| run.link.is_some()).unwrap().link,
+      Some(TerminalLink::Url("https://other.example/z".into()))
+    );
+  }
+
+  #[test]
+  fn path_soft_wrapped_mid_way_links_the_whole_path() {
+    let mut model = TerminalModel::new(20, 3);
+    model.advance(b"see /very/long/dir/main.rs");
+
+    let snapshot = model.snapshot();
+    let expected = TerminalLink::FilePath {
+      path: "/very/long/dir/main.rs".into(),
+      line: None,
+      column: None,
+    };
+    for row in 0..2 {
+      assert_eq!(
+        snapshot.rows[row].iter().find(|run| run.link.is_some()).unwrap().link,
+        Some(expected.clone()),
+        "折断的每一段都指向完整路径（第 {row} 段）"
+      );
+    }
+  }
+
+  #[test]
   fn plain_text_paths_are_detected_in_the_snapshot() {
     let mut model = TerminalModel::new(60, 3);
     model.advance(b"see /tmp/src/main.rs:12:5 end\x1b[2;1H");
@@ -2913,5 +3030,41 @@ mod tests {
         SearchOutcome::InvalidPattern => "invalid",
       }
     }
+  }
+
+  /// 折断逻辑行的开头滚出视口上方（回看历史）：可见半截缺 scheme，
+  /// 识别要越过视口边界读全逻辑行（ghostty 后端，与生产同后端）。
+  #[test]
+  fn wrapped_url_with_head_scrolled_off_keeps_full_link() {
+    let mut model = super::TerminalModel::with_backend(super::backend::BackendKind::Ghostty, 20, 3, 30);
+    model.advance(b"see https://example.com/long\r\n");
+    model.advance(b"tail1\r\ntail2\r\n");
+    model.scroll(1);
+
+    let snapshot = model.snapshot();
+    // 视口首行是折断逻辑行的后半段，仍指向完整 URL
+    assert_eq!(row_text(&snapshot, 0), "com/long");
+    assert_eq!(
+      snapshot.rows[0].iter().find(|run| run.link.is_some()).unwrap().link,
+      Some(TerminalLink::Url("https://example.com/long".into()))
+    );
+  }
+
+  /// 折断逻辑行的结尾滚出视口下方（回看历史停在中间）：同上，越过
+  /// 视口下界读全逻辑行。
+  #[test]
+  fn wrapped_url_with_tail_scrolled_off_keeps_full_link() {
+    let mut model = super::TerminalModel::with_backend(super::backend::BackendKind::Ghostty, 20, 3, 30);
+    // 网格：历史 h1 h2，活动区 h3、URL 前半（wrap）、URL 后半（末行）
+    model.advance(b"h1\r\nh2\r\nh3\r\n");
+    model.advance(b"see https://example.com/long");
+    model.scroll(1);
+
+    let snapshot = model.snapshot();
+    assert_eq!(row_text(&snapshot, 2), "see https://example.");
+    assert_eq!(
+      snapshot.rows[2].iter().find(|run| run.link.is_some()).unwrap().link,
+      Some(TerminalLink::Url("https://example.com/long".into()))
+    );
   }
 }

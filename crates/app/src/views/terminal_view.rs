@@ -2248,6 +2248,7 @@ impl TerminalView {
       font: font::terminal_font(&self.font.family),
       font_size,
       hovered,
+      hovered_link: self.hovered_link.clone(),
       preedit: self.ime_composition.text().map(str::to_owned),
       search_highlight: self
         .snapshot

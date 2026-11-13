@@ -21,7 +21,7 @@ use unicode_width::UnicodeWidthChar;
 
 use zhimaterm_base::font::CellMetrics;
 use zhimaterm_base::input::CellSide;
-use zhimaterm_terminal::{CursorKind, SearchHighlight, TerminalRun, TerminalSnapshot, UnderlineKind};
+use zhimaterm_terminal::{CursorKind, SearchHighlight, TerminalLink, TerminalRun, TerminalSnapshot, UnderlineKind};
 
 /// 由终端区域尺寸推算行列数，下限与终端模型一致（至少 2 列 1 行）。
 pub fn grid_size(bounds: Bounds<Pixels>, metrics: CellMetrics) -> (usize, usize) {
@@ -131,6 +131,9 @@ pub struct GridPainter {
   pub font_size: f32,
   /// 指针悬停的（列, 行）：决定悬停超链接的下划线提示。
   pub hovered: Option<(usize, usize)>,
+  /// 悬停命中的链接目标：跨行折断的同一 URL 各段共享它，悬停任一段
+  /// 时整条链接（含折到其他行的段）一起亮，不只亮指针所在的一段。
+  pub hovered_link: Option<TerminalLink>,
   /// 输入法组合中的文本：画在光标格上，下划线提示尚未提交。
   pub preedit: Option<String>,
   /// 当前搜索匹配的高亮（ADR-015）：命中的行与列区间。
@@ -210,7 +213,10 @@ impl GridPainter {
         // 程序自己给链接文字设的下划线样式保留原样
         let hovered_here = self.hovered.is_some_and(|(hovered_column, hovered_row)| {
           hovered_row == row_index && hovered_column >= column && hovered_column < column + run.columns
-        });
+        }) || self
+          .hovered_link
+          .as_ref()
+          .is_some_and(|link| run.link.as_ref() == Some(link));
         let underline = if run.underline == UnderlineKind::None && hovered_here && run.link.is_some() {
           UnderlineKind::Single
         } else {
