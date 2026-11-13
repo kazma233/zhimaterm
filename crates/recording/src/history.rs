@@ -98,8 +98,8 @@ pub fn file_name_of(path: &std::path::Path) -> String {
     .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// 已结束操作的实体：随格销毁（ADR-045 注册表持有，格注销即释放）。SFTP
-/// 面板在任务结束时写入（唯一写入方），操作记录模态只读。
+/// 已结束操作的实体：归终端视图持有、随格销毁（ADR-045 2026-11-13
+/// 修订）。SFTP 面板在任务结束时写入（唯一写入方），操作记录模态只读。
 pub struct SessionHistory {
   entries: VecDeque<TaskItem>,
   /// 有用户还没看过的条目：底栏「历史」按钮据此高亮，打开模态即清除。

@@ -1,13 +1,16 @@
-//! 全局记录门面（ADR-045）：会话输出日志（ADR-017）与操作记录（ADR-044）
-//! 的统一埋点入口。埋点只说「记什么」，记到哪里、怎么写由装配期的注册条目
-//! 决定——日志句柄不再从视图穿进 SessionConfig、再穿进 worker，历史实体
-//! 不再注入 SFTP 面板。
+//! 全局记录门面（ADR-045）：会话输出日志（ADR-017）的统一埋点入口。埋点
+//! 只说「记什么」，记到哪里、怎么写由装配期的注册条目决定——日志句柄不再
+//! 从视图穿进 SessionConfig、再穿进 worker。
 //!
 //! 三个入口面：
 //! - 生命周期（UI 线程）：建格注册、格销毁注销（TerminalView 的 Drop）；
 //! - worker 侧埋点：线程入口 `bind_pane` 绑定本格（会话是专用 std 线程，
 //!   不跨线程漂移），之后任意深度无参调用；
 //! - UI 侧查询与开关：显式带格 id。
+//!
+//! 操作记录（ADR-044）不在这里：它的 gpui 反应性实体归视图层所有
+//! （ADR-045 2026-11-13 修订），注册表因此不含任何 gpui 类型，本模块零
+//! gpui 依赖——会话内核（`SessionConfig::pane`）才得以只认域类型。
 //!
 //! 未注册的格：查询 None、写入 no-op。「该格没有记录」是生命周期边界的
 //! 正确语义（格已释放或本就没装配），不是吞错。
@@ -17,10 +20,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
-use gpui::{App, Entity, EntityId};
-
-use crate::history::{SessionHistory, TaskItem};
 use crate::output_log::SessionLog;
+
+/// 本格在记录门面的注册键（ADR-045）：域自有的格标识，不绑定任何 UI
+/// 框架类型——会话内核与记录机制都只认它。全进程唯一性由发号方保证：
+/// 生产由视图把自己的实体 id 桥接进来（UI 层建格时的一次 `from_u64`），
+/// 测试走 [`test_pane`] 的全进程唯一自增源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PaneId(u64);
+
+impl PaneId {
+  /// 从原始数值桥接（生产：UI 层把视图实体 id 折算成本标识的唯一入口）。
+  pub fn from_u64(raw: u64) -> Self {
+    Self(raw)
+  }
+}
 
 /// 一格的记录装配：记到哪里、怎么写在注册时定死（装配期配置），运行期
 /// 唯一的动态是日志开关。
@@ -32,13 +46,10 @@ struct PaneRecorder {
   log_path: Option<PathBuf>,
   /// 装配期来源标签：首次开启日志时生成文件名用
   source: String,
-  /// 操作记录实体：仅 SSH 格挂（写入方 SFTP 面板、读取方模态都在 SSH
-  /// 会话）；注册表持有强引用，格注销时随之释放
-  history: Option<Entity<SessionHistory>>,
 }
 
-fn registry() -> &'static RwLock<HashMap<EntityId, PaneRecorder>> {
-  static REGISTRY: OnceLock<RwLock<HashMap<EntityId, PaneRecorder>>> = OnceLock::new();
+fn registry() -> &'static RwLock<HashMap<PaneId, PaneRecorder>> {
+  static REGISTRY: OnceLock<RwLock<HashMap<PaneId, PaneRecorder>>> = OnceLock::new();
   REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -46,14 +57,13 @@ fn registry() -> &'static RwLock<HashMap<EntityId, PaneRecorder>> {
 
 /// 建格注册日志条目：不开日志也注册——开关是运行期切的，条目得先在。
 /// 不依赖 gpui 上下文，e2e 测试与生产走同一条注册路径。
-pub fn attach_log(pane: EntityId, source: &str) {
+pub fn attach_log(pane: PaneId, source: &str) {
   let existing = registry().write().unwrap().insert(
     pane,
     PaneRecorder {
       log: Arc::new(Mutex::new(None)),
       log_path: None,
       source: source.to_owned(),
-      history: None,
     },
   );
   debug_assert!(
@@ -62,24 +72,17 @@ pub fn attach_log(pane: EntityId, source: &str) {
   );
 }
 
-/// SSH 格挂操作记录实体（UI 线程）。
-pub fn attach_history(pane: EntityId, history: Entity<SessionHistory>) {
-  if let Some(entry) = registry().write().unwrap().get_mut(&pane) {
-    entry.history = Some(history);
-  }
-}
-
 /// 格销毁注销（TerminalView 的 Drop 调）。正常时序 worker 已随会话退出；
 /// 即便异常时序，worker 的线程局部缓存自己持有 sink 引用，摘表不影响它，
 /// 句柄随线程结束释放。
-pub fn unregister_pane(pane: EntityId) {
+pub fn unregister_pane(pane: PaneId) {
   registry().write().unwrap().remove(&pane);
 }
 
 /// 测试注入：整格替换注册（e2e 用只读句柄预置「写失败」的日志、用真实
 /// 日志走开关全链路）。与生产 [`attach_log`] 的区别只在 sink 与路径的初值。
 pub fn attach_pane_with_log(
-  pane: EntityId,
+  pane: PaneId,
   source: &str,
   log: Arc<Mutex<Option<SessionLog>>>,
   log_path: Option<PathBuf>,
@@ -90,7 +93,6 @@ pub fn attach_pane_with_log(
       log,
       log_path,
       source: source.to_owned(),
-      history: None,
     },
   );
 }
@@ -117,7 +119,7 @@ fn lock_sink(sink: &Arc<Mutex<Option<SessionLog>>>) -> MutexGuard<'_, Option<Ses
 
 /// 会话线程入口：绑定本格（从注册表取 sink 缓存到线程局部）。格不在表里
 /// （测试未注册）绑成 None，全部埋点 no-op。
-pub fn bind_pane(pane: EntityId) {
+pub fn bind_pane(pane: PaneId) {
   let sink = registry().read().unwrap().get(&pane).map(|entry| entry.log.clone());
   CURRENT_LOG.with_borrow_mut(|current| *current = sink);
 }
@@ -173,7 +175,7 @@ pub fn finish_session() -> Option<String> {
 /// 运行时开关：开 = 有文件按原文件追加重开、没有则新建；关 = 停写并落
 /// 「记录暂停」标记。返回是否成功（失败由调用方亮警示）。不写进任何设置
 /// 或连接存储，只作用于本格本会话（ADR-017）。
-pub fn set_logging(pane: EntityId, enabled: bool) -> bool {
+pub fn set_logging(pane: PaneId, enabled: bool) -> bool {
   let read = registry().read().unwrap();
   let Some(entry) = read.get(&pane) else {
     return false;
@@ -216,7 +218,7 @@ pub fn set_logging(pane: EntityId, enabled: bool) -> bool {
 }
 
 /// 本格是否正在记录。
-pub fn logging_enabled(pane: EntityId) -> bool {
+pub fn logging_enabled(pane: PaneId) -> bool {
   registry()
     .read()
     .unwrap()
@@ -225,7 +227,7 @@ pub fn logging_enabled(pane: EntityId) -> bool {
 }
 
 /// 本格日志文件的路径：从未开过日志为 None。
-pub fn log_path(pane: EntityId) -> Option<PathBuf> {
+pub fn log_path(pane: PaneId) -> Option<PathBuf> {
   registry()
     .read()
     .unwrap()
@@ -236,7 +238,7 @@ pub fn log_path(pane: EntityId) -> Option<PathBuf> {
 /// 立即落盘本格缓冲里的正文（ADR-017 修订）：正文写入走内存缓冲、按
 /// 阈值/定时/边界标记落盘，「打开日志」这类要把文件交给外部前、以及
 /// 需要按文件内容断言的测试，先经这里同步。
-pub fn flush_now(pane: EntityId) {
+pub fn flush_now(pane: PaneId) {
   let sink = registry().read().unwrap().get(&pane).map(|entry| entry.log.clone());
   if let Some(sink) = sink
     && let Some(log) = lock_sink(&sink).as_mut()
@@ -245,40 +247,17 @@ pub fn flush_now(pane: EntityId) {
   }
 }
 
-// ---------- 操作记录门面（UI 侧，显式带格） ----------
-
-/// 记一条已结束的操作：内部 update 实体并 notify，打开的模态与面板传输
-/// 区一起重画。
-pub fn record_operation(pane: EntityId, task: TaskItem, cx: &mut App) {
-  if let Some(entity) = history(pane) {
-    entity.update(cx, |operations, cx| {
-      operations.record(task);
-      cx.notify();
-    });
-  }
-}
-
-/// 操作记录实体（读取方：历史模态、SFTP 面板的最近条目）；本地格为 None。
-pub fn history(pane: EntityId) -> Option<Entity<SessionHistory>> {
-  registry()
-    .read()
-    .unwrap()
-    .get(&pane)
-    .and_then(|entry| entry.history.clone())
-}
-
 /// 测试自造的格 id：**全进程唯一**的自增源（recorder 单测与 e2e 共用同一
 /// 计数器——两套独立计数器会跨模块撞 id，注入 insert 静默覆盖别人的条目）。
-pub fn test_pane() -> EntityId {
+pub fn test_pane() -> PaneId {
   use std::sync::atomic::{AtomicU64, Ordering};
   static NEXT: AtomicU64 = AtomicU64::new(1);
-  EntityId::from(NEXT.fetch_add(1, Ordering::Relaxed))
+  PaneId(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use gpui::AppContext as _;
 
   fn temp_log(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("zhimaterm-recorder-{}-{name}", std::process::id()));
@@ -293,26 +272,21 @@ mod tests {
   /// 同一路径重开、各自落标记。预置 log_path 走 open_at 路径——不经
   /// output_log::create（它读全局配置目录 env，会与并行用例互扰），「新建
   /// 文件」分支由 output_log 的既有测试守护。
-  #[gpui::test]
-  fn logging_toggle_round_trips_one_file(cx: &mut gpui::TestAppContext) {
-    cx.update(|cx| zhimaterm_base::theme::init(None, cx));
+  #[test]
+  fn logging_toggle_round_trips_one_file() {
     let log_file = temp_log("toggle");
     let pane = test_pane();
 
-    cx.update(|cx| {
-      let history = cx.new(|_| SessionHistory::new());
-      attach_log(pane, "deploy@web-1:22");
-      attach_history(pane, history);
-      registry().write().unwrap().get_mut(&pane).expect("刚注册的格").log_path = Some(log_file.clone());
+    attach_log(pane, "deploy@web-1:22");
+    registry().write().unwrap().get_mut(&pane).expect("刚注册的格").log_path = Some(log_file.clone());
 
-      assert!(!logging_enabled(pane), "注册后未开启");
-      assert!(set_logging(pane, true), "按既有路径开启");
-      assert!(logging_enabled(pane));
-      assert!(set_logging(pane, true), "已开启再开是幂等成功");
-      assert!(set_logging(pane, false), "暂停");
-      assert!(!logging_enabled(pane));
-      assert!(set_logging(pane, true), "恢复：按同一路径重开");
-    });
+    assert!(!logging_enabled(pane), "注册后未开启");
+    assert!(set_logging(pane, true), "按既有路径开启");
+    assert!(logging_enabled(pane));
+    assert!(set_logging(pane, true), "已开启再开是幂等成功");
+    assert!(set_logging(pane, false), "暂停");
+    assert!(!logging_enabled(pane));
+    assert!(set_logging(pane, true), "恢复：按同一路径重开");
 
     let content = std::fs::read_to_string(&log_file).unwrap();
     assert_eq!(
@@ -326,18 +300,13 @@ mod tests {
 
   /// worker 侧无参埋点走线程绑定：绑定后 begin/output/finish 生效并落盘；
   /// 未绑定的线程（或未注册的格）全部 no-op。测试线程即模拟会话线程。
-  #[gpui::test]
-  fn worker_bare_calls_route_via_thread_binding(cx: &mut gpui::TestAppContext) {
-    cx.update(|cx| zhimaterm_base::theme::init(None, cx));
+  #[test]
+  fn worker_bare_calls_route_via_thread_binding() {
     let log_file = temp_log("binding");
     let pane = test_pane();
-    cx.update(|cx| {
-      let history = cx.new(|_| SessionHistory::new());
-      attach_log(pane, "deploy@web-1:22");
-      attach_history(pane, history);
-      registry().write().unwrap().get_mut(&pane).expect("刚注册的格").log_path = Some(log_file.clone());
-      assert!(set_logging(pane, true));
-    });
+    attach_log(pane, "deploy@web-1:22");
+    registry().write().unwrap().get_mut(&pane).expect("刚注册的格").log_path = Some(log_file.clone());
+    assert!(set_logging(pane, true));
 
     // 模拟会话线程入口：绑定后任意深度的埋点无参可用
     bind_pane(pane);
@@ -353,28 +322,11 @@ mod tests {
     );
     assert!(content.contains("==== 会话结束 "), "收尾出口要写右边界：{content}");
 
-    // 注销后：查询为否、开关失败、操作记录 no-op——生命周期边界的旁路语义
+    // 注销后：查询为否、开关失败——生命周期边界的旁路语义
     unregister_pane(pane);
-    cx.update(|cx| {
-      assert!(!logging_enabled(pane));
-      assert!(!set_logging(pane, true), "格已注销，开关失败");
-      assert!(log_path(pane).is_none());
-      assert!(history(pane).is_none());
-      record_operation(pane, sample_task(), cx);
-    });
+    assert!(!logging_enabled(pane));
+    assert!(!set_logging(pane, true), "格已注销，开关失败");
+    assert!(log_path(pane).is_none());
     let _ = std::fs::remove_dir_all(log_file.parent().unwrap());
-  }
-
-  fn sample_task() -> TaskItem {
-    TaskItem {
-      id: 0,
-      label: "上传 a → b".into(),
-      unit: crate::history::ProgressUnit::Bytes,
-      done: 1,
-      total: Some(1),
-      current: None,
-      state: crate::history::TaskState::Completed("完成".into()),
-      finished_at: None,
-    }
   }
 }

@@ -46,7 +46,7 @@ pub fn spawn_local(config: SessionConfig) -> (Session, SessionEvents) {
 /// 测试自造的格 id（ADR-045）：转发 recorder 的全进程唯一自增源（独立
 /// 计数器会与 recorder 单测撞 id、注入静默覆盖别人的条目）。不注册进
 /// 记录门面——worker 的日志埋点全部 no-op，等价原先的 `log: None`。
-pub fn test_pane() -> gpui::EntityId {
+pub fn test_pane() -> zhimaterm_recording::recorder::PaneId {
   zhimaterm_recording::recorder::test_pane()
 }
 

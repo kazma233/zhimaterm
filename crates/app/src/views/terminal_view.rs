@@ -224,9 +224,13 @@ pub struct TerminalView {
   source: String,
   /// 本地会话：不画底栏，启动与故障信息走网格中央，也不产生操作回执（ADR-016）
   local: bool,
-  /// 本格在记录门面的注册键（ADR-045）：日志 sink 与操作记录实体都在
-  /// 注册表里，Drop 时注销
-  pane: gpui::EntityId,
+  /// 本格在记录门面的注册键（ADR-045）：域自有格标识，日志 sink 的路由
+  /// 键，Drop 时注销；从视图实体 id 桥接发号
+  pane: zhimaterm_recording::recorder::PaneId,
+  /// 操作记录实体（ADR-044，SSH 格独有）：归视图持有、随格销毁（ADR-045
+  /// 2026-11-13 修订），SFTP 面板在 SftpReady 装配时构造期注入，模态与
+  /// 底栏「历史」读取
+  history: Option<Entity<zhimaterm_recording::history::SessionHistory>>,
   /// 历史实体的变化订阅：新操作落历史时刷新底栏「历史」高亮（本地格无）。
   /// 只作保活持有（Subscription 被 Drop 即退订），没有读它的代码是正常的
   #[allow(dead_code)]
@@ -277,24 +281,19 @@ impl TerminalView {
     // 同样是宿主进程树。SSH 的 dummy shell 被 `local` 排除；WSL 的进程树
     // 在子系统里，宿主侧枚举不到
     let probe_capable = local && !local_shell.is_wsl();
-    // 记录门面注册（ADR-045）：日志 sink 与操作记录实体住进注册表，
-    // worker 线程经 pane id 绑定，句柄不再穿透。注册必须先于 spawn——
-    // worker 线程一起来就查表。操作记录只有 SSH 格有（本地格没有写入方
-    // 与读取方，不再白建实体）
-    let pane = cx.entity_id();
+    // 记录门面注册（ADR-045）：日志 sink 住进注册表，worker 线程经 pane
+    // id 绑定，句柄不再穿透。注册必须先于 spawn——worker 线程一起来就查
+    // 表。格标识从视图实体 id 桥接成域自有 PaneId（ADR-045 修订）
+    let pane = zhimaterm_recording::recorder::PaneId::from_u64(cx.entity_id().as_u64());
     zhimaterm_recording::recorder::attach_log(pane, &source);
-    if !local {
-      zhimaterm_recording::recorder::attach_history(
-        pane,
-        cx.new(|_| zhimaterm_recording::history::SessionHistory::new()),
-      );
-    }
+    // 操作记录只有 SSH 格有（本地格没有写入方与读取方，不再白建实体）；
+    // 实体归视图持有、Drop 连带释放（ADR-045 修订），「关闭会话即清空」
+    let history = (!local).then(|| cx.new(|_| zhimaterm_recording::history::SessionHistory::new()));
     // SSH 格的历史实体变化（新操作落历史）要刷新底栏的「历史」高亮；
     // 订阅随格存活（Drop 连带释放）
-    let history_sub = (!local).then(|| {
-      let history = zhimaterm_recording::recorder::history(pane).expect("刚挂上的历史实体");
-      cx.observe(&history, |_, _, cx| cx.notify())
-    });
+    let history_sub = history
+      .as_ref()
+      .map(|history| cx.observe(history, |_, _, cx| cx.notify()));
     let (forward_states, forward_agent) = match &target {
       SessionTarget::Local { .. } => (Vec::new(), false),
       SessionTarget::Ssh(target) => (forward_states_from(&target.forwards), target.forward_agent),
@@ -375,6 +374,7 @@ impl TerminalView {
       source,
       local,
       pane,
+      history,
       history_sub,
       number,
     };
@@ -919,12 +919,12 @@ impl TerminalView {
       SessionEvent::Control(control) => match control {
         ControlEvent::SftpReady(handle, events) => {
           // SSH 会话才发：面板实体自己持有句柄与任务事件流，随会话存活；
-          // 会话关闭后句柄调用报明确错误，面板里能看到。历史写入走
-          // 记录门面（ADR-045）：面板只拿格 id，不持有历史实体
+          // 会话关闭后句柄调用报明确错误，面板里能看到。历史实体构造期
+          // 注入（ADR-045 修订）：面板是唯一写入方，直接写视图持有的实体
           let font = font::terminal_font(&self.font.family);
-          let pane = self.pane;
+          let history = self.history.clone().expect("SSH 格必有历史实体");
           self.sftp_panel =
-            Some(cx.new(|cx| crate::views::sftp_panel::SftpPanelView::new(handle, events, font, pane, cx)));
+            Some(cx.new(|cx| crate::views::sftp_panel::SftpPanelView::new(handle, events, font, history, cx)));
         }
         ControlEvent::ProbeReady(handle) => {
           // 探针面板实体自己持有句柄：开面板起采样、收面板停采样，
@@ -2095,8 +2095,9 @@ fn forward_states_from(forwards: &[zhimaterm_session::ForwardRule]) -> Vec<Forwa
 impl Drop for TerminalView {
   fn drop(&mut self) {
     self.session.close();
-    // 记录门面注销（ADR-045）：格销毁摘条目，日志句柄与历史实体随之
-    // 释放。正常时序 worker 线程已随会话退出
+    // 记录门面注销（ADR-045）：格销毁摘条目，日志句柄随之释放（操作记录
+    // 实体是本视图字段，随视图一起释放，ADR-045 修订）。正常时序 worker
+    // 线程已随会话退出
     zhimaterm_recording::recorder::unregister_pane(self.pane);
   }
 }
@@ -2481,9 +2482,9 @@ impl TerminalView {
       // 「历史」入口（右下角）：SFTP 已结束的操作汇成的操作记录，全屏模态
       // （ADR-044）。与 SFTP 面板解耦——没开面板也能看历史，SSH 会话即显示
       let history_toggle = {
-        let pane = self.pane;
+        let history = self.history.clone();
         // 有未看过的新操作时高亮（与 SFTP 开关、记录中的状态色同语言）
-        let fresh = zhimaterm_recording::recorder::history(pane).is_some_and(|history| history.read(cx).has_fresh());
+        let fresh = history.as_ref().is_some_and(|history| history.read(cx).has_fresh());
         shell::status_chip(
           tokens,
           "session-history-toggle",
@@ -2496,9 +2497,9 @@ impl TerminalView {
           },
         )
         .on_click(move |_, window, cx| {
-          // 历史实体经门面查（ADR-045）；按钮在格底栏上，格必在。
-          // 打开即视为已读：清掉高亮，模态期间新落的条目会再置位
-          if let Some(history) = zhimaterm_recording::recorder::history(pane) {
+          // 打开即视为已读：清掉高亮，模态期间新落的条目会再置位。
+          // 本地格没有历史实体，按钮不出现
+          if let Some(history) = history.clone() {
             history.update(cx, |history, cx| {
               history.mark_seen();
               cx.notify();

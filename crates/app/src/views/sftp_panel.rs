@@ -3,8 +3,8 @@
 //! 每个 SSH 会话一个实例，由 `TerminalView` 在收到 `SftpReady` 时创建。实体自己
 //! 持有 `SftpHandle` 与任务事件流：目录操作经命令通道直达 pump，任务事件在自己的
 //! 异步循环里回收；`TerminalView` 只负责开关与挂载，不接触 SFTP 状态。进行中的
-//! 任务在面板任务区显示并可取消；结束时落历史（ADR-045 记录门面）——新结束的
-//! 操作由底栏「历史」按钮的高亮提示。
+//! 任务在面板任务区显示并可取消；结束时写入构造期注入的操作记录实体（ADR-044，
+//! 实体归视图层所有，ADR-045 修订）——新结束的操作由底栏「历史」按钮的高亮提示。
 //!
 //! 破坏性动作的确认规则按 ADR-002：覆盖上传/下载目标、递归删除非空目录，都必须
 //! 先有可见确认；重命名不做覆盖（目标存在即报错，由引擎保证）。界面上比这条底线
@@ -25,7 +25,9 @@ use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::ui_rems;
 use zhimaterm_base::ui::{DockPanel, card, panel};
-use zhimaterm_recording::history::{ProgressUnit, TaskItem, TaskOutcome, TaskProgress, TaskState, file_name_of};
+use zhimaterm_recording::history::{
+  ProgressUnit, SessionHistory, TaskItem, TaskOutcome, TaskProgress, TaskState, file_name_of,
+};
 use zhimaterm_session::sftp::{
   RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId, TaskOutcome as SftpTaskOutcome,
   TaskProgress as SftpTaskProgress, remote_join,
@@ -50,9 +52,9 @@ pub struct SftpPanelView {
   loading: bool,
   error: Option<String>,
   tasks: Vec<TaskItem>,
-  /// 本格在记录门面的注册键（ADR-045）：历史写入与查询都经门面，面板
-  /// 不持有历史实体
-  pane: gpui::EntityId,
+  /// 本会话的操作记录实体（ADR-044）：构造期注入（ADR-045 2026-11-13
+  /// 修订，实体归视图层所有），面板是唯一写入方
+  history: Entity<SessionHistory>,
   /// 打开中的对话框；输入框随对话框创建与销毁
   dialog: Option<Dialog>,
   /// 对话框的焦点作用域根：点输入框以外的区域焦点落到这里（ADR-043）
@@ -102,7 +104,7 @@ impl SftpPanelView {
     handle: SftpHandle,
     task_events: SftpEvents,
     font: gpui::Font,
-    pane: gpui::EntityId,
+    history: Entity<SessionHistory>,
     cx: &mut Context<Self>,
   ) -> Self {
     // 任务事件循环跟着面板走：进度与终态直接更新任务列表
@@ -132,7 +134,7 @@ impl SftpPanelView {
       loading: false,
       error: None,
       tasks: Vec::new(),
-      pane,
+      history,
       dialog: None,
       overlay_focus: cx.focus_handle(),
       dock: DockPanel::default(),
@@ -650,7 +652,10 @@ impl SftpPanelView {
       };
       task.finish(&terminal);
       task.finished_at = Some(chrono::Local::now());
-      zhimaterm_recording::recorder::record_operation(self.pane, task, cx);
+      self.history.update(cx, |operations, cx| {
+        operations.record(task);
+        cx.notify();
+      });
     }
     // 上传/递归删除会改变当前目录内容：完成后刷新一次列表
     if matches!(outcome, SftpTaskOutcome::Completed(_)) {
@@ -666,9 +671,8 @@ impl SftpPanelView {
       Ok(()) => TaskState::Completed(format!("已删除 {}", path.display())),
       Err(error) => TaskState::Failed(format!("删除失败：{error}")),
     };
-    zhimaterm_recording::recorder::record_operation(
-      self.pane,
-      TaskItem {
+    self.history.update(cx, |operations, cx| {
+      operations.record(TaskItem {
         id: DIRECT_DELETE_ID,
         label,
         unit: ProgressUnit::Items,
@@ -677,9 +681,9 @@ impl SftpPanelView {
         current: None,
         state,
         finished_at: Some(chrono::Local::now()),
-      },
-      cx,
-    );
+      });
+      cx.notify();
+    });
   }
 
   // ---------- 杂项 ----------

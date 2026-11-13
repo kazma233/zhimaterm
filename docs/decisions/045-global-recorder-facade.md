@@ -82,3 +82,34 @@ bool。`LoggingStopped` 控制事件链路原样。
   注册的 debug_assert。
 - 手工验收：SSH 会话开关记录（记录模态）、SFTP 操作落历史（历史模态，
   底栏「历史」按钮高亮提示）、重连后日志继续追加同一文件。
+
+## 修订（2026-11-13）：注册表去 gpui 化，格标识改域自有 PaneId
+
+本 ADR 的注册表原样携带两类 gpui 类型：键是 `gpui::EntityId`，条目持有
+`Entity<SessionHistory>`，操作记录门面（`record_operation`/`history`）的
+签名也要 `&mut App`。结果是会话内核（`SessionConfig::pane`）与记录机制
+（recording 的叶子模块）都被迫依赖 UI 框架——「机制保持叶子地位」只剩
+Cargo 依赖方向，没有类型证据。
+
+- **格标识**：注册键改为 recording 的域自有新类型 `recorder::PaneId`
+  （u64 新类型，见 GLOSSARY「格标识」）。发号权仍在 UI 层：建格时由
+  `TerminalView` 把自己的实体 id 桥接进来
+  （`PaneId::from_u64(entity_id.as_u64())`），测试仍走全进程唯一自增源
+  `test_pane`。「key 是视图实体 id」的路由语义不变，只是键的类型归属移进
+  留痕域；`SessionConfig::pane` 随之改型，session crate 的 gpui 依赖全部
+  删除，成为继 `terminal` 之后第二个零 gpui crate。
+- **操作记录实体归位视图层**：`Entity<SessionHistory>` 从注册表条目移回
+  `TerminalView` 字段（ADR-044 追加段的原始归属），SFTP 面板在 `SftpReady`
+  装配时构造期注入实体句柄、直接写入；底栏「历史」的高亮查询与模态打开
+  读同一字段。**取代本 ADR 决策 3 的「写入只能走门面」**：门面的动机
+  （消灭句柄穿透）由构造期一次性注入以更直接的方式达成——实体只在装配
+  点出现一次，不经任何中间结构；「注册表不持 UI 类型、反应性实体不进
+  机制层」是更硬的边界。注册表删掉 `attach_history`/`record_operation`/
+  `history` 三个入口，recorder 模块从此零 gpui 引用。
+- **日志门面不变**：attach/注销/线程绑定/开关/查询/flush 全部原样，仅
+  键类型换 `PaneId`；e2e 与单测的注册路径、`attach_pane_with_log` 注入
+  变体、重复注册的 debug_assert 均不变。
+- 记录器单测不再需要 gpui 上下文（`#[gpui::test]` → `#[test]`），
+  recording 的 dev `gpui` 依赖删除；主依赖保留（`history.rs` 的模态
+  视图）。「随格销毁」不再经注销实现——实体就是视图字段，Drop 连带
+  释放，语义不变。

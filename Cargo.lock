@@ -8369,7 +8369,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "gpui-pre",
  "libc",
  "libssh2-sys",
  "serde_json",

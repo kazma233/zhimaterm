@@ -332,8 +332,9 @@ pub struct SessionConfig {
   pub scrollback: Option<std::path::PathBuf>,
   /// 本格在记录门面的注册键（ADR-045）：worker 线程入口经
   /// `recorder::bind_pane` 绑定日志 sink，之后埋点无参调用——日志句柄
-  /// 不再随本结构穿透。
-  pub pane: gpui::EntityId,
+  /// 不再随本结构穿透。域自有格标识（ADR-045 2026-11-13 修订），内核
+  /// 不引用 UI 框架类型。
+  pub pane: zhimaterm_recording::recorder::PaneId,
 }
 
 /// 命令队列上限：界面卡顿时不允许按键在内存里无限堆积。

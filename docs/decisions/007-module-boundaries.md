@@ -361,3 +361,22 @@ crates/connections  zhimaterm-connections  SSH 连接管理域（原 zhimaterm-s
 - `Taskfile.yml` 的 build sources 与 macOS 版本号 grep 改指新路径。
 - 动机：消除「根 package + [workspace] 并存」的过渡形态，`cargo test` 等
   命令以成员为单位心智一致；纯搬移、零行为变化。
+
+## 修订（2026-11-13，十二）：格标识类型归位，session 去除 gpui 依赖
+
+修订八曾明文记录「crate 分层是依赖方向边界，不是内核零 UI 的证明」。本次
+把其中可以类型归位的一处泄漏收掉——边界口径不变，证据更硬：
+
+- `SessionConfig::pane: gpui::EntityId` 是会话内核唯一的 UI 框架类型。
+  格标识实为留痕域的注册键（ADR-045），按「类型归所有者」落
+  `recorder::PaneId`（u64 新类型），UI 层建格时从视图实体 id 桥接。session
+  的 gpui 直接依赖随之删除，成为继 `terminal` 之后第二个零 gpui crate；
+  ssh_sftp_probe 探针的构建不再拖 UI 框架。
+- 操作记录的 gpui 反应性实体（`Entity<SessionHistory>`）从 recording 的
+  注册表移回 `TerminalView` 字段，SFTP 面板构造期注入——同一「能力/实体
+  注入」模式的又一处（修订六/七先例）。UI 实体类型从此只出现在 UI 层；
+  recording 的 gpui 依赖只剩 `history.rs` 的模态视图。详见 ADR-045
+  2026-11-13 修订。
+- 格标识口径（GLOSSARY「格标识」词条）：`recorder::PaneId` 是记录门面
+  注册键（进程内会话格），`workspace::PaneId` 是磁盘布局叶标识（ADR-037
+  投影）——两个标识空间互不相干、各有唯一所有者，不经手换算。

@@ -61,11 +61,10 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
     `pty_probe` 探针二进制（`src/bin/`）。
   - dev `gpui`（`test-support`）。
 - `zhimaterm-recording`
-  - `gpui`：留痕模态视图与 `EntityId`；`anyhow`：错误链；`chrono`：输出
+  - `gpui`：留痕模态视图（ADR-044；注册表与格标识 `PaneId` 不含任何
+    gpui 类型，ADR-045 修订）；`anyhow`：错误链；`chrono`：输出
     日志时间戳与任务的结束时刻。
-  - dev `gpui`（`test-support`）：记录器单测。
 - `zhimaterm-session`
-  - `gpui`：`SessionConfig::pane` 的实体 id。
   - `ssh2`（`vendored-openssl`、`openssl-on-win32`）与 `libssh2-sys`：SSH
     传输（ADR-004）；与探针同一版本。
   - `smol`：通道与等待；`anyhow`：错误链；`chrono`/`serde_json`：回滚格式。
@@ -191,9 +190,11 @@ bin/pty_probe.rs           Windows ConPTY e2e 探针（ADR-025）
 
 ```
 output_log.rs              会话输出日志：文件分配、首尾标记与故障停写（ADR-017）
-recorder.rs                全局记录门面（ADR-045），worker 与视图都只依赖它（叶子地位）
-history.rs                 任务/操作的数据模型与两个全屏模态（ADR-044）；SFTP 任务的
-                           进度/终态由写入方折算成本域投影类型，记录开关经 LoggingTarget 注入
+recorder.rs                全局记录门面（ADR-045）：日志埋点与格标识 PaneId 的所有者，
+                           零 gpui；worker 与视图都只依赖它（叶子地位）
+history.rs                 任务/操作的数据模型与两个全屏模态（ADR-044）；操作记录实体
+                           归终端视图（ADR-045 修订），SFTP 任务的进度/终态由写入方折算
+                           成本域投影类型，记录开关经 LoggingTarget 注入
 ```
 
 ### 会话域（`crates/session/src/`）
