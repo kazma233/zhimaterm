@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod panel;
 pub mod scrollbar;
 pub mod select;
+pub mod tooltip;
 
 pub use dock::DockPanel;
 
@@ -42,6 +43,9 @@ pub const CONTROL_HEIGHT: f32 = 32.0;
 /// 底部动作行入口（会话按钮与主题色板入口）的统一高度：文字行框与色板高度
 /// 各由自己的内容决定，自然高度对不齐，hover 高亮框因此一高一矮，只能显式等高。
 pub const ACTION_ENTRY_HEIGHT: f32 = 24.0;
+
+/// 可点击元素的光标：全仓统一从这里取，避免各组件就地手写 PointingHand。
+pub const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
 
 /// 横向排列的两组元素之间的竖线。高度固定不随容器拉伸：它只是一条分组提示，
 /// 跟文字一样高就够，跟着按钮长满会看起来像分割线。

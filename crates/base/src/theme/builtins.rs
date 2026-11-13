@@ -67,6 +67,7 @@ const DEFAULT_UI: UiTokens = UiTokens {
   search_highlight: 0xf5c45173,
   scroll_marker: 0xffb454ff,
   input_selection: 0x8bd5ca30,
+  scrollbar_thumb: 0x59595966,
 };
 
 pub const ALL: &[Theme] = &[

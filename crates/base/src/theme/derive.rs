@@ -109,6 +109,8 @@ pub struct UiTokens {
   pub scroll_marker: u32,
   /// 输入框内选区叠加
   pub input_selection: u32,
+  /// 滚动指示条 thumb
+  pub scrollbar_thumb: u32,
 }
 
 /// 线性插值混色：`t = 0` 返回 `a`，`t = 1` 返回 `b`。
@@ -209,6 +211,7 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
     search_highlight: with_alpha(warn, 0x73),
     scroll_marker: with_alpha(mix(warn, danger, 0.5), 0xff),
     input_selection: with_alpha(accent, 0x30),
+    scrollbar_thumb: with_alpha(mix(bg, fg, 0.35), 0x66),
   }
 }
 
@@ -293,6 +296,7 @@ mod tests {
       ("overlay", hand.overlay, derived.overlay),
       ("shadow_popover", hand.shadow_popover, derived.shadow_popover),
       ("input_selection", hand.input_selection, derived.input_selection),
+      ("scrollbar_thumb", hand.scrollbar_thumb, derived.scrollbar_thumb),
     ];
     let mut worst = (0u32, "");
     for (name, want, got) in cases {

@@ -20,6 +20,7 @@ use gpui::prelude::*;
 use gpui::{Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px};
 
 use zhimaterm_base::theme::{UiTokens, tokens};
+use zhimaterm_base::ui::CLICKABLE;
 use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::ui_rems;
@@ -29,8 +30,6 @@ use zhimaterm_session::sftp::{
   RemoteEntry, RemoteFileType, SftpEvent, SftpEvents, SftpHandle, TaskId, TaskOutcome as SftpTaskOutcome,
   TaskProgress as SftpTaskProgress, remote_join,
 };
-
-const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
 
 /// 请求-响应型删除落历史用的占位任务 id：这类条目不进运行区、不参与取消，
 /// 只躺在历史里（运行区按 id 找任务，pump 分配的 id 从 0 递增，不会相撞）。
@@ -63,6 +62,8 @@ pub struct SftpPanelView {
   /// 条目右键菜单的锚点（窗口坐标，渲染时换算成面板内位置）；None = 菜单没开。
   /// 动作作用于右键时选中的条目（右键先选中）
   context_menu: Option<gpui::Point<gpui::Pixels>>,
+  /// 右键菜单的键盘高亮游标：菜单开着期间与 `context_menu` 配对使用
+  context_menu_cursor: menu::MenuCursor,
   /// 面板自身的窗口 bounds，渲染帧写入：菜单定位与夹取按它换算
   panel_bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
   font: gpui::Font,
@@ -136,6 +137,7 @@ impl SftpPanelView {
       overlay_focus: cx.focus_handle(),
       dock: DockPanel::default(),
       context_menu: None,
+      context_menu_cursor: Default::default(),
       panel_bounds: Rc::new(Cell::new(Bounds::default())),
       font,
     };
@@ -791,6 +793,29 @@ impl Render for SftpPanelView {
       .text_color(gpui::rgb(palette.fg))
       // 对话框与历史弹层开着时，Enter/Esc 从聚焦的输入框冒泡到这里
       .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
+        // 右键菜单开着：菜单键（上下/Enter/Esc）先于对话框裁决，键盘与
+        // 鼠标点击跑同一组回调
+        if panel.context_menu.is_some() {
+          let items = SftpPanelView::context_menu_items(cx);
+          match menu::route_menu_keys(&event.keystroke, &items, &panel.context_menu_cursor) {
+            menu::MenuKeyOutcome::Moved => {
+              cx.stop_propagation();
+              cx.notify();
+            }
+            menu::MenuKeyOutcome::Picked(index) => {
+              if let Some(menu::MenuEntry::Item(item)) = items.get(index) {
+                (item.on_pick)(window, cx);
+              }
+              cx.stop_propagation();
+            }
+            menu::MenuKeyOutcome::Close => {
+              panel.context_menu = None;
+              cx.stop_propagation();
+              cx.notify();
+            }
+            menu::MenuKeyOutcome::None => {}
+          }
+        }
         panel.handle_dialog_key(event, window, cx);
       }))
       .child(self.render_header(cx))
@@ -819,7 +844,13 @@ impl Render for SftpPanelView {
         });
       }));
       if bounds.size.width > px(0.) {
-        column = column.child(Self::render_context_menu(click - bounds.origin, bounds.size, cx));
+        let cursor = self.context_menu_cursor.clone();
+        column = column.child(Self::render_context_menu(
+          click - bounds.origin,
+          bounds.size,
+          &cursor,
+          cx,
+        ));
       }
     }
     // 面板 bounds 每帧写入：菜单的容器内定位与夹取按它换算
@@ -891,6 +922,7 @@ impl SftpPanelView {
         .px(px(6.))
         .text_size(ui_rems(12.))
         .text_color(gpui::rgb(palette.fg_muted))
+        .tooltip(zhimaterm_base::ui::tooltip::tip("关闭面板"))
         .child("✕"),
       )
   }
@@ -934,6 +966,7 @@ impl SftpPanelView {
       .rounded(px(4.))
       .bg(gpui::rgb(tokens(cx).bg_row))
       .text_size(ui_rems(11.))
+      .tooltip(zhimaterm_base::ui::tooltip::tip("刷新"))
       .child(if self.loading { "…" } else { "↻" })
   }
 
@@ -1019,6 +1052,7 @@ impl SftpPanelView {
         cx.listener(move |panel, event: &gpui::MouseDownEvent, _, cx| {
           panel.select(&menu_entry, cx);
           panel.context_menu = Some(event.position);
+          panel.context_menu_cursor.set(None);
           cx.notify();
         }),
       );
@@ -1055,28 +1089,44 @@ impl SftpPanelView {
   fn render_context_menu(
     click: gpui::Point<gpui::Pixels>,
     container: gpui::Size<gpui::Pixels>,
+    cursor: &menu::MenuCursor,
     cx: &mut Context<Self>,
   ) -> gpui::Stateful<gpui::Div> {
-    let download = Rc::new(cx.listener(|panel, _, window, cx| {
-      panel.context_menu = None;
-      panel.start_download(window, cx);
-    }));
-    let rename = Rc::new(cx.listener(|panel, _, window, cx| {
-      panel.context_menu = None;
-      panel.start_rename(window, cx);
-    }));
-    let remove = Rc::new(cx.listener(|panel, _, _, cx| {
-      panel.context_menu = None;
-      panel.start_remove(cx);
-    }));
-    let items = vec![
+    let items = Self::context_menu_items(cx);
+    menu::context_menu(&tokens(cx), "sftp-context-menu", click, container, cursor, items)
+  }
+
+  /// 菜单条目在渲染与键盘裁决两处共用：键盘 Enter 拾取与鼠标点击跑同一组
+  /// 回调，动作语义只有一份。
+  fn context_menu_items(cx: &mut Context<Self>) -> Vec<menu::MenuEntry> {
+    let entity = cx.entity();
+    let download = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+      entity.update(cx, |panel, cx| {
+        panel.context_menu = None;
+        panel.start_download(window, cx);
+      });
+    });
+    let entity = cx.entity();
+    let rename = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+      entity.update(cx, |panel, cx| {
+        panel.context_menu = None;
+        panel.start_rename(window, cx);
+      });
+    });
+    let entity = cx.entity();
+    let remove = Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+      entity.update(cx, |panel, cx| {
+        panel.context_menu = None;
+        panel.start_remove(cx);
+      });
+    });
+    vec![
       menu::MenuEntry::item("下载", download),
       menu::MenuEntry::item("重命名", rename),
       // 删除是销毁性动作：分隔线隔开，误触代价与上面两项不对称
       menu::MenuEntry::Separator,
       menu::MenuEntry::item("删除", remove),
-    ];
-    menu::context_menu(&tokens(cx), "sftp-context-menu", click, container, items)
+    ]
   }
 
   /// 进行中任务区（列表与状态行之间）：每条任务两行——label 与「取消」在上，

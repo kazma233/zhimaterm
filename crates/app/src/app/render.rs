@@ -86,6 +86,7 @@ impl ZhimaTermApp {
     &self,
     id: &'static str,
     icon: &str,
+    tip: &'static str,
     open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     cx: &mut Context<Self>,
   ) -> gpui::Stateful<gpui::Div> {
@@ -94,6 +95,7 @@ impl ZhimaTermApp {
       id,
       cx.listener(move |this, _, window, cx| open(this, window, cx)),
     )
+    .tooltip(zhimaterm_base::ui::tooltip::tip(tip))
     .text_size(ui_rems(14.))
     // 图标字形宽度不等：固定宽度并居中，换图标也不会带着整行的间距跑
     .child(
@@ -123,6 +125,7 @@ impl ZhimaTermApp {
     // 互斥：开菜单收主题下拉（反方向由 dismiss_anchored 统一处理）
     self.dismiss_anchored();
     self.sidebar_menu = Some((index, position));
+    self.sidebar_menu_cursor.set(None);
     cx.notify();
   }
 
@@ -137,12 +140,16 @@ impl ZhimaTermApp {
     cx: &mut Context<Self>,
   ) -> Vec<gpui::AnyElement> {
     let tokens = zhimaterm_base::theme::tokens(cx);
-    let rename = Rc::new(cx.listener(move |this, _, window, cx| {
-      this.sidebar_menu = None;
-      this.open_rename_dialog(index, window, cx);
-    }));
+    let app = cx.entity();
+    let rename = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+      app.update(cx, |this, cx| {
+        this.sidebar_menu = None;
+        this.open_rename_dialog(index, window, cx);
+      });
+    });
     let items = vec![menu::MenuEntry::item("重命名", rename)];
     let app = cx.entity();
+    let cursor = self.sidebar_menu_cursor.clone();
     vec![
       menu::context_menu_backdrop(move |_, cx| {
         app.update(cx, |this, cx| {
@@ -151,7 +158,7 @@ impl ZhimaTermApp {
         });
       })
       .into_any_element(),
-      menu::context_menu(&tokens, "sidebar-context-menu", click, viewport, items).into_any_element(),
+      menu::context_menu(&tokens, "sidebar-context-menu", click, viewport, &cursor, items).into_any_element(),
     ]
   }
 
@@ -360,6 +367,7 @@ impl Render for ZhimaTermApp {
     let header_actions = vec![self.icon_entry(
       "entry-settings",
       "⚙",
+      "设置",
       |this, window, cx| this.open_settings_form(window, cx),
       cx,
     )];
@@ -436,7 +444,7 @@ impl Render for ZhimaTermApp {
       ))
       .on_key_down(cx.listener(|this, event, window, cx| this.handle_key_down(event, window, cx)))
       // 捕获阶段先于终端：侧栏菜单的 Esc 不能先被终端写进 PTY
-      .capture_key_down(cx.listener(|this, event, _, cx| this.capture_sidebar_menu_key(event, cx)))
+      .capture_key_down(cx.listener(|this, event, window, cx| this.capture_sidebar_menu_key(event, window, cx)))
       // 会话级快捷键由 keymap 绑定派发到这里（绑定见 input::app_key_bindings）；
       // 应用根总是位于焦点路径上，任何非模态焦点（搜索条、SFTP 面板）都能开/关会话。
       // 浮层栈非空时不响应：`Scope::App` 绑定无上下文、且绑定匹配先于裸键派发，

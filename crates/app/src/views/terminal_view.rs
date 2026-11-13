@@ -196,6 +196,8 @@ pub struct TerminalView {
   forward_save: bool,
   /// 右键菜单的锚点（窗口坐标，渲染时换算成终端容器内的位置）；None = 菜单没开
   context_menu: Option<gpui::Point<gpui::Pixels>>,
+  /// 右键菜单的键盘高亮游标：菜单开着期间与 `context_menu` 配对使用
+  context_menu_cursor: menu::MenuCursor,
   /// 终端容器（浮层的定位基准）的窗口 bounds，渲染帧写入：菜单定位与夹取按它换算
   container_bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
   /// 搜索条是否展开（ADR-015）
@@ -359,6 +361,7 @@ impl TerminalView {
       forward_hooks,
       forward_save: true,
       context_menu: None,
+      context_menu_cursor: Default::default(),
       container_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))))),
       search_open: false,
       search_input: None,
@@ -1088,6 +1091,29 @@ impl TerminalView {
 
   fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     use crate::views::terminal_keys::{KeyRoute, route_key};
+    // 右键菜单开着：菜单键（上下/Enter/Esc）先于一切路由，Esc 在
+    // `route_key` 也有兜底，这里全量接管保证键盘与鼠标同一套动作
+    if self.context_menu.is_some() {
+      let items = terminal_context_menu_items(cx);
+      match menu::route_menu_keys(&event.keystroke, &items, &self.context_menu_cursor) {
+        menu::MenuKeyOutcome::Moved => {
+          cx.stop_propagation();
+          cx.notify();
+        }
+        menu::MenuKeyOutcome::Picked(index) => {
+          if let Some(menu::MenuEntry::Item(item)) = items.get(index) {
+            (item.on_pick)(window, cx);
+          }
+          cx.stop_propagation();
+        }
+        menu::MenuKeyOutcome::Close => {
+          self.context_menu = None;
+          cx.stop_propagation();
+          cx.notify();
+        }
+        menu::MenuKeyOutcome::None => {}
+      }
+    }
     // 守卫顺序（确认浮层 → 菜单 → 搜索 → 死会话 → 焦点 → 连接中）在
     // 纯函数里，见 `terminal_keys::route_key`；这里只执行动作
     let route = route_key(
@@ -1393,6 +1419,7 @@ impl TerminalView {
     // 都把右键留给本地菜单。按下不上报，松开与按住移动同样不上报（成对约定）
     if event.button == MouseButton::Right {
       self.context_menu = Some(event.position);
+      self.context_menu_cursor.set(None);
       cx.notify();
       return;
     }
@@ -1707,7 +1734,7 @@ fn render_search_bar(
         tokens.fg_muted
       }))
       .text_size(ui_rems(10.))
-      .cursor(gpui::CursorStyle::PointingHand)
+      .cursor(zhimaterm_base::ui::CLICKABLE)
       .on_click(move |_, _, cx| {
         regex_view.update(cx, |view, cx| view.toggle_search_regex(cx));
       })
@@ -1727,7 +1754,7 @@ fn render_search_bar(
       .id("search-close")
       .flex_none()
       .px(px(4.))
-      .cursor(gpui::CursorStyle::PointingHand)
+      .cursor(zhimaterm_base::ui::CLICKABLE)
       .text_size(ui_rems(11.))
       .text_color(gpui::rgb(tokens.fg_muted))
       .on_click(move |_, window, cx| {
@@ -1743,28 +1770,11 @@ fn render_search_bar(
 fn render_context_menu(
   click: gpui::Point<gpui::Pixels>,
   container: gpui::Size<gpui::Pixels>,
+  cursor: &menu::MenuCursor,
   cx: &mut Context<TerminalView>,
 ) -> Vec<gpui::AnyElement> {
   let tokens = zhimaterm_base::theme::tokens(cx);
-  let split_right = Rc::new(cx.listener(|this, _, window, cx| {
-    this.context_menu = None;
-    window.dispatch_action(SplitRight.boxed_clone(), cx);
-  }));
-  let split_down = Rc::new(cx.listener(|this, _, window, cx| {
-    this.context_menu = None;
-    window.dispatch_action(SplitDown.boxed_clone(), cx);
-  }));
-  let search = Rc::new(cx.listener(|this, _, window, cx| {
-    this.context_menu = None;
-    this.open_search(window, cx);
-  }));
-  let items = vec![
-    menu::MenuEntry::item("水平拆分", split_right),
-    menu::MenuEntry::item("垂直拆分", split_down),
-    // 拆分是布局动作、搜索是内容动作：两类之间用分隔线隔开
-    menu::MenuEntry::Separator,
-    menu::MenuEntry::item("搜索", search),
-  ];
+  let items = terminal_context_menu_items(cx);
   let entity = cx.entity();
   vec![
     menu::context_menu_backdrop(move |_, cx| {
@@ -1774,7 +1784,40 @@ fn render_context_menu(
       });
     })
     .into_any_element(),
-    menu::context_menu(&tokens, "terminal-context-menu", click, container, items).into_any_element(),
+    menu::context_menu(&tokens, "terminal-context-menu", click, container, cursor, items).into_any_element(),
+  ]
+}
+
+/// 菜单条目在渲染与键盘裁决两处共用：键盘 Enter 拾取与鼠标点击跑同一组
+/// 回调，动作语义只有一份。
+fn terminal_context_menu_items(cx: &mut Context<TerminalView>) -> Vec<menu::MenuEntry> {
+  let entity = cx.entity();
+  let split_right = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+    entity.update(cx, |this, cx| {
+      this.context_menu = None;
+      window.dispatch_action(SplitRight.boxed_clone(), cx);
+    });
+  });
+  let entity = cx.entity();
+  let split_down = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+    entity.update(cx, |this, cx| {
+      this.context_menu = None;
+      window.dispatch_action(SplitDown.boxed_clone(), cx);
+    });
+  });
+  let entity = cx.entity();
+  let search = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+    entity.update(cx, |this, cx| {
+      this.context_menu = None;
+      this.open_search(window, cx);
+    });
+  });
+  vec![
+    menu::MenuEntry::item("水平拆分", split_right),
+    menu::MenuEntry::item("垂直拆分", split_down),
+    // 拆分是布局动作、搜索是内容动作：两类之间用分隔线隔开
+    menu::MenuEntry::Separator,
+    menu::MenuEntry::item("搜索", search),
   ]
 }
 
@@ -2160,7 +2203,14 @@ impl TerminalView {
           .context_menu
           .and_then(|click| {
             let bounds = self.container_bounds.get();
-            (bounds.size.width > px(0.)).then(|| render_context_menu(click - bounds.origin, bounds.size, cx))
+            (bounds.size.width > px(0.)).then(|| {
+              render_context_menu(
+                click - bounds.origin,
+                bounds.size,
+                &self.context_menu_cursor.clone(),
+                cx,
+              )
+            })
           })
           .into_iter()
           .flatten(),
@@ -2213,7 +2263,7 @@ impl TerminalView {
     let bounds_state = self.surface_bounds.clone();
     // 悬停到链接上时指针变成手型，其余情况用 worker 给的形状
     let cursor = if self.hovered_link.is_some() {
-      gpui::CursorStyle::PointingHand
+      zhimaterm_base::ui::CLICKABLE
     } else {
       match self.state.data().pointer {
         PointerShape::Arrow => gpui::CursorStyle::Arrow,

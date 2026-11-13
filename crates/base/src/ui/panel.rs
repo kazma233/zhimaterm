@@ -9,13 +9,10 @@
 //! 归它管，不落到具体某个输入框上。
 
 use gpui::prelude::*;
-use gpui::{ClickEvent, CursorStyle, ElementId, FocusHandle, MouseButton, Window, div, px};
+use gpui::{ClickEvent, ElementId, FocusHandle, MouseButton, Window, div, px};
 
 use crate::theme::UiTokens;
-use crate::ui::ui_rems;
-
-/// 按钮类元素统一带小手光标：能点的地方不该让指针保持箭头。
-const CLICKABLE: CursorStyle = CursorStyle::PointingHand;
+use crate::ui::{CLICKABLE, ui_rems};
 
 /// 按钮基座：点击语义与小手光标在这里统一（按下后拖出去松开不触发，按下在
 /// 别处拖进来松开也不触发），外观由调用方在返回的元素上继续叠加。

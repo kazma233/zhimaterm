@@ -1,8 +1,11 @@
 //! 裸键分发：浮层栈顶裁决、结束态会话的 R/Enter，以及侧栏菜单的捕获阶段按键。
 
+use std::rc::Rc;
+
 use gpui::{Context, KeyDownEvent, Window};
 
 use crate::views::terminal_keys::{DeadSessionKey, dead_session_key};
+use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::overlay::{KeyHandling, overlay_host};
 
 use super::{Tab, ZhimaTermApp};
@@ -62,18 +65,34 @@ impl ZhimaTermApp {
     }
   }
 
-  // 侧栏右键菜单开着时的按键：Esc 收菜单。挂在应用根的**捕获**阶段——菜单不
-  /// 持有焦点，焦点仍在终端，冒泡阶段终端会先把 Esc 写进 PTY（它不截停传播），
-  /// 捕获阶段截住才不漏给前台程序；其余按键照常进终端（与终端格菜单同口径）。
-  pub(super) fn capture_sidebar_menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+  // 侧栏右键菜单开着时的按键：上下/Enter/Esc 归菜单，其余照常。挂在应用根的
+  /// **捕获**阶段——菜单不持有焦点，焦点仍在终端，冒泡阶段终端会先把键写进
+  /// PTY（它不截停传播），捕获阶段截住才不漏给前台程序（与终端格菜单同口径）。
+  pub(super) fn capture_sidebar_menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     if self.sidebar_menu.is_none() {
       return;
     }
-    let key = &event.keystroke;
-    if zhimaterm_base::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("escape") {
-      self.sidebar_menu = None;
-      cx.stop_propagation();
-      cx.notify();
+    // 条目表只用于按键裁决（单条「重命名」）：与渲染侧同一份条目集合，
+    // 拾取动作在这里直接执行
+    let noop: menu::MenuPick = Rc::new(|_, _| {});
+    let items = vec![menu::MenuEntry::item("重命名", noop)];
+    match menu::route_menu_keys(&event.keystroke, &items, &self.sidebar_menu_cursor) {
+      menu::MenuKeyOutcome::Moved => {
+        cx.stop_propagation();
+        cx.notify();
+      }
+      menu::MenuKeyOutcome::Picked(_) => {
+        let index = self.sidebar_menu.expect("菜单裁决只在与菜单开着时到达").0;
+        self.sidebar_menu = None;
+        self.open_rename_dialog(index, window, cx);
+        cx.stop_propagation();
+      }
+      menu::MenuKeyOutcome::Close => {
+        self.sidebar_menu = None;
+        cx.stop_propagation();
+        cx.notify();
+      }
+      menu::MenuKeyOutcome::None => {}
     }
   }
 }

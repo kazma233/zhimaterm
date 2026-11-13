@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{Bounds, Corners, Pixels, Window, fill, hsla, point, px, size};
+use gpui::{Bounds, Corners, Hsla, Pixels, Window, fill, point, px, size};
 
 /// 滚动停止后指示条保持显示的时长;配合聚焦/拖选状态由调用方决定显隐
 pub const REVEAL_HOLD: Duration = Duration::from_millis(800);
@@ -15,7 +15,6 @@ const THUMB_THICKNESS: Pixels = px(3.);
 const THUMB_MIN_LENGTH: Pixels = px(24.);
 /// thumb 距视口内缘的间距
 pub const THUMB_INSET: Pixels = px(2.);
-const THUMB_COLOR: gpui::Hsla = hsla(0., 0., 0.35, 0.4);
 
 /// 是否显示:聚焦或拖选中恒显示;否则看最近一次滚动是否还在保持期
 pub fn should_reveal(focused: bool, selecting: bool, last_scroll_at: Option<Instant>) -> bool {
@@ -29,6 +28,7 @@ pub fn paint_vertical(
   viewport: Bounds<Pixels>,
   scroll: Pixels,
   content: Pixels,
+  thumb_color: Hsla,
 ) -> Option<Bounds<Pixels>> {
   let viewport_len = viewport.size.height;
   if content <= viewport_len {
@@ -43,7 +43,7 @@ pub fn paint_vertical(
     point(viewport.right() - THUMB_THICKNESS - THUMB_INSET, y),
     size(THUMB_THICKNESS, thumb_len),
   );
-  paint_thumb(window, bounds);
+  paint_thumb(window, bounds, thumb_color);
   Some(bounds)
 }
 
@@ -53,6 +53,7 @@ pub fn paint_horizontal(
   viewport: Bounds<Pixels>,
   scroll: Pixels,
   content: Pixels,
+  thumb_color: Hsla,
 ) -> Option<Bounds<Pixels>> {
   let viewport_len = viewport.size.width;
   if content <= viewport_len {
@@ -66,12 +67,12 @@ pub fn paint_horizontal(
     point(x, viewport.bottom() - THUMB_THICKNESS - THUMB_INSET),
     size(thumb_len, THUMB_THICKNESS),
   );
-  paint_thumb(window, bounds);
+  paint_thumb(window, bounds, thumb_color);
   Some(bounds)
 }
 
-fn paint_thumb(window: &mut Window, bounds: Bounds<Pixels>) {
-  let mut quad = fill(bounds, THUMB_COLOR);
+fn paint_thumb(window: &mut Window, bounds: Bounds<Pixels>, thumb_color: Hsla) {
+  let mut quad = fill(bounds, thumb_color);
   let radius = THUMB_THICKNESS / 2.;
   quad.corner_radii = Corners::all(radius);
   window.paint_quad(quad);

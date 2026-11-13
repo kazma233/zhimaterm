@@ -32,6 +32,7 @@ use crate::views::terminal_view::TerminalView;
 use crate::views::theme_picker::ThemePicker;
 use crate::workspace::{self, PaneId};
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
+use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView};
 use zhimaterm_connections::connections;
 use zhimaterm_connections::connections::SavedSources;
@@ -105,6 +106,8 @@ pub struct ZhimaTermApp {
   /// 遮罩与浮层挂在应用根部盖住全窗；不入浮层栈——它不持有焦点，与主题
   /// 下拉同为锚定浮层，任何层入栈即收起
   sidebar_menu: Option<(usize, Point<Pixels>)>,
+  /// 侧栏右键菜单的键盘高亮游标：菜单开着期间与 `sidebar_menu` 配对使用
+  sidebar_menu_cursor: menu::MenuCursor,
   /// 保存过的 SSH 连接与读盘错误（ADR-044 实体化）。读走投影、写走冻结
   /// 感知写入口（GLOSSARY「持久化冻结」），外壳不直改字段。独立实体而非
   /// 本实体的字段：连接模态的渲染每帧读它（忘掉/保存后列表要刷新），render
@@ -206,6 +209,7 @@ impl ZhimaTermApp {
       sidebar_width: shell::SIDEBAR_DEFAULT_WIDTH,
       sidebar_resizing: None,
       sidebar_menu: None,
+      sidebar_menu_cursor: Default::default(),
       saved: cx.new(|_| saved_sources),
       theme_picker: ThemePicker::new(),
       #[cfg(windows)]

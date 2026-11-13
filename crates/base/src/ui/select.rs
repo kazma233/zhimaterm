@@ -10,13 +10,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, Pixels, Window, div, px};
+use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, Pixels, Window, div, point, px};
 
 use crate::theme::UiTokens;
-use crate::ui::{CONTROL_HEIGHT, popover_shadow, ui_rems};
-
-/// 按钮类元素统一带小手光标：能点的地方不该让指针保持箭头。
-const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
+use crate::ui::{CLICKABLE, CONTROL_HEIGHT, popover_shadow, ui_rems};
 
 /// 选择框 bounds 槽位：渲染帧写入，展开的浮层按它定位。
 type BoundsSlot = Rc<Cell<Bounds<Pixels>>>;
@@ -131,6 +128,7 @@ pub enum PopoverSide {
 /// 锚定下拉浮层的外壳：定位、边框底色、滚动与点击截断都在这里，行内容由
 /// 调用方注入。宽度是下限：行内容更长（Shell 路径、长字体名）时浮层自然
 /// 撑开，不在行内截断。`id` 要在多次渲染间稳定：滚动位置挂在元素状态上。
+#[allow(clippy::too_many_arguments)]
 pub fn anchored_popover<Row: IntoElement>(
   tokens: &UiTokens,
   id: impl Into<ElementId>,
@@ -138,6 +136,7 @@ pub fn anchored_popover<Row: IntoElement>(
   side: PopoverSide,
   min_width: Pixels,
   max_height: Pixels,
+  scroll: Option<&gpui::ScrollHandle>,
   rows: Vec<Row>,
 ) -> gpui::Stateful<gpui::Div> {
   let popover = div()
@@ -159,6 +158,7 @@ pub fn anchored_popover<Row: IntoElement>(
     .occlude()
     // 浮层截住点击：不冒泡到遮罩（那里点击是收起下拉/关表单）
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    .when_some(scroll, |popover, scroll| popover.track_scroll(scroll))
     .children(rows);
   match side {
     PopoverSide::Below => popover.top(anchor.origin.y + anchor.size.height + px(2.)),
@@ -175,10 +175,13 @@ pub fn select_popover(
   id: impl Into<ElementId>,
   candidates: &[String],
   selected: usize,
+  highlighted: Option<usize>,
   bounds_slot: &BoundsSlot,
   viewport_height: Pixels,
   preview_font: fn(&str) -> gpui::Font,
   display_name: fn(&str) -> &str,
+  scroll: &gpui::ScrollHandle,
+  on_press: PickHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   select_popover_with(
@@ -186,22 +189,29 @@ pub fn select_popover(
     id,
     candidates,
     selected,
+    highlighted,
     bounds_slot,
     viewport_height,
+    scroll,
     move |name| display_name(name).to_owned(),
     move |text, name| text.font(preview_font(name)),
+    on_press,
     on_pick,
   )
 }
 
 /// 无字体预览的选项浮层：选项文字继承界面字体（ADR-036 的 Shell 选择）。
+#[allow(clippy::too_many_arguments)]
 pub fn plain_select_popover(
   tokens: &UiTokens,
   id: impl Into<ElementId>,
   candidates: &[String],
   selected: usize,
+  highlighted: Option<usize>,
   bounds_slot: &BoundsSlot,
   viewport_height: Pixels,
+  scroll: &gpui::ScrollHandle,
+  on_press: PickHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   select_popover_with(
@@ -209,10 +219,13 @@ pub fn plain_select_popover(
     id,
     candidates,
     selected,
+    highlighted,
     bounds_slot,
     viewport_height,
+    scroll,
     str::to_owned,
     |text, _| text,
+    on_press,
     on_pick,
   )
 }
@@ -223,10 +236,13 @@ fn select_popover_with(
   id: impl Into<ElementId>,
   candidates: &[String],
   selected: usize,
+  highlighted: Option<usize>,
   bounds_slot: &BoundsSlot,
   viewport_height: Pixels,
+  scroll: &gpui::ScrollHandle,
   display: impl Fn(&str) -> String,
   style_text: impl Fn(gpui::Div, &str) -> gpui::Div,
+  on_press: PickHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   let anchor = bounds_slot.get();
@@ -239,7 +255,9 @@ fn select_popover_with(
         index,
         &display(name),
         index == selected,
+        highlighted == Some(index),
         &style_text,
+        on_press.clone(),
         on_pick.clone(),
       )
     })
@@ -251,9 +269,95 @@ fn select_popover_with(
     popover_side(anchor, viewport_height, px(200.)),
     anchor.size.width,
     px(200.),
+    Some(scroll),
     rows,
   )
   .into_any_element()
+}
+
+/// 把 `index` 项滚到浮层视口中部：下拉首次打开的落位与拖选自动滚动的
+/// 共用落位（选中项在长列表里可能离顶很远，顶对齐或“最小可见”都找不到
+/// 参照）。项的 bounds 要布局后才有，调用方在下一帧调本函数。offset 语义
+/// 为负值向下滚，夹在滚动范围内。
+///
+/// 返回是否真正应用：项还没布局（bounds 缺失）时返回 false，调用方应等
+/// 下一次绘制后再试，不能把「已定位」标记置上。注意 set_offset 只改滚动
+/// 状态、不弄脏元素树——调用方应用后必须再触发一次重绘，否则偏移要等到
+/// 下一次无关重绘才画出来。
+pub fn center_scroll_on_item(scroll: &gpui::ScrollHandle, index: usize) -> bool {
+  let Some(item) = scroll.bounds_for_item(index) else {
+    return false;
+  };
+  let viewport = scroll.bounds();
+  // 目标：项中心对齐视口中心（项在下方时为负 → 向下滚）
+  let target = viewport.center().y - item.center().y;
+  let max = scroll.max_offset().y;
+  scroll.set_offset(point(px(0.), target.max(-max).min(px(0.))));
+  true
+}
+
+/// 拖选时指针位置的命中：视口内命中具体行；视口上/下方表示该自动滚动。
+/// `bounds_for_item` 是内容坐标（不含滚动偏移），与鼠标事件（窗口坐标）
+/// 比较前先加 `offset().y` 换算成当前绘制位置。
+pub enum DragHit {
+  Item(usize),
+  Above,
+  Below,
+}
+
+pub fn drag_hit(scroll: &gpui::ScrollHandle, position: gpui::Point<Pixels>) -> DragHit {
+  let viewport = scroll.bounds();
+  if position.y < viewport.top() {
+    return DragHit::Above;
+  }
+  if position.y > viewport.bottom() {
+    return DragHit::Below;
+  }
+  let offset = scroll.offset().y;
+  let mut index = 0;
+  while let Some(bounds) = scroll.bounds_for_item(index) {
+    if position.y >= bounds.top() + offset && position.y <= bounds.bottom() + offset {
+      return DragHit::Item(index);
+    }
+    index += 1;
+  }
+  // 视口内但不在任何行上（行间隙/尾部空白）：就近取视口中心项
+  DragHit::Item(nearest_item_to_center(scroll))
+}
+
+/// 视口竖线中心处最近的行下标（空列表返回 0，调用方以候选非空为前提）。
+/// 行的内容坐标加滚动偏移才是当前绘制位置，与视口（窗口坐标）同坐标系比较。
+fn nearest_item_to_center(scroll: &gpui::ScrollHandle) -> usize {
+  let center = scroll.bounds().center().y;
+  let offset = scroll.offset().y;
+  let mut best = (usize::MAX, Pixels::MAX);
+  let mut index = 0;
+  while let Some(bounds) = scroll.bounds_for_item(index) {
+    let distance = (bounds.center().y + offset - center).abs();
+    if distance < best.1 {
+      best = (index, distance);
+    }
+    index += 1;
+  }
+  best.0.min(index.saturating_sub(1))
+}
+
+/// 拖出边缘时的自动滚动一步：从视口中心的行沿方向移一项并把它滚到中部
+/// （高亮项始终保持在列表中心），返回新的高亮下标；到列表尽头、或目标项
+/// 居中到不了（顶/底边缘 offset 被夹住）时返回 None——泵据此停转，不在
+/// 边缘空转重绘。
+pub fn nudge_scroll_to_center(scroll: &gpui::ScrollHandle, up: bool) -> Option<usize> {
+  let current = nearest_item_to_center(scroll);
+  let target = if up {
+    current.checked_sub(1)?
+  } else {
+    let next = current + 1;
+    scroll.bounds_for_item(next)?;
+    next
+  };
+  let before = scroll.offset().y;
+  center_scroll_on_item(scroll, target);
+  (scroll.offset().y != before).then_some(target)
 }
 
 /// 浮层弹出方向：下方连最大高度都放不下、且上方空间更宽裕时向上，其余向下。
@@ -269,15 +373,20 @@ fn popover_side(anchor: Bounds<Pixels>, viewport_height: Pixels, max_height: Pix
   }
 }
 
-/// 选项的一行：选中态高亮；`style_text` 决定文字字体（字体选择用它自己的
-/// 字体渲染作预览，普通选择直接继承界面字体）。
-/// 触发语义与按钮一致：松开在选项内才算。
+/// 选项的一行：选中态高亮，键盘高亮态（`highlighted`）叠 hover 底色；
+/// `style_text` 决定文字字体（字体选择用它自己的字体渲染作预览，普通选择
+/// 直接继承界面字体）。按下即回调 `on_press`（拖选的 armed 起点），拾取统一
+/// 由调用方在松开时裁决——按下后拖到别的行松开也要选中拖到的行，click 语义
+/// （同元素按下+松开）表达不了。
+#[allow(clippy::too_many_arguments)]
 fn option_row(
   tokens: &UiTokens,
   index: usize,
   name: &str,
   selected: bool,
+  highlighted: bool,
   style_text: &impl Fn(gpui::Div, &str) -> gpui::Div,
+  on_press: PickHandler,
   on_pick: PickHandler,
 ) -> gpui::Stateful<gpui::Div> {
   div()
@@ -289,7 +398,14 @@ fn option_row(
     .py(px(4.))
     .rounded(px(4.))
     .bg(gpui::rgb(if selected { tokens.bg_accent } else { tokens.bg_row }))
+    // 键盘高亮与鼠标 hover 同一档底色（bg_hover，列表悬停语义，侧栏/
+    // theme_picker 同款）：行自带 bg_row 底，bg_row_hover 与它只差 0.005
+    // 视觉不可辨。选中项被高亮时底色让给 bg_hover，身份由 ● 标记保留
+    .when(highlighted, |row| row.bg(gpui::rgb(tokens.bg_hover)))
+    .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .cursor(CLICKABLE)
+    .on_mouse_down(MouseButton::Left, move |_, window, cx| on_press(index, window, cx))
+    // 兼容键盘拾取的调用方：无拖选监听时松开在行内即拾取（同元素按下+松开）
     .on_click(move |_, window, cx| on_pick(index, window, cx))
     .child(
       div()
@@ -314,6 +430,80 @@ fn option_row(
 mod tests {
   use super::*;
   use gpui::{point, size};
+
+  /// 拖选几何：`bounds_for_item` 是内容坐标、鼠标是窗口坐标，命中判定
+  /// 必须换算滚动偏移；居中落位按「项中心对齐视口中心」算绝对 offset。
+  #[gpui::test]
+  fn drag_helpers_share_the_painted_coordinate_space(cx: &mut gpui::TestAppContext) {
+    struct Harness {
+      scroll: gpui::ScrollHandle,
+    }
+
+    impl gpui::Render for Harness {
+      fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let mut list = div()
+          .id("scroll-list")
+          .w(px(200.))
+          .h(px(100.))
+          .overflow_y_scroll()
+          .track_scroll(&self.scroll);
+        for index in 0..20 {
+          list = list.child(div().h(px(20.)).child(format!("行 {index}")));
+        }
+        div().p(px(10.)).child(list)
+      }
+    }
+
+    let scroll = gpui::ScrollHandle::new();
+    let handle = scroll.clone();
+    cx.update(|cx| crate::theme::init(None, cx));
+    let window = cx.add_window(move |_, _| Harness { scroll: handle });
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+      .unwrap();
+
+    let viewport = scroll.bounds();
+    assert_eq!(viewport.size.height, px(100.), "滚动容器按声明高度布局");
+    // 视口中心命中某一行（不是平移后的错位项）
+    match drag_hit(&scroll, viewport.center()) {
+      DragHit::Item(index) => {
+        let bounds = scroll.bounds_for_item(index).expect("命中的行有 bounds");
+        let offset = scroll.offset().y;
+        assert!(
+          viewport.center().y >= bounds.top() + offset && viewport.center().y <= bounds.bottom() + offset,
+          "命中行必须真的盖住指针（内容坐标 + 偏移）"
+        );
+      }
+      _ => panic!("视口中心应命中行"),
+    }
+    assert!(matches!(
+      drag_hit(&scroll, gpui::point(viewport.center().x, viewport.top() - px(5.))),
+      DragHit::Above
+    ));
+    assert!(matches!(
+      drag_hit(&scroll, gpui::point(viewport.center().x, viewport.bottom() + px(5.))),
+      DragHit::Below
+    ));
+
+    // 居中：第 10 行的中心被滚到视口中心，偏移量在滚动范围内
+    center_scroll_on_item(&scroll, 10);
+    let item = scroll.bounds_for_item(10).expect("第 10 行有 bounds");
+    let painted_center = item.center().y + scroll.offset().y;
+    assert!(
+      (painted_center - viewport.center().y).abs() < px(1.),
+      "第 10 行应居中：绘制中心 {painted_center:?} vs 视口中心 {:?}",
+      viewport.center().y
+    );
+
+    // 边缘外滚一步：向上到第 9 行、向下到第 11 行；列表尽头返回 None
+    assert_eq!(nudge_scroll_to_center(&scroll, true), Some(9));
+    assert_eq!(nudge_scroll_to_center(&scroll, false), Some(10));
+    center_scroll_on_item(&scroll, 0);
+    assert_eq!(
+      nudge_scroll_to_center(&scroll, true),
+      None,
+      "顶部偏移已被夹在 0，再上滚没有实际位移，泵必须停"
+    );
+  }
 
   /// 贴近窗口底部的选择框向上弹，视口充足时向下；下方放不下但上方更窄时
   /// 仍向下（两个方向都放不下，取空间大的一侧少裁一点）。

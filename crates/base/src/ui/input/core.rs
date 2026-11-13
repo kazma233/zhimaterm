@@ -951,7 +951,11 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
   /// 新增编辑动作只要实现最终走 `replace_text_in_range`(编辑闸门自带
   /// 只读早退),不需要感知只读的存在;undo/redo/cut 不经 replace,
   /// 各自的实现里有同源早退
+  ///
+  /// enter 只有多行框注册:单行框里 newline 是无操作,注册了反而会把按键
+  /// 消费掉——单行框聚焦时 Enter 要让给外层(设置表单的下拉拾取等)
   fn editing_actions(&self, base: Div, cx: &mut Context<Self>) -> Div {
+    let multiline = self.core().multiline;
     base
       .on_action(cx.listener(Self::backspace))
       .on_action(cx.listener(Self::delete))
@@ -961,20 +965,26 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
       .on_action(cx.listener(Self::redo))
       .on_action(cx.listener(Self::handle_paste))
       .on_action(cx.listener(Self::cut))
-      .on_action(cx.listener(Self::newline))
+      .when(multiline, |base| base.on_action(cx.listener(Self::newline)))
   }
 
-  /// 只读与编辑态共用的导航/选择动作:两种状态都要能移动光标、选中并复制
+  /// 只读与编辑态共用的导航/选择动作:两种状态都要能移动光标、选中并复制。
+  /// 上下方向键只有多行框注册:单行框没有纵向光标,注册了只会把按键消费成
+  /// 无操作——单行框聚焦时上下键要让给外层(下拉高亮移动等)
   fn navigation_actions(&self, base: Div, cx: &mut Context<Self>) -> Div {
+    let multiline = self.core().multiline;
     base
       .on_action(cx.listener(Self::left))
       .on_action(cx.listener(Self::right))
-      .on_action(cx.listener(Self::up))
-      .on_action(cx.listener(Self::down))
+      .when(multiline, |base| {
+        base
+          .on_action(cx.listener(Self::up))
+          .on_action(cx.listener(Self::down))
+          .on_action(cx.listener(Self::select_up))
+          .on_action(cx.listener(Self::select_down))
+      })
       .on_action(cx.listener(Self::select_left))
       .on_action(cx.listener(Self::select_right))
-      .on_action(cx.listener(Self::select_up))
-      .on_action(cx.listener(Self::select_down))
       .on_action(cx.listener(Self::select_all))
       .on_action(cx.listener(Self::home))
       .on_action(cx.listener(Self::end))
@@ -2045,10 +2055,11 @@ impl<E: TextWidget> Element for TextElement<E> {
 
     // 滚动指示条:聚焦/拖选中/最近滚动过才显示,内容不超视口时组件内部直接跳过
     if !disabled && scrollbar::should_reveal(focus_handle.is_focused(window), is_selecting, last_scroll_at) {
+      let thumb_color = gpui::rgba(crate::theme::tokens(cx).scrollbar_thumb).into();
       if self.entity.read(cx).core().multiline {
-        scrollbar::paint_vertical(window, bounds, scroll_top, prepaint.content_height);
+        scrollbar::paint_vertical(window, bounds, scroll_top, prepaint.content_height, thumb_color);
       } else {
-        scrollbar::paint_horizontal(window, bounds, scroll_left, prepaint.content_width);
+        scrollbar::paint_horizontal(window, bounds, scroll_left, prepaint.content_width, thumb_color);
       }
     }
 
@@ -2079,6 +2090,59 @@ mod tests {
       let keystroke = format!("{:?}", binding.keystrokes());
       assert!(seen.insert(keystroke.clone()), "重复键位:{keystroke}");
     }
+  }
+
+  /// 单行框聚焦时上下键与 Enter 必须冒泡到外层容器:这些键在单行框里没有
+  /// 光标语义,注册成无操作的动作会把按键消费掉,外层(设置表单的下拉高亮
+  /// 移动/拾取)就永远收不到。多行框的上下键是真实光标语义,被消费是应尽的
+  /// 职责,不进本用例。
+  #[gpui::test]
+  fn single_line_input_releases_vertical_and_enter_keys(cx: &mut gpui::TestAppContext) {
+    use crate::ui::input::TextInput;
+    use std::cell::RefCell;
+
+    let bubbled: std::rc::Rc<RefCell<Vec<String>>> = Default::default();
+
+    struct Harness {
+      input: Entity<TextInput>,
+      bubbled: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+
+    impl gpui::Render for Harness {
+      fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let bubbled = self.bubbled.clone();
+        gpui::div()
+          .id("outer")
+          .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+            bubbled.borrow_mut().push(event.keystroke.key.clone());
+            cx.stop_propagation();
+          })
+          .child(self.input.clone())
+      }
+    }
+
+    cx.update(|cx| {
+      crate::theme::init(None, cx);
+      // 与应用入口同一份键位表(main.rs 注册):不注册绑定时按键不会被
+      // 动作拦截,测不出「单行框把键消费掉」的问题
+      cx.bind_keys(bindings());
+    });
+    let input = cx.new(|cx| TextInput::new(cx, "占位", false, crate::font::terminal_font("monospace")));
+    let window = cx.add_window(|_, _| Harness {
+      input: input.clone(),
+      bubbled: bubbled.clone(),
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+      input.read(cx).focus_handle().focus(window, cx);
+      window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.simulate_keystrokes(window.into(), "down up enter");
+    assert_eq!(
+      bubbled.borrow().iter().map(String::as_str).collect::<Vec<_>>(),
+      &["down", "up", "enter"],
+      "单行框聚焦时上下键与 Enter 应冒泡到外层"
+    );
   }
 
   /// 等宽假布局:每视觉行固定 per_row 字节,位置 = (列×字宽, 视觉行×行高)。

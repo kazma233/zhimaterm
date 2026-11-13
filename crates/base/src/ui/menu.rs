@@ -3,19 +3,16 @@
 //! 终端格（拆分/搜索）与 SFTP（下载/重命名/删除）两处共用；条目动作经回调
 //! 回到调用方实体（`cx.listener` 包一层即得），组件不持有业务状态。
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{
-  App, ClickEvent, ElementId, MouseButton, MouseDownEvent, Pixels, Point, Size, Window, div, point, px, size,
-};
+use gpui::{App, ElementId, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Size, Window, div, point, px, size};
 
 use crate::theme::UiTokens;
-use crate::ui::popover_shadow;
+use crate::ui::overlay::bare_key;
 use crate::ui::ui_rems;
-
-/// 按钮类元素统一带小手光标：能点的地方不该让指针保持箭头。
-const CLICKABLE: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
+use crate::ui::{CLICKABLE, popover_shadow};
 
 /// 菜单固定宽度：条目都是短词，给足中文四字加余量即可。
 const MENU_WIDTH: f32 = 120.0;
@@ -27,8 +24,9 @@ const SEPARATOR_HEIGHT: f32 = 7.0;
 /// 浮层上下各 4px 的内边距合计。
 const MENU_PADDING: f32 = 8.0;
 
-/// 一条菜单项的拾取动作：点中条目后把点击事件回传给调用方执行。
-pub type MenuPick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// 一条菜单项的拾取动作：点击与键盘 Enter 共用同一回调（触发时机在组件内
+/// 保证：点击是松开在条目内，键盘是高亮中的条目）。
+pub type MenuPick = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// 一条菜单项：文案 + 选中后的动作。动作由调用方装配（cx.listener 的输出
 /// `Rc` 一包即可）；触发语义与按钮一致——松开在条目内才算（与原生菜单同）。
@@ -51,6 +49,84 @@ impl MenuEntry {
       label: label.into(),
       on_pick,
     })
+  }
+
+  fn is_item(&self) -> bool {
+    matches!(self, MenuEntry::Item(_))
+  }
+}
+
+/// 键盘高亮游标：条目在 `entries` 里的下标，由调用方持有（菜单开着期间的
+/// 一次性状态，随关闭一起丢弃）。渲染与按键路由都读写同一个槽。
+pub type MenuCursor = Rc<Cell<Option<usize>>>;
+
+/// [`route_menu_keys`] 的裁决结果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum MenuKeyOutcome {
+  /// 高亮移动了一步（含首次进入），调用方刷新视图
+  Moved,
+  /// 裸 Enter 拾取当前高亮条目
+  Picked(usize),
+  /// 裸 Esc 关闭菜单
+  Close,
+  /// 与菜单无关的键
+  None,
+}
+
+/// 从 `from` 出发沿 `step`（+1/-1）找下一个条目下标，跳过分隔线并循环；
+/// `from = None` 时从首端（step=+1）或尾端（step=-1）进入。没有条目时返回 None。
+fn step_item_index(entries: &[MenuEntry], from: Option<usize>, step: isize) -> Option<usize> {
+  if entries.is_empty() {
+    return None;
+  }
+  let len = entries.len() as isize;
+  let mut index = match from {
+    Some(i) => (i as isize + step).rem_euclid(len),
+    None if step > 0 => 0,
+    None => len - 1,
+  };
+  // 环上最多走一圈：一圈内没遇到条目说明全是分隔线（非法菜单），停在原位
+  for _ in 0..len {
+    if entries[index as usize].is_item() {
+      return Some(index as usize);
+    }
+    index = (index + step).rem_euclid(len);
+  }
+  None
+}
+
+/// 菜单开着期间的键盘裁决：Up/Down 循环移动高亮（跳过分隔线），裸 Enter
+/// 拾取高亮条目，裸 Esc 关闭；其余键原样放行。游标变更直接写进 `cursor`，
+/// 调用方按 [`MenuKeyOutcome`] 刷新或执行。纯逻辑，可单测。
+pub fn route_menu_keys(key: &Keystroke, entries: &[MenuEntry], cursor: &MenuCursor) -> MenuKeyOutcome {
+  if !bare_key(key) {
+    return MenuKeyOutcome::None;
+  }
+  match key.key.as_str() {
+    "down" => {
+      let next = step_item_index(entries, cursor.get(), 1);
+      if next.is_some_and(|i| Some(i) != cursor.get()) {
+        cursor.set(next);
+        MenuKeyOutcome::Moved
+      } else {
+        MenuKeyOutcome::None
+      }
+    }
+    "up" => {
+      let next = step_item_index(entries, cursor.get(), -1);
+      if next.is_some_and(|i| Some(i) != cursor.get()) {
+        cursor.set(next);
+        MenuKeyOutcome::Moved
+      } else {
+        MenuKeyOutcome::None
+      }
+    }
+    "enter" => match cursor.get().filter(|&i| entries[i].is_item()) {
+      Some(i) => MenuKeyOutcome::Picked(i),
+      None => MenuKeyOutcome::None,
+    },
+    "escape" => MenuKeyOutcome::Close,
+    _ => MenuKeyOutcome::None,
   }
 }
 
@@ -98,12 +174,15 @@ pub fn context_menu_backdrop(on_dismiss: impl Fn(&mut Window, &mut App) + 'stati
 }
 
 /// 指针处弹出的菜单浮层：定位夹取、外观与点击截断在这里，条目由调用方注入。
-/// `click` 是指针在挂载容器坐标系里的位置（窗口坐标减容器 origin）。
+/// `click` 是指针在挂载容器坐标系里的位置（窗口坐标减容器 origin）。`cursor`
+/// 是键盘高亮游标（见 [`route_menu_keys`]）；键盘高亮与鼠标 hover 同用
+/// `bg_row_hover`，两路高亮互不写对方的状态。
 pub fn context_menu(
   tokens: &UiTokens,
   id: impl Into<ElementId>,
   click: Point<Pixels>,
   container: Size<Pixels>,
+  cursor: &MenuCursor,
   items: Vec<MenuEntry>,
 ) -> gpui::Stateful<gpui::Div> {
   let position = clamped_menu_position(click, container, menu_size(&items));
@@ -120,8 +199,11 @@ pub fn context_menu(
         .cursor(CLICKABLE)
         .text_size(ui_rems(11.))
         .text_color(gpui::rgb(tokens.fg))
+        .when_some(cursor.get().filter(|&i| i == index), |row, _| {
+          row.bg(gpui::rgb(tokens.bg_row_hover))
+        })
         .hover(|style| style.bg(gpui::rgb(tokens.bg_row_hover)))
-        .on_click(move |event, window, cx| (item.on_pick)(event, window, cx))
+        .on_click(move |_, window, cx| (item.on_pick)(window, cx))
         .child(item.label)
         .into_any_element(),
       MenuEntry::Separator => div()
@@ -157,14 +239,15 @@ pub fn context_menu(
 mod tests {
   use std::rc::Rc;
 
-  use gpui::{App, ClickEvent, Window, point, px, size};
+  use gpui::{App, Window, point, px, size};
 
   use super::{
-    ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, MenuEntry, MenuPick, SEPARATOR_HEIGHT, clamped_menu_position, menu_size,
+    ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, MenuCursor, MenuEntry, MenuKeyOutcome, MenuPick, SEPARATOR_HEIGHT,
+    clamped_menu_position, menu_size, route_menu_keys,
   };
 
   fn test_pick() -> MenuPick {
-    Rc::new(|_: &ClickEvent, _: &mut Window, _: &mut App| {})
+    Rc::new(|_: &mut Window, _: &mut App| {})
   }
 
   fn three_item_entries() -> Vec<MenuEntry> {
@@ -228,5 +311,75 @@ mod tests {
     ];
     let size = menu_size(&entries);
     assert_eq!(size.height, px(MENU_PADDING + 2.0 * ITEM_HEIGHT + SEPARATOR_HEIGHT));
+  }
+
+  fn key(input: &'static str) -> gpui::Keystroke {
+    gpui::Keystroke::parse(input).expect("测试键位可解析")
+  }
+
+  #[test]
+  fn arrow_keys_step_and_wrap_skipping_separators() {
+    // 甲 | 乙 丙：down 从 None 进入甲，再 down 跳过分隔线到乙，up 回到甲，
+    // up 从甲循环到丙（跳过分隔线）
+    let entries = vec![
+      MenuEntry::item("甲", test_pick()),
+      MenuEntry::Separator,
+      MenuEntry::item("乙", test_pick()),
+      MenuEntry::item("丙", test_pick()),
+    ];
+    let cursor: MenuCursor = Default::default();
+
+    assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(cursor.get(), Some(0));
+    assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(cursor.get(), Some(2));
+    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(cursor.get(), Some(0));
+    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(cursor.get(), Some(3));
+  }
+
+  #[test]
+  fn up_from_none_enters_from_the_end() {
+    let entries = three_item_entries();
+    let cursor: MenuCursor = Default::default();
+    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(cursor.get(), Some(2));
+  }
+
+  #[test]
+  fn enter_picks_the_highlighted_item_only() {
+    let entries = three_item_entries();
+    let cursor: MenuCursor = Default::default();
+    // 没有高亮时 Enter 不属于菜单
+    assert_eq!(route_menu_keys(&key("enter"), &entries, &cursor), MenuKeyOutcome::None);
+    route_menu_keys(&key("down"), &entries, &cursor);
+    assert_eq!(
+      route_menu_keys(&key("enter"), &entries, &cursor),
+      MenuKeyOutcome::Picked(0)
+    );
+  }
+
+  #[test]
+  fn escape_closes_and_other_keys_pass_through() {
+    let entries = three_item_entries();
+    let cursor: MenuCursor = Default::default();
+    assert_eq!(
+      route_menu_keys(&key("escape"), &entries, &cursor),
+      MenuKeyOutcome::Close
+    );
+    // 带修饰的键不是菜单键，终端等下层焦点继续处理
+    assert_eq!(route_menu_keys(&key("ctrl-c"), &entries, &cursor), MenuKeyOutcome::None);
+    assert_eq!(route_menu_keys(&key("a"), &entries, &cursor), MenuKeyOutcome::None);
+  }
+
+  #[test]
+  fn single_item_menu_ignores_arrow_keys() {
+    let entries = vec![MenuEntry::item("仅一条", test_pick())];
+    let cursor: MenuCursor = Default::default();
+    assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::Moved);
+    assert_eq!(route_menu_keys(&key("down"), &entries, &cursor), MenuKeyOutcome::None);
+    assert_eq!(route_menu_keys(&key("up"), &entries, &cursor), MenuKeyOutcome::None);
+    assert_eq!(cursor.get(), Some(0));
   }
 }

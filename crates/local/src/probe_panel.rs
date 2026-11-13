@@ -300,7 +300,7 @@ impl ProbePanelView {
             // 整行可点开端口详情，交互与进程行同款
             div()
               .id(format!("probe-port-row-{port_no}-{pid}"))
-              .cursor(gpui::CursorStyle::PointingHand)
+              .cursor(zhimaterm_base::ui::CLICKABLE)
               .hover(move |style| style.bg(gpui::rgb(palette.bg_row_hover)))
               .when(selected, |row| row.bg(gpui::rgb(palette.bg_hover)))
               .on_click(cx.listener(move |panel, _, _, cx| {
@@ -594,7 +594,7 @@ fn render_process_row(
   let rss = process.rss_bytes.map(human_bytes).unwrap_or_else(|| "—".to_owned());
   let mut row = div()
     .id(("probe-process-row", pid))
-    .cursor(gpui::CursorStyle::PointingHand)
+    .cursor(zhimaterm_base::ui::CLICKABLE)
     .hover(move |style| style.bg(gpui::rgb(palette.bg_row_hover)))
     .when(selected, |row| row.bg(gpui::rgb(palette.bg_hover)))
     .on_click(cx.listener(move |panel, _, _, cx| {
@@ -799,7 +799,7 @@ fn detail_field(
       // 同 id 的元素共用一份，mouse_up 时被别的字段先取走，点击就丢了
       div()
         .id(ElementId::Name(format!("probe-detail-{label}").into()))
-        .cursor(gpui::CursorStyle::PointingHand)
+        .cursor(zhimaterm_base::ui::CLICKABLE)
         .rounded(px(3.))
         .hover(move |style| style.bg(gpui::rgb(palette.bg_row_hover)))
         .on_click(cx.listener(move |panel, _, _, cx| {

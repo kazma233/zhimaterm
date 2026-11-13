@@ -117,7 +117,7 @@ pub fn status_chip(
     .text_size(ui_rems(10.))
     .bg(gpui::rgb(bg))
     .text_color(gpui::rgb(fg))
-    .cursor(gpui::CursorStyle::PointingHand)
+    .cursor(zhimaterm_base::ui::CLICKABLE)
     .child(label.to_owned())
 }
 
@@ -927,6 +927,7 @@ pub fn header_button(
 fn shortcuts_button(tokens: &UiTokens, on_open: WindowAction) -> gpui::Stateful<gpui::Div> {
   header_button(tokens, "shortcuts-entry", move |_, window, cx| on_open(window, cx))
     .text_size(ui_rems(11.))
+    .tooltip(zhimaterm_base::ui::tooltip::tip("快捷键"))
     .child("?")
 }
 

@@ -514,7 +514,7 @@ pub fn render_area(
           .bg(gpui::rgb(tokens.bg_row))
           .text_size(ui_rems(10.))
           .text_color(gpui::rgb(tokens.fg_muted))
-          .cursor(gpui::CursorStyle::PointingHand)
+          .cursor(zhimaterm_base::ui::CLICKABLE)
           .hover(|style| {
             style
               .bg(gpui::rgb(tokens.bg_danger))

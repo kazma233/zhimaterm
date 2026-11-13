@@ -23,6 +23,7 @@ use zhimaterm_base::ui::card;
 use zhimaterm_base::ui::input::{self, TextInput};
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView, Species};
 use zhimaterm_base::ui::panel;
+use zhimaterm_base::ui::select;
 use zhimaterm_base::ui::select::{plain_select_popover, plain_select_row, select_backdrop, select_popover, select_row};
 use zhimaterm_base::ui::{DEFAULT_UI_FONT_SIZE, WindowAction, ui_rems};
 use zhimaterm_terminal::backend::BackendKind;
@@ -167,6 +168,19 @@ pub struct SettingsForm {
   backend: DropdownState,
   /// 展开着的下拉：单值即互斥（同一时间最多一个）
   open: Option<DropdownField>,
+  /// 展开下拉里的键盘高亮下标：打开时落在当前选中项上，Up/Down 移动，
+  /// Enter 拾取；收起即失效（重新展开重置回选中项）
+  highlight: Option<usize>,
+  /// 展开下拉的滚动控制：打开周期内第一帧布局后把选中项滚到浮层中部
+  dropdown_scroll: gpui::ScrollHandle,
+  /// 本打开周期是否已做过「选中项居中」定位：项 bounds 布局后才有，
+  /// 只能下一帧做，标记防止每帧重复定位
+  scroll_centered: bool,
+  /// 拖选中：某行的按下已发生、松开尚未发生。期间指针位置驱动高亮，
+  /// 拖出列表上/下边缘时逐帧自动滚动（高亮项保持居中），松开拾取高亮项
+  dropdown_dragging: bool,
+  /// 拖选期间最近一次指针位置（窗口坐标）：自动滚动泵在指针静止时也要继续
+  drag_pos: gpui::Point<gpui::Pixels>,
 }
 
 impl SettingsForm {
@@ -242,6 +256,11 @@ impl SettingsForm {
       editor: DropdownState::new(editor_index),
       backend: DropdownState::new(backend_index),
       open: None,
+      highlight: None,
+      dropdown_scroll: Default::default(),
+      scroll_centered: false,
+      dropdown_dragging: false,
+      drag_pos: Default::default(),
     }
   }
 
@@ -330,9 +349,63 @@ impl SettingsForm {
   }
 
   /// 展开一个下拉：同一时间最多展开一个，展开了就收起其他；再点自己收起。
+  /// 展开时键盘高亮落在当前选中项上：不开高亮直接 Enter 应该是「维持现状」
+  /// 而不是应用整个表单。
   pub fn toggle_dropdown(&mut self, field: DropdownField, cx: &mut Context<Self>) {
     self.open = if self.open == Some(field) { None } else { Some(field) };
+    self.highlight = self.open.map(|field| self.selected_of(field));
+    self.scroll_centered = false;
     cx.notify();
+  }
+
+  fn selected_of(&self, field: DropdownField) -> usize {
+    match field {
+      DropdownField::Terminal => self.terminal.selected,
+      DropdownField::Interface => self.interface.selected,
+      DropdownField::Shell => self.shell.selected,
+      DropdownField::Editor => self.editor.selected,
+      DropdownField::Backend => self.backend.selected,
+    }
+  }
+
+  /// 展开下拉的候选（与 floaters 的装配同一口径，含空候选守卫）；
+  /// 没有展开的下拉时返回 None。
+  fn open_candidates(&self) -> Option<Vec<String>> {
+    match self.open? {
+      DropdownField::Terminal if !self.candidates.is_empty() => Some(self.candidates.clone()),
+      DropdownField::Interface if self.ui_candidates.len() > 1 => Some(self.ui_candidates.clone()),
+      DropdownField::Shell => Some(self.shell_labels()),
+      DropdownField::Editor => Some(self.editor_labels()),
+      DropdownField::Backend => Some(self.backend_labels()),
+      // 空候选（没有等宽字体/系统字体）时没有浮层可展，也无键可裁
+      _ => None,
+    }
+  }
+
+  /// 展开的下拉里移动键盘高亮：循环，空候选不动。
+  pub fn move_dropdown_highlight(&mut self, step: isize, cx: &mut Context<Self>) {
+    let Some(candidates) = self.open_candidates() else {
+      return;
+    };
+    if candidates.is_empty() {
+      return;
+    }
+    let field = self.open.expect("open_candidates 已确认有展开的下拉");
+    let current = self.highlight.unwrap_or_else(|| self.selected_of(field));
+    let next = (current as isize + step).rem_euclid(candidates.len() as isize) as usize;
+    self.highlight = Some(next);
+    // 高亮项滚进视口（最小滚动量）：长列表里键盘移动不能走出可视区
+    self.dropdown_scroll.scroll_to_item(next);
+    cx.notify();
+  }
+
+  /// 拾取展开下拉里的键盘高亮项（无高亮时取当前选中项）：记录选择并收起。
+  pub fn pick_highlighted(&mut self, cx: &mut Context<Self>) {
+    let Some(field) = self.open else {
+      return;
+    };
+    let index = self.highlight.unwrap_or_else(|| self.selected_of(field));
+    self.pick(field, index, cx);
   }
 
   /// 在展开的下拉里选中一项：记录选择并收起；生效仍由「应用」触发。
@@ -356,6 +429,7 @@ impl SettingsForm {
   /// 收起所有下拉。
   pub fn close_dropdowns(&mut self, cx: &mut Context<Self>) {
     self.open = None;
+    self.dropdown_dragging = false;
     cx.notify();
   }
 
@@ -892,10 +966,10 @@ impl ModalView for SettingsModal {
   /// 展开时的选项浮层挂在遮罩层里、卡片之后（ADR-044 经 floaters 接入）：
   /// 不受卡片 overflow_hidden 裁剪，也画在卡片上层。下拉互斥，同一时间
   /// 最多一个浮层。浮层弹出方向按视口高判定：下方放不下时贴选择框上方展开。
-  fn floaters(&self, _window: &Window, cx: &App) -> Vec<AnyElement> {
+  fn floaters(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
     let tokens = &zhimaterm_base::theme::tokens(cx);
     let form = self.form.read(cx);
-    let viewport_height = _window.viewport_size().height;
+    let viewport_height = window.viewport_size().height;
 
     // 展开着的下拉只有一个（单值 `open`）：候选、选中项、锚点与是否
     // 按候选字体预览都在这里取一次，浮层装配只有一份
@@ -937,9 +1011,44 @@ impl ModalView for SettingsModal {
       _ => return Vec::new(),
     };
 
+    let highlighted = form.highlight;
+    // 把选中项滚到浮层中部：项 bounds 布局后才有，只能推迟到下一帧的开头
+    // （gpui 的 next-frame 回调在 draw 之前跑）。两点必须同时照顾：
+    // - set_offset 不弄脏元素树，应用后要 notify 一次强制重绘，否则偏移
+    //   要等下一次无关重绘才画出来（表现为「hover 一下才居中」）；
+    // - bounds 尚未布局时本次定位无效，不能置「已定位」标记，notify 触发
+    //   下一次 render 重新排定位
+    if !form.scroll_centered {
+      let form_entity = self.form.clone();
+      let scroll = form.dropdown_scroll.clone();
+      let candidate_count = candidates.len();
+      window.on_next_frame(move |_, cx| {
+        form_entity.update(cx, |form, cx| {
+          if form.scroll_centered {
+            return;
+          }
+          // 选中下标越界（防御）：不再等待 bounds，避免每帧重排的活锁
+          let applied = selected >= candidate_count || select::center_scroll_on_item(&scroll, selected);
+          if applied {
+            form.scroll_centered = true;
+          }
+          cx.notify();
+        });
+      });
+    }
+    let scroll = form.dropdown_scroll.clone();
     let pick_form = self.form.clone();
     let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
       pick_form.update(cx, |form, cx| form.pick(field, index, cx));
+    });
+    // 按下即进入拖选：高亮落在按下项，松开由拖选监听统一裁决拾取
+    let press_form = self.form.clone();
+    let press = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
+      press_form.update(cx, |form, cx| {
+        form.highlight = Some(index);
+        form.dropdown_dragging = true;
+        cx.notify();
+      });
     });
     let close_form = self.form.clone();
     let backdrop = select_backdrop(move |_, cx| {
@@ -952,10 +1061,13 @@ impl ModalView for SettingsModal {
         field.popover_id(),
         &candidates,
         selected,
+        highlighted,
         &bounds,
         viewport_height,
         preview_font,
         font_display_name,
+        &scroll,
+        press,
         pick,
       ),
       None => plain_select_popover(
@@ -963,26 +1075,96 @@ impl ModalView for SettingsModal {
         field.popover_id(),
         &candidates,
         selected,
+        highlighted,
         &bounds,
         viewport_height,
+        &scroll,
+        press,
         pick,
       ),
     };
-    vec![backdrop, popover.into_any_element()]
+    let mut layers = vec![backdrop, popover.into_any_element()];
+    // 拖选期间的全局鼠标监听：移动更新指针位置与视口内高亮，松开拾取
+    // 高亮项（按下后拖到别的行松开也选中拖到的行，click 语义表达不了）。
+    // 监听挂在按下后的下一帧：按下那帧还没有监听可挂
+    if form.dropdown_dragging {
+      let move_form = self.form.clone();
+      let up_form = self.form.clone();
+      layers.push(zhimaterm_base::ui::canvas::mouse_listener_canvas(
+        move |event: &gpui::MouseMoveEvent, _, cx| {
+          move_form.update(cx, |form, cx| {
+            form.drag_pos = event.position;
+            if let select::DragHit::Item(index) = select::drag_hit(&form.dropdown_scroll, form.drag_pos) {
+              form.highlight = Some(index);
+            }
+            // 每次移动都重绘：自动滚动泵靠「渲染 → floaters 再排下一帧」
+            // 续命，指针回到视口内时也靠这次重绘停泵
+            cx.notify();
+          });
+        },
+        move |_: &gpui::MouseUpEvent, _, cx| {
+          up_form.update(cx, |form, cx| form.pick_highlighted(cx));
+        },
+      ));
+      // 自动滚动泵：指针停在视口外时没有新的移动事件，滚动必须逐帧驱动；
+      // 每步把高亮项滚到视口中部，指针回视口内或拖选结束即停。排下一帧
+      // 依赖本帧渲染（render → floaters 再排），视口内则不再排
+      let viewport = form.dropdown_scroll.bounds();
+      if form.drag_pos.y < viewport.top() || form.drag_pos.y > viewport.bottom() {
+        let pump_form = self.form.clone();
+        let up = form.drag_pos.y < viewport.top();
+        window.on_next_frame(move |_, cx| {
+          pump_form.update(cx, |form, cx| {
+            if !form.dropdown_dragging {
+              return;
+            }
+            // 指针可能已回到视口内（移动事件先于本回调更新 drag_pos）
+            let viewport = form.dropdown_scroll.bounds();
+            if form.drag_pos.y >= viewport.top() && form.drag_pos.y <= viewport.bottom() {
+              return;
+            }
+            if let Some(index) = select::nudge_scroll_to_center(&form.dropdown_scroll, up) {
+              form.highlight = Some(index);
+              cx.notify();
+            }
+          });
+        });
+      }
+    }
+    layers
   }
 
-  /// 下拉展开时 Esc 先收下拉，再按一次才关表单；Enter 应用。
+  /// 下拉展开时上下键移动键盘高亮、Enter 拾取高亮项、Esc 先收下拉，再按一次
+  /// 才关表单；没有下拉展开时 Enter 应用整个表单。
   fn key_action(&self, key: &Keystroke, cx: &App) -> KeyHandling {
-    if zhimaterm_base::ui::overlay::bare_key(key)
-      && key.key.eq_ignore_ascii_case("escape")
-      && self.form.read(cx).dropdown_open()
-    {
-      let form = self.form.clone();
-      return KeyHandling::Action(Rc::new(move |_, cx| {
-        form.update(cx, |form, cx| form.close_dropdowns(cx));
-      }));
+    if !zhimaterm_base::ui::overlay::bare_key(key) {
+      return zhimaterm_base::ui::overlay::default_key_action(key);
     }
-    if zhimaterm_base::ui::overlay::bare_key(key) && key.key.eq_ignore_ascii_case("enter") {
+    if self.form.read(cx).dropdown_open() {
+      match key.key.as_str() {
+        "down" | "up" => {
+          let step = if key.key == "down" { 1 } else { -1 };
+          let form = self.form.clone();
+          return KeyHandling::Action(Rc::new(move |_, cx| {
+            form.update(cx, |form, cx| form.move_dropdown_highlight(step, cx));
+          }));
+        }
+        "enter" => {
+          let form = self.form.clone();
+          return KeyHandling::Action(Rc::new(move |_, cx| {
+            form.update(cx, |form, cx| form.pick_highlighted(cx));
+          }));
+        }
+        "escape" => {
+          let form = self.form.clone();
+          return KeyHandling::Action(Rc::new(move |_, cx| {
+            form.update(cx, |form, cx| form.close_dropdowns(cx));
+          }));
+        }
+        _ => return KeyHandling::None,
+      }
+    }
+    if key.key.eq_ignore_ascii_case("enter") {
       let apply = self.actions.apply.clone();
       return KeyHandling::Action(Rc::new(move |window, cx| apply(window, cx)));
     }

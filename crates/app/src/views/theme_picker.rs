@@ -68,12 +68,14 @@ pub fn entry(tokens: &UiTokens, picker: &ThemePicker, actions: &PickerActions, c
     .items_center()
     .px(px(2.))
     .rounded(px(4.))
-    .cursor(gpui::CursorStyle::PointingHand)
+    .cursor(zhimaterm_base::ui::CLICKABLE)
     .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .on_click({
       let toggle = actions.toggle.clone();
       move |_, _, cx| toggle(cx)
     })
+    // 入口只有色板没有名字：主题名由 tooltip 补上（名字在展开的下拉项里看）
+    .tooltip(zhimaterm_base::ui::tooltip::tip(current(cx).name))
     // bounds 在渲染帧写进槽位：展开的浮层按它定位到正上方
     .child(canvas::bounds_recorder(picker.bounds.clone()))
     .child(swatch(tokens, &scheme))
@@ -110,6 +112,7 @@ pub fn layers(
       PopoverSide::Above { viewport_height },
       px(230.),
       px(420.),
+      None,
       rows,
     )
     .into_any_element(),
@@ -139,7 +142,7 @@ fn row(
     .flex()
     .items_center()
     .gap_x(px(7.))
-    .cursor(gpui::CursorStyle::PointingHand)
+    .cursor(zhimaterm_base::ui::CLICKABLE)
     .bg(gpui::rgb(if active { tokens.bg_hover } else { tokens.bg_panel }))
     .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .on_click({
