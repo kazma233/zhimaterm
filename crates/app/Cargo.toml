@@ -34,6 +34,10 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSGeometry",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+# 目录选择对话框（WSL 安装位置）：原生文件对话框，仅 Windows 接入
+rfd = "0.15"
+
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 

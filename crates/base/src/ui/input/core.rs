@@ -1045,8 +1045,8 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
         gpui::rgb(border)
       })
       .rounded(px(5.))
-      .px(px(super::PADDING_X))
-      .py(px(super::PADDING_Y))
+      .px(crate::ui::ui_rems(super::PADDING_X))
+      .py(crate::ui::ui_rems(super::PADDING_Y))
       .line_height(crate::ui::ui_rems(super::LINE_HEIGHT))
       .text_size(crate::ui::ui_rems(super::FONT_SIZE))
       .text_color(gpui::rgb(text_color));
@@ -1069,15 +1069,23 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
         .navigation_actions(base, cx)
         .track_focus(&focus_handle)
         .cursor(CursorStyle::IBeam)
-        .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-        .on_scroll(cx.listener(Self::handle_scroll_wheel));
+        .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down));
+      // 单行输入框没有纵向滚动面,不注册滚轮处理——滚轮放行给外层滚动
+      // 容器(浮层内容滚动);gpui 的滚轮派发给指针下最内层注册者,输入框
+      // 抢走后浮层就滚不动。多行才需要输入框自己滚文本
+      if self.core().multiline {
+        base = base.on_scroll(cx.listener(Self::handle_scroll_wheel));
+      }
     } else {
-      base = self
-        .editing_actions(self.navigation_actions(base, cx), cx)
+      base = self.editing_actions(self.navigation_actions(base, cx), cx);
+      base = base
         .track_focus(&focus_handle)
         .cursor(CursorStyle::IBeam)
-        .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-        .on_scroll(cx.listener(Self::handle_scroll_wheel));
+        .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down));
+      // 同上:单行不注册滚轮,放行外层
+      if self.core().multiline {
+        base = base.on_scroll(cx.listener(Self::handle_scroll_wheel));
+      }
     }
     base
   }
@@ -1978,7 +1986,7 @@ impl<E: TextWidget> Element for TextElement<E> {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (focus_handle, disabled, read_only, scroll_top, scroll_left, is_selecting, last_scroll_at) = {
+    let (focus_handle, disabled, read_only, scroll_top, scroll_left, is_selecting, last_scroll_at, has_content) = {
       let core = self.entity.read(cx).core();
       (
         core.focus_handle.clone(),
@@ -1988,6 +1996,7 @@ impl<E: TextWidget> Element for TextElement<E> {
         core.scroll_left,
         core.is_selecting,
         core.last_scroll_at,
+        !core.content.is_empty(),
       )
     };
     // 禁用的输入框不接管输入:即便它在禁用前已聚焦,IME 组合也写不进内容;
@@ -2053,8 +2062,13 @@ impl<E: TextWidget> Element for TextElement<E> {
       window.paint_quad(cursor);
     }
 
-    // 滚动指示条:聚焦/拖选中/最近滚动过才显示,内容不超视口时组件内部直接跳过
-    if !disabled && scrollbar::should_reveal(focus_handle.is_focused(window), is_selecting, last_scroll_at) {
+    // 滚动指示条:聚焦/拖选中/最近滚动过才显示,内容不超视口时组件内部直接跳过。
+    // 占位文案(空内容的 placeholder 与掩码星号示意)不是内容:超宽直接被
+    // 容器裁掉,不出滚动指示,否则填写提示看起来像有横向内容可滚
+    if !disabled
+      && has_content
+      && scrollbar::should_reveal(focus_handle.is_focused(window), is_selecting, last_scroll_at)
+    {
       let thumb_color = gpui::rgba(crate::theme::tokens(cx).scrollbar_thumb).into();
       if self.entity.read(cx).core().multiline {
         scrollbar::paint_vertical(window, bounds, scroll_top, prepaint.content_height, thumb_color);

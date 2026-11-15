@@ -28,9 +28,11 @@ use gpui::{div, px};
 
 use super::ui_rems;
 
-/// 输入框内边距。光标定位、点击命中和 IME 候选窗位置都要把它算进去。
-pub(crate) const PADDING_X: f32 = 8.0;
-pub(crate) const PADDING_Y: f32 = 5.0;
+/// 输入框内边距（设计单位，随界面字号缩放——与 CONTROL_HEIGHT 同基，
+/// 字号变大时框与留白一起变大，不会出现文字挤边）。光标定位、点击命中
+/// 和 IME 候选窗位置经布局反查，不直接引用这里的值。
+pub(crate) const PADDING_X: f32 = 6.0;
+pub(crate) const PADDING_Y: f32 = 3.0;
 
 /// 文本行高（设计单位，随界面字号缩放）：单行控件垂直居中，多行逐行排布。
 pub(crate) const LINE_HEIGHT: f32 = 17.0;
@@ -45,6 +47,18 @@ pub fn field(
   tokens: &crate::theme::UiTokens,
   cx: &gpui::App,
   label: &str,
+  input: &gpui::Entity<TextInput>,
+) -> gpui::Div {
+  field_with_hint(tokens, cx, label, None, input)
+}
+
+/// [`field`] 的标签提示槽位版：`hint` 是挂在标签右侧的任意元素（如「这是
+/// 默认值」徽标）；输入框有校验错误时错误优先显示，提示让位。
+pub fn field_with_hint(
+  tokens: &crate::theme::UiTokens,
+  cx: &gpui::App,
+  label: &str,
+  hint: Option<gpui::AnyElement>,
   input: &gpui::Entity<TextInput>,
 ) -> gpui::Div {
   let mut head = div().flex().items_center().gap(px(6.)).child(
@@ -63,6 +77,8 @@ pub fn field(
         .text_color(gpui::rgb(tokens.danger))
         .child(error.to_owned()),
     );
+  } else if let Some(hint) = hint {
+    head = head.child(hint);
   }
   div().flex().flex_col().gap(px(3.)).child(head).child(input.clone())
 }

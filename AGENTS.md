@@ -24,6 +24,7 @@ crates/app          zhimaterm-app          外壳与视图（workspace 唯一 bi
                     app/                    mod / sessions / workspace_io / modals / keys / render
                     views/                  跨业务共享渲染件（grid、terminal_view、sftp_panel、panes、
                                             session_state、terminal_keys、shell、theme_picker）
+                                            与业务专属视图（wsl_page，ADR-056，仅 Windows）
                     settings/、workspace.rs  余留域（依赖图顶端或只被外壳消费）
                     main.rs                 入口
 ```

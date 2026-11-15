@@ -56,7 +56,7 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
 - `zhimaterm-local`
   - `gpui`：本地探针面板；`anyhow`：错误链；`smol`：探针的事件通道。
   - Unix `libc`：PTY 与 cwd 采集。
-  - Windows `windows-registry`：WSL 发行版枚举（ADR-021）；`windows-sys` 的
+  - Windows `windows-registry`：WSL 分发版枚举（ADR-021）；`windows-sys` 的
     Console/ToolHelp/PEB 等 feature：ConPTY 调用、进程探针，同时服务
     `pty_probe` 探针二进制（`src/bin/`）。
   - dev `gpui`（`test-support`）。
@@ -108,7 +108,7 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
 - 测试分层：小型单元测试随模块内联（`#[cfg(test)] mod tests`，不需要外部环境，`cargo test` 直接跑）；
   **依赖真实 PTY/sshd 的重量级用例集中在 [`crates/session/src/tests/`](../../crates/session/src/tests/)**，全部 `#[ignore]` 门控：
   - 会话端到端：`cargo test -p zhimaterm-session --lib "tests::session_e2e::ssh" -- --ignored --test-threads=1`（先按 [runbooks/ssh-e2e](../runbooks/ssh-e2e.md) 起 sshd）。
-  - WSL 会话端到端：`set ZHIMATERM_WSL_DISTRO=<发行版名> && cargo test wsl_session -- --ignored`（验证进入指定发行版、落在 Linux home、退出即收，ADR-021）。
+  - WSL 会话端到端：`set ZHIMATERM_WSL_DISTRO=<分发版名> && cargo test wsl_session -- --ignored`（验证进入指定分发版、落在 Linux home、退出即收，ADR-021）。
   - 性能验收：见 [runbooks/perf-acceptance](../runbooks/perf-acceptance.md)（必须 `--release`）。
 - 录制流回归：`crates/terminal/src/replay.rs` 按真实读取节奏回放字节流，检查我们自己那层的不变量（快照的段宽自洽、连续快照一致、回看不越界、选区可复制）。默认跑文件内的确定性语料；外部录制（例如 `alacritty_terminal` 自带的 `tests/ref/*/alacritty.recording`）用：
 
@@ -180,7 +180,10 @@ shells.rs                  系统 Shell 候选列表（/etc/shells 或 PATH 探�
 pty/                       自研本地 PTY（ADR-025）：ConPTY/openpty、MSVCRT 引用与退出唤醒
 cwd.rs                     本地 shell 工作目录采集（Linux /proc、macOS lsof，ADR-039）
 peb.rs                     Windows 跨进程读 PEB：他人 cwd 与完整 argv（#[cfg(windows)]）
-wsl.rs                     WSL 发行版枚举与启动命令（ADR-021）
+wsl.rs                     WSL 分发版枚举与启动命令（ADR-021）；管理命令层（ADR-056）：
+                           安装/卸载/设默认/终止/全部关闭/更新、--manage 系列（稀疏/resize/
+                           移动/默认用户）、在线候选解析与 /etc/wsl.conf 读写合并、
+                           UTF-16LE 输出解码；纯同步子进程包装 + 纯解析，无线程调度
 probe/                     本地进程探针（ADR-028）：三平台采集与结束进程、树构建/过滤/端口合并
 probe_panel.rs             本地进程探针面板（ADR-028）
 bin/pty_probe.rs           Windows ConPTY e2e 探针（ADR-025）
@@ -207,7 +210,7 @@ scrollback.rs              本地格回滚持久化：版本化 JSONL 与旧格�
 sftp.rs                    SFTP 契约：SftpHandle 命令句柄、任务事件流、远端条目模型
 transport/                 传输后端：本地 PTY、SSH 多路复用 pump、跳板桥、端口转发、agent 转发、远端监控
 transport/ssh/             SSH 传输（libssh2，ADR-004 修订拆分）：连接装配、认证、pump
-transport/local.rs         本地 PTY 传输（默认/用户指定 Shell 与 WSL 发行版的子进程命令）
+transport/local.rs         本地 PTY 传输（默认/用户指定 Shell 与 WSL 分发版的子进程命令）
 transport/jump.rs          跳板机回环桥（ADR-020）
 transport/sftp_task.rs     SFTP 任务引擎（上传/下载/递归删除状态机 + RemoteFs 抽象）
 transport/forward.rs       端口转发：非阻塞监听、SOCKS5 握手、通道↔socket 桥接（ADR-011/038）
@@ -250,6 +253,9 @@ views/grid.rs              渲染细节：实测格尺寸、命中测试、run �
 views/terminal_view.rs     单会话视图：会话句柄、画面帧、输入与鼠标手势、IME、搜索条（ADR-015）
 views/panes.rs             标签内分屏（ADR-014）：二分嵌套布局树、比例与分割条、格区域渲染
 views/sftp_panel.rs        SFTP 文件面板：目录浏览、操作与确认弹窗、进行中任务区（ADR-005）
+views/wsl_page.rs          WSL 管理页与模态（ADR-056，仅 Windows）：分发版列表、行操作、
+                           新增/分发版设置子模态、wsl.exe 编排；页面实体自持状态，
+                           外壳只注入「开会话」回调
 views/session_state.rs     会话视图归约：控制事件 × 视图状态 → 效果清单（纯数据与纯决策）
 views/terminal_keys.rs     会话视图的按键裁决：keydown 守卫链与死会话裸键的纯决策
 views/shell.rs             外壳框架部件：状态底栏、会话栏、横幅、密钥确认与关闭确认模态

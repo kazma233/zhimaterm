@@ -83,3 +83,11 @@ _Avoid_: 读不出来就不写（指散在各写点注释里的旧形态）、Op
 **格标识（pane identity）**:
 「格」有两个互不相干的标识空间，各有唯一所有者，不经手换算：**记录门面注册键** `recorder::PaneId`（进程内会话格，建格时由视图把自己的实体 id 桥接发号，测试走全进程唯一自增源 `test_pane`；会话内核的 `SessionConfig::pane` 只认它，ADR-045）与**工作区布局叶标识** `workspace::PaneId`（`workspace.json` 分屏树的磁盘投影，ADR-037）。两者同名不同义：前者标识「这个会话格的留痕条目」，后者标识「分屏树里的这个叶子」，跨域代码不得混用或互相换算。
 _Avoid_: 格 id 直接用 `gpui::EntityId`（UI 框架类型进会话内核或留痕域的旧形态）、两个 PaneId 混用、发号另起独立计数器（会与 recorder 的全进程源撞 id）
+
+**分发版（Distribution）**:
+WSL 里注册的一个 Linux 实例。枚举只认注册表 `Lxss`（`Modern=1` 保留、过滤 docker-desktop/rancher-desktop 工具分发版，ADR-021），运行态只认 `wsl --list --running`——注册表 `State` 停止后不回写，不可作运行态来源（ADR-056）。文档叙述统一用「分发版」，UI 显示用英文 Distribution；「镜像」专指 `wsl --list --online` 的安装候选，不是已装的分发版。
+_Avoid_: 发行版（ADR-021 等旧文档写法，同一物）、Linux 子系统、把镜像候选与已装分发版混称
+
+**WSL 管理页（WslManagerPage）**:
+底部 WSL 入口（Windows 常显）呼出的管理模态背后的页面实体：自持分发版列表状态与 wsl.exe 编排（阻塞调用进后台线程、完成后回写实体重绘），行操作（开会话/设默认/终止/设置/删除）、「新增 WSL」与分发版设置子模态、维护动作都在它名下；外壳只注入「开会话」回调并经浮层栈呼出模态，管理链的叠放是 ADR-044 修订（纯栈叠放）的直接动因（ADR-056）。
+_Avoid_: WSL 管理器、WSL 面板、发行版选择模态（ADR-021 旧形态，已被取代）

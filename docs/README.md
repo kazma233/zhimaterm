@@ -76,6 +76,7 @@
 - [ADR-053：侧栏自动标题改用工作目录](decisions/053-sidebar-cwd-title.md)：OSC 标题 > 工作目录（home 前缀缩写 `~`）> 来源标签；废弃 ADR-042 显示编号机制，`created`/叶编号不动。
 - [ADR-054：新开本地会话继承发起格的工作目录](decisions/054-new-session-inherits-cwd.md)：⌘T/本地入口、分屏、关空补开都落在焦点格当前目录；设置默认目录退为回落（修订 ADR-036/014）。
 - [ADR-055：文件路径点击与编辑器打开](decisions/055-file-path-click-and-editor.md)：输出里的本地路径识别为链接（TerminalLink 分轨 URL），仅本地会话经确认浮层用配置编辑器打开（系统默认/VS Code/Zed/自定义，发现链重解析，VS Code/Zed 带行号）；SSH 不响应，延续 ADR-002 边界。
+- [ADR-056：WSL 管理命令层与管理页](decisions/056-wsl-management.md)：wsl.exe 子命令薄包装归 `local::wsl`，Windows 常显入口呼出管理模态（取代 ADR-021 选择模态），业务叠放链驱动 ADR-044 修订；安装设置一步确认、自定义用户名装后落地、wsl.conf GUI 原文基底合并。
 
 ## 背景与调研（`context/`）
 
@@ -83,6 +84,7 @@
 - [SSH 转发与跳板机入门](context/ssh-forward-vs-jump-host-primer.md)：本地/远程/动态转发的区别与跳板机选型。
 - [中文拼音输入排障](context/ime-pinyin-troubleshooting.md)：三层叠加假象的排查路径与可复用诊断方法（ADR-033）。
 - [死会话裸键失灵排障](context/dead-session-key-focus-troubleshooting.md)：blur 落点到「无焦点」导致按键派发不经过应用层的根因与 gpui 焦点派发事实。
+- [叠放模态滚动失效排障](context/overlay-stack-scroll-troubleshooting.md)：同名 id 滚动容器共用元素状态槽导致上层滚不动的根因、取证路径与叠层组件树的唯一 id 要求（ADR-044 修订）。
 - [⌥+方向键按词跳转调研](context/alt-arrow-word-motion.md)：各终端让裸 shell 开箱即用的两条路线（kitty 集成绑定 vs Ghostty 终端层翻译）与口径选择依据。
 - [libghostty-vt C API 机制笔记](context/libghostty-vt-api-notes.md)：tagged get/set、sized 结构、两段式缓冲、回调协议等扩展 ghostty 后端前的依据（探索快照，用前二次确认）。
 

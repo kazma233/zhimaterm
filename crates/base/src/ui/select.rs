@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, Pixels, Window, div, point, px};
+use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, MouseDownEvent, Pixels, Window, div, point, px};
 
 use crate::theme::UiTokens;
 use crate::ui::{CLICKABLE, CONTROL_HEIGHT, popover_shadow, ui_rems};
@@ -20,6 +20,10 @@ type BoundsSlot = Rc<Cell<Bounds<Pixels>>>;
 
 /// 选中一项的回调：参数是选项在候选列表里的下标。
 type PickHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// 按下一项的回调：带按下事件。拖选武装需要按下位置——静止点击没有
+/// mousemove 可依赖，指针位置必须在按下时就入账。
+type PressHandler = Rc<dyn Fn(usize, &MouseDownEvent, &mut Window, &mut App)>;
 
 /// 收起态选择框：显示当前选中项（用该字体渲染作预览），点击展开选项浮层。
 /// 渲染期间把这一行的窗口 bounds 记进 `bounds_slot`，浮层按它定位到正下方。
@@ -77,8 +81,10 @@ fn select_row_with(
     .items_center()
     .h(ui_rems(CONTROL_HEIGHT))
     .gap_x(px(6.))
-    .px(px(8.))
-    .py(px(5.))
+    // 内边距与输入框同基（ui_rems，随界面字号缩放）：两者是同排等高契约，
+    // 留白比例也要一致
+    .px(ui_rems(6.))
+    .py(ui_rems(3.))
     .rounded(px(5.))
     .border_1()
     .border_color(gpui::rgb(tokens.border_default))
@@ -181,7 +187,7 @@ pub fn select_popover(
   preview_font: fn(&str) -> gpui::Font,
   display_name: fn(&str) -> &str,
   scroll: &gpui::ScrollHandle,
-  on_press: PickHandler,
+  on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   select_popover_with(
@@ -211,7 +217,7 @@ pub fn plain_select_popover(
   bounds_slot: &BoundsSlot,
   viewport_height: Pixels,
   scroll: &gpui::ScrollHandle,
-  on_press: PickHandler,
+  on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   select_popover_with(
@@ -242,7 +248,7 @@ fn select_popover_with(
   scroll: &gpui::ScrollHandle,
   display: impl Fn(&str) -> String,
   style_text: impl Fn(gpui::Div, &str) -> gpui::Div,
-  on_press: PickHandler,
+  on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
   let anchor = bounds_slot.get();
@@ -386,7 +392,7 @@ fn option_row(
   selected: bool,
   highlighted: bool,
   style_text: &impl Fn(gpui::Div, &str) -> gpui::Div,
-  on_press: PickHandler,
+  on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::Stateful<gpui::Div> {
   div()
@@ -404,7 +410,9 @@ fn option_row(
     .when(highlighted, |row| row.bg(gpui::rgb(tokens.bg_hover)))
     .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .cursor(CLICKABLE)
-    .on_mouse_down(MouseButton::Left, move |_, window, cx| on_press(index, window, cx))
+    .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window, cx| {
+      on_press(index, event, window, cx)
+    })
     // 兼容键盘拾取的调用方：无拖选监听时松开在行内即拾取（同元素按下+松开）
     .on_click(move |_, window, cx| on_pick(index, window, cx))
     .child(

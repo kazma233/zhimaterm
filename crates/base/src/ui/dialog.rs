@@ -6,8 +6,8 @@
 //! 关闭会话确认的既有口径）。species 是 Dialog：可叠在业务模态之上。
 //!
 //! 首个消费方是侧栏会话重命名（ADR-047，prompt 形态，由外壳经 [`modal`]
-//! 入栈）；confirm 形态、危险皮肤与深层视图的 [`open`] 通道暂无消费方，
-//! 能力按 ADR-044 先就位（与 ui/input 的预留能力同一先例）。
+//! 入栈）；confirm/danger 形态由 [`open`] 通道服务深层视图（WSL 注销这类
+//! 危险确认）。
 #![allow(dead_code)]
 
 use std::rc::Rc;
@@ -37,6 +37,8 @@ pub struct Dialog {
   title: String,
   message: String,
   danger: bool,
+  /// 提示形态：单按钮（无「取消」），命令结果这类只读展示用
+  alert: bool,
   confirm_label: String,
   /// Some = prompt：带一个单行输入框
   input: Option<Entity<TextInput>>,
@@ -49,7 +51,21 @@ impl Dialog {
       title: title.into(),
       message: message.into(),
       danger: false,
+      alert: false,
       confirm_label: "确认".into(),
+      input: None,
+    }
+  }
+
+  /// 提示框（单按钮「知道了」）：命令结果、失败原因这类只需要展示与关闭
+  /// 的场景。Enter 与 Esc 都是关闭，结果回调无人消费。
+  pub fn alert(title: impl Into<String>, message: impl Into<String>) -> Self {
+    Self {
+      title: title.into(),
+      message: message.into(),
+      danger: false,
+      alert: true,
+      confirm_label: "知道了".into(),
       input: None,
     }
   }
@@ -93,7 +109,8 @@ impl Dialog {
     }
   }
 
-  /// 危险态：卡片换红色皮肤、确认按钮红色（不可恢复的销毁操作）。
+  /// 危险态：正文文字红色提醒 + 确认按钮红色（不可恢复的销毁操作）；卡片
+  /// 保持正常配色，不做整框变色。
   pub fn danger(mut self, danger: bool) -> Self {
     self.danger = danger;
     self
@@ -161,7 +178,9 @@ impl ModalView for DialogModal {
   }
 
   fn tone(&self) -> Tone {
-    if self.dialog.danger { Tone::Danger } else { Tone::Normal }
+    // 危险确认也不换卡片皮肤：整框变色像把整个弹窗标成错误，危险的分量由
+    // 正文红字与红色确认按钮表达就够
+    Tone::Normal
   }
 
   fn title(&self) -> Option<String> {
@@ -170,10 +189,16 @@ impl ModalView for DialogModal {
 
   fn content(&self, _window: &Window, cx: &App) -> AnyElement {
     let tokens = crate::theme::tokens(cx);
+    // 危险确认的正文用红字承载分量（皮肤不再变色）；普通确认用次级灰
+    let message_color = if self.dialog.danger {
+      tokens.danger
+    } else {
+      tokens.fg_secondary
+    };
     let mut content = div().flex().flex_col().gap(px(8.)).child(
       div()
         .text_size(ui_rems(12.))
-        .text_color(gpui::rgb(tokens.fg_secondary))
+        .text_color(gpui::rgb(message_color))
         .child(self.dialog.message.clone()),
     );
     if let Some(input) = &self.dialog.input {
@@ -206,20 +231,18 @@ impl ModalView for DialogModal {
         dispatch(self.handling(true)),
       )
     };
-    panel::dialog_actions(
-      [confirm_button.into_any_element()],
-      Some(
-        panel::secondary_button(
-          &tokens,
-          "dialog-cancel",
-          "取消",
-          Some("esc"),
-          dispatch(self.handling(false)),
-        )
-        .into_any_element(),
-      ),
-    )
-    .into_any_element()
+    // 提示形态没有「取消」：只读展示，Esc 与按钮都是关闭
+    let cancel = (!self.dialog.alert).then(|| {
+      panel::secondary_button(
+        &tokens,
+        "dialog-cancel",
+        "取消",
+        Some("esc"),
+        dispatch(self.handling(false)),
+      )
+      .into_any_element()
+    });
+    panel::dialog_actions([confirm_button.into_any_element()], cancel).into_any_element()
   }
 
   fn key_action(&self, key: &Keystroke, _cx: &App) -> KeyHandling {

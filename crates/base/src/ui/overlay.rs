@@ -132,7 +132,6 @@ pub trait ModalView {
 
 /// 栈里的一层：视图 + 本层自己的焦点作用域与归还句柄。
 struct Layer {
-  species: Species,
   view: Box<dyn ModalView>,
   /// 本层的焦点作用域根（ADR-043）：打开时焦点落在它身上，不出现在
   /// 焦点环里的输入框因此可以没有焦点
@@ -158,19 +157,16 @@ impl OverlayHost {
     Self { layers: Vec::new() }
   }
 
-  /// 入栈：同物种互斥替换（旧层直接丢弃——焦点由新层接管，等价原先的
-  /// 互斥单点），跨物种叠放。焦点交给新层的作用域根，并记下此前谁持有
-  /// 焦点，出栈时归还（ADR-043）。
+  /// 入栈：纯栈叠放（先进后出，`close_top` 弹顶归还焦点）。业务模态有真实
+  /// 的叠放链（管理模态 → 新增/设置 → 确认/提示），早先的「同物种互斥替换」
+  /// 会把底下的层悄悄丢掉，关掉栈顶时看起来像全部消失——这正是浮层栈要
+  /// 防的（ADR-044 修订）。焦点交给新层的作用域根，并记下此前谁持有焦点，
+  /// 出栈时归还（ADR-043）。
   pub fn open(&mut self, view: Box<dyn ModalView>, window: &mut Window, cx: &mut App) {
-    let species = view.species();
-    while let Some(index) = self.layers.iter().rposition(|layer| layer.species == species) {
-      self.layers.remove(index);
-    }
     let owner = window.focused(cx);
     let scope = cx.focus_handle();
     window.focus(&scope, cx);
     self.layers.push(Layer {
-      species,
       view,
       scope,
       focus_owner: owner,
@@ -223,20 +219,25 @@ impl OverlayHost {
 
   /// 按栈序渲染每层：遮罩 + 卡片 + 附加浮层。`dispatch` 是本层的键裁决/
   /// 遮罩点击送回外壳的通道（关层与业务动作都在外壳执行）。
-  pub fn render(&self, tokens: &UiTokens, window: &Window, cx: &App, dispatch: KeyDispatch) -> Vec<Div> {
+  pub fn render(&self, tokens: &UiTokens, window: &Window, cx: &App, dispatch: KeyDispatch) -> Vec<AnyElement> {
     self
       .layers
       .iter()
-      .map(|layer| {
+      .enumerate()
+      .map(|(index, layer)| {
         let handling = layer.view.on_dismiss();
         let dispatch = dispatch.clone();
+        // 层根带唯一 id：下面的卡片滚动容器是同名 id（card-content），无 id
+        // 的包装层不进元素身份路径，两层的滚动状态会共用同一个槽——底层
+        // paint 时的 clamp 会把顶层的滚动偏移清掉（表现为上层滚不动）
         let mut modal = panel::modal(tokens, layer.view.card(window, cx), &layer.scope, move |window, cx| {
           dispatch(handling.clone(), window, cx)
-        });
+        })
+        .id(("overlay-layer", index));
         for floater in layer.view.floaters(window, cx) {
           modal = modal.child(floater);
         }
-        modal
+        modal.into_any_element()
       })
       .collect()
   }
@@ -329,7 +330,7 @@ pub fn overlay_dispatch(handling: KeyHandling, window: &mut Window, cx: &mut App
 #[cfg(test)]
 mod tests {
   use super::*;
-  use gpui::{Context, Modifiers, Render, div};
+  use gpui::{Context, Modifiers, Render, div, px};
 
   fn plain(key: &str) -> Keystroke {
     Keystroke {
@@ -413,10 +414,96 @@ mod tests {
     host.top_view().unwrap().as_any().downcast_ref::<Dummy>().unwrap().id
   }
 
-  /// 同物种互斥替换、跨物种可叠放（ADR-044）：Modal 开着再开 Modal 是替换，
-  /// Dialog 可盖在 Modal 上，关掉 Dialog 回到原 Modal。
+  /// 两层全屏遮罩视图（仿真叠放模态），各自带一个可滚容器供滚轮断言。
+  /// 层结构与 panel::modal 同构：occlude 遮罩 → 卡片面板（flex_col、
+  /// max_h、overflow_hidden）→ 同名 id 的滚动容器。
+  struct TwoScrollLayers {
+    bottom: gpui::ScrollHandle,
+    top: gpui::ScrollHandle,
+    scopes: Vec<gpui::FocusHandle>,
+  }
+
+  impl Render for TwoScrollLayers {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+      let layer = |handle: &gpui::ScrollHandle, scope: gpui::FocusHandle| {
+        div()
+          .absolute()
+          .inset_0()
+          .occlude()
+          .flex()
+          .items_center()
+          .justify_center()
+          .child(
+            div()
+              .track_focus(&scope)
+              .w(px(400.))
+              .max_h(px(400.))
+              .overflow_hidden()
+              .flex()
+              .flex_col()
+              .child(div().h(px(40.)).child("header"))
+              .child(
+                div()
+                  .id("card-content")
+                  .debug_selector(|| "scroll-under-test".into())
+                  .flex_1()
+                  .min_h(px(0.))
+                  .overflow_y_scroll()
+                  .track_scroll(handle)
+                  .child(div().h(px(2000.)).child("content")),
+              )
+              .child(div().h(px(40.)).child("actions")),
+          )
+          .into_any_element()
+      };
+      let scopes = self.scopes.clone();
+      div()
+        .size_full()
+        .relative()
+        .child(layer(&self.bottom, scopes[0].clone()))
+        .child(layer(&self.top, scopes[1].clone()))
+    }
+  }
+
+  /// 双层叠放的滚轮派发回归（ADR-044 修订）：指针落在两层内容重叠区时，
+  /// 滚轮必须只滚最上层——底层被顶层遮罩 occlude 挡住，不得抢走事件。
   #[gpui::test]
-  fn same_species_replaces_and_cross_species_stacks(cx: &mut gpui::TestAppContext) {
+  fn scroll_goes_to_top_layer_when_stacked(cx: &mut gpui::TestAppContext) {
+    let bottom = gpui::ScrollHandle::new();
+    let top = gpui::ScrollHandle::new();
+    let window = cx.add_window(|_window, cx| {
+      let scopes = [cx.focus_handle(), cx.focus_handle()];
+      TwoScrollLayers {
+        bottom: bottom.clone(),
+        top: top.clone(),
+        scopes: scopes.to_vec(),
+      }
+    });
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+      .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    // 指针落在顶层滚动容器中心（两层的滚动视口物理重叠）
+    let bounds = cx.debug_bounds("scroll-under-test").expect("顶层滚动容器要画出来");
+    let center = gpui::point(
+      bounds.origin.x + bounds.size.width / 2.,
+      bounds.origin.y + bounds.size.height / 2.,
+    );
+    cx.simulate_event(gpui::ScrollEvent {
+      position: center,
+      delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+      modifiers: Default::default(),
+      touch_phase: Default::default(),
+      source: Default::default(),
+    });
+
+    assert_eq!(bottom.offset().y, px(0.), "底层滚动容器被顶层遮罩挡住，不得滚动");
+    assert_eq!(top.offset().y, px(-120.), "滚轮滚最上层");
+  }
+
+  /// 纯栈叠放（ADR-044 修订）：同物种也是叠层不替换，出栈按先进后出弹顶。
+  #[gpui::test]
+  fn layers_stack_and_pop_in_lifo_order(cx: &mut gpui::TestAppContext) {
     struct Blank;
     impl Render for Blank {
       fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -443,7 +530,7 @@ mod tests {
         window,
         cx,
       );
-      assert_eq!(top_id(&host), 2, "同物种新开替换旧层");
+      assert_eq!(top_id(&host), 2, "同物种新开叠在旧层上，不替换");
 
       host.open(
         Box::new(Dummy {
@@ -453,10 +540,12 @@ mod tests {
         window,
         cx,
       );
-      assert_eq!(top_id(&host), 3, "Dialog 叠在 Modal 上");
+      assert_eq!(top_id(&host), 3, "Dialog 叠在最上");
 
       assert!(host.close_top(window, cx));
-      assert_eq!(top_id(&host), 2, "关掉 Dialog 回到原 Modal");
+      assert_eq!(top_id(&host), 2, "弹顶回到上一层 Modal，不被连带关掉");
+      assert!(host.close_top(window, cx), "弹掉第一层 Modal");
+      assert_eq!(top_id(&host), 1, "最先开的最后关");
       assert!(host.close_top(window, cx), "关掉最后一层 Modal");
       assert!(!host.close_top(window, cx), "栈空后关闭是 no-op");
       assert!(host.is_empty());

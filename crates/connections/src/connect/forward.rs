@@ -3,7 +3,7 @@
 //! 加规则的模态共用一份；这里只保留连接表单自己的容器逻辑。
 
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, Context, ElementId, Entity, Font, Window, div, px};
+use gpui::{App, Context, Entity, Font, div, px};
 
 use zhimaterm_base::ui::{panel, ui_rems};
 use zhimaterm_session::ForwardRule;
@@ -12,15 +12,17 @@ use crate::forward_draft::{ForwardKind, ForwardRuleDraft};
 
 use super::{ConnectForm, Field, FormError};
 
-/// 转发规则草稿的编辑动作（ADR-011）：一个枚举驱动四种编辑。
+/// 转发规则草稿的编辑动作（ADR-011）：一个枚举驱动五种编辑。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ForwardEdit {
   /// 新增一条空草稿
   Add,
   /// 删除第几条草稿
   Remove(usize),
-  /// 切换第几条草稿的类型（本地 ↔ 远程）
+  /// 切换第几条草稿的类型（本地 ↔ 远程；segmented 之外的快捷途径）
   ToggleKind(usize),
+  /// 直选第几条草稿的类型（segmented 点击落点）：（规则行下标, 档位下标）
+  SetKind(usize, usize),
   /// 切换第几条草稿的监听地址（127.0.0.1 ↔ 0.0.0.0，仅本地转发）
   ToggleBind(usize),
 }
@@ -55,6 +57,11 @@ impl ConnectForm {
       ForwardEdit::ToggleKind(index) => {
         if let Some(draft) = self.forwards.get_mut(index) {
           draft.kind = draft.kind.toggle();
+        }
+      }
+      ForwardEdit::SetKind(index, option) => {
+        if let Some(draft) = self.forwards.get_mut(index) {
+          draft.kind = ForwardKind::from_index(option);
         }
       }
       ForwardEdit::ToggleBind(index) => {
@@ -139,32 +146,36 @@ pub(super) fn forward_rule_row(
     .items_center()
     .gap(px(6.))
     .child(prefix("监听"))
-    .child(panel::chip(
+    .child(panel::segmented(
       tokens,
       ("forward-kind", index),
-      draft.kind.label(),
-      true,
+      &ForwardKind::LABELS,
+      draft.kind.index(),
       {
         let form = form.clone();
-        move |_, _, cx| {
-          form.update(cx, |form, cx| form.edit_forward(ForwardEdit::ToggleKind(index), cx));
+        move |option, _, cx| {
+          form.update(cx, |form, cx| {
+            form.edit_forward(ForwardEdit::SetKind(index, option), cx)
+          });
         }
       },
     ));
 
   if matches!(draft.kind, ForwardKind::Local | ForwardKind::Socks) {
-    // 绑定范围是安全选择：默认只听本机；对外网开放用警示色，不必让读者回想颜色含义
-    let (label, risky) = if draft.all_interfaces {
-      ("对外网开放", true)
-    } else {
-      ("仅本机", false)
-    };
-    listen_line = listen_line.child(bind_chip(tokens, ("forward-bind", index), label, risky, {
-      let form = form.clone();
-      move |_, _, cx| {
-        form.update(cx, |form, cx| form.edit_forward(ForwardEdit::ToggleBind(index), cx));
-      }
-    }));
+    // 绑定范围是安全选择：默认只听本机；勾「对外网开放」即允许外部机器连入
+    listen_line = listen_line.child(panel::checkbox(
+      tokens,
+      ("forward-bind", index),
+      "对外网开放",
+      "",
+      draft.all_interfaces,
+      {
+        let form = form.clone();
+        move |_, _, cx| {
+          form.update(cx, |form, cx| form.edit_forward(ForwardEdit::ToggleBind(index), cx));
+        }
+      },
+    ));
   }
 
   listen_line = listen_line
@@ -205,27 +216,4 @@ pub(super) fn forward_rule_row(
     .child(listen_line)
     .children(target_line)
     .children(draft.error.as_deref().map(|error| panel::error_line(tokens, error)))
-}
-
-/// 监听地址 chip：对外网开放带警示色。点击语义由按钮基座接管。
-pub(super) fn bind_chip(
-  tokens: &zhimaterm_base::theme::UiTokens,
-  id: impl Into<ElementId>,
-  label: &str,
-  risky: bool,
-  on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-  let (background, text) = if risky {
-    (tokens.bg_warn, tokens.warn_strong)
-  } else {
-    (tokens.bg_row, tokens.fg_secondary)
-  };
-  panel::clickable(id, on_click)
-    .px(px(6.))
-    .py(px(3.))
-    .rounded(px(4.))
-    .text_size(ui_rems(11.))
-    .bg(gpui::rgb(background))
-    .text_color(gpui::rgb(text))
-    .child(label.to_owned())
 }

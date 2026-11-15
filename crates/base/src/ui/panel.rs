@@ -8,6 +8,8 @@
 //! 模态同时是焦点的作用域：外壳拿一个作用域根（见 [`modal`]），焦点在模态里
 //! 归它管，不落到具体某个输入框上。
 
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{ClickEvent, ElementId, FocusHandle, MouseButton, Window, div, px};
 
@@ -119,24 +121,6 @@ pub fn danger_button(
     .text_color(gpui::rgb(tokens.danger_soft))
 }
 
-/// 可点的小标签（认证方式选择这类）。
-pub fn chip(
-  tokens: &UiTokens,
-  id: impl Into<ElementId>,
-  label: &str,
-  active: bool,
-  on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-  clickable(id, on_click)
-    .px(px(6.))
-    .py(px(3.))
-    .rounded(px(4.))
-    .text_size(ui_rems(11.))
-    .bg(gpui::rgb(if active { tokens.bg_accent } else { tokens.bg_row }))
-    .text_color(gpui::rgb(if active { tokens.accent } else { tokens.fg_secondary }))
-    .child(label.to_owned())
-}
-
 /// 键位标记：灰底小方块，一眼能看出"按哪个键"。按钮与快捷键参考模态共用。
 pub fn key_badge(tokens: &UiTokens, text: &str) -> gpui::Div {
   div()
@@ -146,6 +130,128 @@ pub fn key_badge(tokens: &UiTokens, text: &str) -> gpui::Div {
     .text_color(gpui::rgb(tokens.fg_badge))
     .text_size(ui_rems(10.))
     .child(text.to_owned())
+}
+
+/// 分段开关：N 个选项连成一行，选中段高亮，点哪段选哪段（单选语义在
+/// 组件内，落值经回调交给调用方）。两档即常见开关，三档以上是档位选择
+/// （转发类型的本地/远程/SOCKS）。每段 id 由 `id_base` 与段下标组合，
+/// 调用方保证 `id_base` 在兄弟元素间唯一。
+pub fn segmented(
+  tokens: &UiTokens,
+  id_base: impl Into<ElementId> + Clone,
+  options: &[&str],
+  selected: usize,
+  on_select: impl Fn(usize, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Div {
+  let base = id_base.into();
+  let on_select = Rc::new(on_select);
+  div()
+    .flex()
+    .flex_none()
+    .items_center()
+    .p(px(2.))
+    .gap(px(2.))
+    .rounded(px(5.))
+    .bg(gpui::rgb(tokens.bg_row))
+    .children(options.iter().enumerate().map(|(index, label)| {
+      let selected = index == selected;
+      let on_select = on_select.clone();
+      clickable((base.clone(), index.to_string()), move |_, window, cx| {
+        on_select(index, window, cx)
+      })
+      .px(px(8.))
+      .py(px(3.))
+      .rounded(px(4.))
+      .text_size(ui_rems(11.))
+      .when(selected, |segment| {
+        segment
+          .bg(gpui::rgb(tokens.bg_accent))
+          .text_color(gpui::rgb(tokens.accent))
+      })
+      .when(!selected, |segment| {
+        segment
+          .text_color(gpui::rgb(tokens.fg_secondary))
+          .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
+      })
+      .child((*label).to_owned())
+    }))
+}
+
+/// 一行勾选设置：勾选框与标题同行，说明独占一行并与标题对齐，整行可点。
+/// 说明文字解释勾与不勾各自的行为（长文案就地换行，不把勾选框挤变形，
+/// 也不把标题行撑宽）；不需要说明时传空串，说明行不渲染。
+pub fn checkbox(
+  tokens: &UiTokens,
+  id: impl Into<ElementId>,
+  title: &str,
+  description: &str,
+  checked: bool,
+  on_toggle: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+  let box_style = |box_div: gpui::Div| {
+    if checked {
+      box_div.bg(gpui::rgb(tokens.accent))
+    } else {
+      box_div
+        .bg(gpui::rgb(tokens.bg_input))
+        .border_1()
+        .border_color(gpui::rgb(tokens.border_default))
+    }
+  };
+  clickable(id, on_toggle)
+    .flex()
+    .flex_col()
+    .gap(px(3.))
+    .child(
+      div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+          box_style(div())
+            .flex_none()
+            .w(ui_rems(14.))
+            .h(ui_rems(14.))
+            .rounded(px(4.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(checked, |it| {
+              it.child(
+                div()
+                  .text_size(ui_rems(10.))
+                  .text_color(gpui::rgb(tokens.fg_on_accent))
+                  .child("✓"),
+              )
+            }),
+        )
+        .child(
+          // 控件标签档（11rem，与各表单开关行的标题一致）——不是卡片标题
+          // 档（13rem），勾选框是行内控件，标题不该比正文说明大两档
+          div()
+            .text_size(ui_rems(11.))
+            .text_color(gpui::rgb(tokens.fg))
+            .child(title.to_owned()),
+        ),
+    )
+    // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
+    // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
+    // 预先折算会少算间距
+    .when(!description.is_empty(), |group| {
+      group.child(
+        div()
+          .flex()
+          .items_start()
+          .gap(px(8.))
+          .child(div().flex_none().w(ui_rems(14.)))
+          .child(
+            div()
+              .flex_1()
+              .min_w(px(0.))
+              .child(crate::ui::card::label(tokens, description)),
+          ),
+      )
+    })
 }
 
 /// 按钮骨架：基座 + 1px 边框 + 文字 + 可选的键位标记。

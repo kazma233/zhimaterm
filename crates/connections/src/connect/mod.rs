@@ -14,7 +14,7 @@
 //! `view` 是连接弹窗与列表渲染，`tests` 是全部单元测试。
 
 mod auth;
-mod forward;
+pub(crate) mod forward;
 mod parse;
 mod target;
 mod view;

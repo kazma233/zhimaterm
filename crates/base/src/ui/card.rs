@@ -5,7 +5,7 @@
 //! 与 content 之间不画线——线只用来分隔"结构性"区域，否则卡片会被切得零碎。
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, Pixels, div, px};
+use gpui::{AnyElement, Div, Pixels, div, px, relative};
 
 use crate::theme::UiTokens;
 use crate::ui::ui_rems;
@@ -127,7 +127,11 @@ impl Card {
       .text_color(gpui::rgb(tokens.fg))
       .flex()
       .flex_col()
-      .overflow_hidden();
+      .overflow_hidden()
+      // 内容再高卡片也不超过视口 85%：内容区在剩余高度里滚动，
+      // header/footer/actions 恒可见。内容矮时卡片高度仍由内容决定，
+      // 这条上限不参与布局
+      .max_h(relative(0.85));
 
     if let Some(header) = self.header {
       panel = panel.child(
@@ -152,14 +156,24 @@ impl Card {
           .min_w(px(0.))
           .overflow_hidden()
           .child(content)
+          .into_any_element()
       } else {
+        // 默认模式：内容放进支持滚动的容器——内容矮时高度跟内容走
+        // （hug 模式 flex_1 不伸展），内容超过卡片上限（视口 85%）时在
+        // 区内滚动，header 与 actions 不被挤出视口。padding 归滚动容器：
+        // 滚到底时上下留白仍在
         div()
+          .id("card-content")
           .px(px(PADDING_X))
           .py(px(PADDING_Y))
+          .flex_1()
+          .min_h(px(0.))
+          .overflow_y_scroll()
           .flex()
           .flex_col()
           .gap(px(10.))
           .child(content)
+          .into_any_element()
       });
     }
     if let Some(footer) = self.footer {

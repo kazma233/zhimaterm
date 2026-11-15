@@ -29,7 +29,13 @@ pub(crate) enum ForwardKind {
 }
 
 impl ForwardKind {
-  /// 循环切换转发类型（类型 chip 的点击行为）：L → R → D → L。
+  /// 档位全集（segmented 的选项与选中位顺序）。
+  pub(crate) const KINDS: [ForwardKind; 3] = [ForwardKind::Local, ForwardKind::Remote, ForwardKind::Socks];
+
+  /// 档位标签（segmented 的选项文案，与 [`Self::KINDS`] 同序）。
+  pub(crate) const LABELS: [&'static str; 3] = ["本地转发", "远程转发", "SOCKS5"];
+
+  /// 循环切换转发类型（保留给测试；UI 走 segmented 直选）：L → R → D → L。
   pub(crate) fn toggle(self) -> Self {
     match self {
       Self::Local => Self::Remote,
@@ -38,13 +44,17 @@ impl ForwardKind {
     }
   }
 
-  /// 类型标签（chip 文案）。
-  pub(crate) fn label(self) -> &'static str {
-    match self {
-      Self::Local => "本地转发",
-      Self::Remote => "远程转发",
-      Self::Socks => "SOCKS5",
-    }
+  /// 档位下标（segmented 的选中位）。
+  pub(crate) fn index(self) -> usize {
+    Self::KINDS
+      .iter()
+      .position(|kind| *kind == self)
+      .expect("枚举值都在 KINDS 里")
+  }
+
+  /// 按档位下标还原（segmented 点击落点）。
+  pub(crate) fn from_index(index: usize) -> Self {
+    Self::KINDS[index]
   }
 
   /// 是否在本地监听（L 与 D 都有绑定地址选项；R 的监听在远端）。
@@ -211,7 +221,10 @@ mod tests {
     assert_eq!(ForwardKind::Local.toggle(), ForwardKind::Remote);
     assert_eq!(ForwardKind::Remote.toggle(), ForwardKind::Socks);
     assert_eq!(ForwardKind::Socks.toggle(), ForwardKind::Local);
-    assert_eq!(ForwardKind::Socks.label(), "SOCKS5");
+    // segmented 的选项与选中位：KINDS/LABELS 同序、下标可互逆还原
+    assert_eq!(ForwardKind::LABELS, ["本地转发", "远程转发", "SOCKS5"]);
+    assert_eq!(ForwardKind::Socks.index(), 2);
+    assert_eq!(ForwardKind::from_index(2), ForwardKind::Socks);
     assert!(ForwardKind::Local.binds_locally());
     assert!(ForwardKind::Socks.binds_locally());
     assert!(!ForwardKind::Remote.binds_locally());

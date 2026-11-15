@@ -259,11 +259,7 @@ impl Render for ZhimaTermApp {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let tokens = zhimaterm_base::theme::tokens(cx);
     // 窗口标题跟随当前标签聚焦格的标题
-    let title = self
-      .tabs
-      .get(self.active)
-      .and_then(Tab::focused_view)
-      .and_then(|view| view.read(cx).title().map(str::to_owned));
+    let title = tab_title(self, cx);
     if self.applied_title != title {
       window.set_window_title(title.as_deref().unwrap_or("ZhimaTerm"));
       self.applied_title = title;
@@ -371,8 +367,9 @@ impl Render for ZhimaTermApp {
       |this, window, cx| this.open_settings_form(window, cx),
       cx,
     )];
-    // 底部动作行（ADR-041）：本地、WSL（仅 Windows 且有发行版）、SSH 等分。
-    // 标签用短名，侧栏拖到最窄时仍放得下。
+    // 底部动作行（ADR-041）：本地、WSL（仅 Windows）、SSH 等分。标签用
+    // 短名，侧栏拖到最窄时仍放得下。WSL 入口常显：管理页面可在线安装，
+    // 零分发版不再是死按钮
     let mut session_entries = vec![self.session_entry(
       "entry-local",
       "本地",
@@ -380,14 +377,12 @@ impl Render for ZhimaTermApp {
       cx,
     )];
     #[cfg(windows)]
-    if self.wsl_entry_visible {
-      session_entries.push(self.session_entry(
-        "entry-wsl",
-        "WSL",
-        |this, window, cx| this.open_wsl_session(window, cx),
-        cx,
-      ));
-    }
+    session_entries.push(self.session_entry(
+      "entry-wsl",
+      "WSL",
+      |this, window, cx| this.open_wsl_page(window, cx),
+      cx,
+    ));
     session_entries.push(self.session_entry(
       "entry-ssh",
       "SSH",
@@ -523,4 +518,13 @@ impl Render for ZhimaTermApp {
         cx,
       ))
   }
+}
+
+/// 活动标签聚焦格的标题（窗口标题的默认来源）。
+fn tab_title(app: &mut ZhimaTermApp, cx: &mut Context<ZhimaTermApp>) -> Option<String> {
+  app
+    .tabs
+    .get(app.active)
+    .and_then(Tab::focused_view)
+    .and_then(|view| view.read(cx).title().map(str::to_owned))
 }

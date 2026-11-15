@@ -15,3 +15,6 @@ pub mod shell;
 pub mod terminal_keys;
 pub mod terminal_view;
 pub mod theme_picker;
+/// WSL 管理页面（仅 Windows）：域数据全在 local，页面只是消费方。
+#[cfg(windows)]
+pub mod wsl_page;

@@ -118,10 +118,6 @@ pub struct ZhimaTermApp {
   /// 点击项切换但不收起，收起只由点击下拉之外触发——连续点几项比对
   /// 观感是主要用法。不属于模态：打开任何模态时收起它（等价「点外部」）。
   theme_picker: ThemePicker,
-  /// WSL 入口是否显示（ADR-021，仅 Windows）：零发行版隐藏。启动时判定一次，
-  /// 避免每帧渲染都碰注册表；发行版列表本身在每次点开入口时现查。
-  #[cfg(windows)]
-  wsl_entry_visible: bool,
   /// 最近一次观察到的窗口几何（ADR-037）：布局写入与退出收尾都用它，
   /// 这两条路径拿不到窗口句柄。
   last_window: Option<workspace::SavedWindow>,
@@ -135,13 +131,13 @@ pub struct ZhimaTermApp {
   workspace_error: Option<String>,
 }
 /// 编排动作回壳通道（ADR-044 决策 3 的回壳部分）：Global 只放应用实体句柄，
-/// 深层视图的编排动作（如 WSL 发行版选择的开会话）经 `update_app` 回壳执行。
+/// 深层视图的编排动作（如 WSL 分发版选择的开会话）经 `update_app` 回壳执行。
 /// 浮层栈的呼出/关闭/键派发不在这里——栈是窗口级服务，原语在
 /// `ui::overlay`（ADR-044 修订），本实体只是栈的消费方。
 pub(crate) struct AppRoot(pub Entity<ZhimaTermApp>);
 impl gpui::Global for AppRoot {}
 
-/// 深层视图的编排动作回壳执行（如 WSL 发行版选择的开会话）。
+/// 深层视图的编排动作回壳执行（如 WSL 分发版选择的开会话）。
 pub(crate) fn update_app<R>(
   window: &mut Window,
   cx: &mut App,
@@ -212,8 +208,6 @@ impl ZhimaTermApp {
       sidebar_menu_cursor: Default::default(),
       saved: cx.new(|_| saved_sources),
       theme_picker: ThemePicker::new(),
-      #[cfg(windows)]
-      wsl_entry_visible: !zhimaterm_local::wsl::list_distros().is_empty(),
       last_window: Some(workspace::Workspace::saved_window(window.window_bounds())),
       bounds_save_generation: 0,
       bounds_save_scheduled: false,
@@ -236,7 +230,7 @@ impl ZhimaTermApp {
       }),
       cx,
     );
-    // 深层视图的编排动作回壳执行（如 WSL 发行版选择的开会话）
+    // 深层视图的编排动作回壳执行（如 WSL 分发版选择的开会话）
     cx.set_global(AppRoot(cx.entity()));
     // 布局恢复（ADR-037）：只恢复本地格，SSH 格在保存时已被裁掉。
     // 没有可恢复的标签时照旧开一个本地会话，窗口不会留成空的。

@@ -64,25 +64,29 @@ impl ZhimaTermApp {
     }
   }
 
-  // WSL 入口（ADR-021，仅 Windows）：点击时现查发行版并弹出选择模态——
-  /// 即使只有一个发行版也由用户选定后再开。零发行版时入口不渲染，这里到不了。
+  // WSL 入口（ADR-021，仅 Windows）：呼出管理模态。入口在 Windows 上
+  /// 常显——零分发版也能在线安装，不再是死按钮。
   #[cfg(windows)]
-  pub(super) fn open_wsl_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let distros = zhimaterm_local::wsl::list_distros();
-    if !distros.is_empty() {
-      // 开会话是外壳的编排动作，经回调注入模态（ADR-007 修订七）
-      let on_pick: shell::WslPickHandler = Rc::new(|name, window, cx| {
-        super::update_app(window, cx, |app, window, cx| app.open_wsl_distro(name, window, cx));
-      });
-      self.overlay_open(Box::new(shell::WslModal::new(distros, on_pick)), window, cx);
-    }
+  pub(super) fn open_wsl_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    // 开会话是外壳的编排动作，经回调注入页面（ADR-007 修订七）。管理模态
+    // 不收：浮层按栈进出（先进后出），会话开出来后在终端里，模态由用户自己
+    // Esc/「关闭」退出
+    let on_pick: crate::views::wsl_page::PickAction = Rc::new(|name, window, cx| {
+      super::update_app(window, cx, |app, window, cx| app.open_wsl_distro(name, window, cx));
+    });
+    let font = zhimaterm_base::font::terminal_font(&self.font.family);
+    let page = cx.new(|cx| crate::views::wsl_page::WslManagerPage::new(font, on_pick, cx));
+    // 页面构造时自起首屏加载（注册表 + 磁盘占用），先渲染空态不卡入口。
+    // 外壳方法已在自身 update 里，入栈必须走 self.overlay_open（无钩子通道）：
+    // 全局 overlay_open 的入栈钩子会再 update 外壳而嵌套 panic
+    self.overlay_open(Box::new(crate::views::wsl_page::WslManagerModal { page }), window, cx);
+    cx.notify();
   }
 
-  /// 开一个 WSL 发行版会话（选择模态的条目点击后到这里），并收掉模态。
-  /// `WslModal` 经全局通道回到这里（ADR-044）。
+  /// 开一个 WSL 分发版会话（管理模态的行主体点击后到这里）：模态已先被
+  /// pick 回调收掉，会话直接落标签区。
   #[cfg(windows)]
   pub(crate) fn open_wsl_distro(&mut self, distro: &str, window: &mut Window, cx: &mut Context<Self>) {
-    self.overlay_close_top(window, cx);
     self.open_session_with(
       SessionTarget::Local {
         shell: LocalShell::Wsl {

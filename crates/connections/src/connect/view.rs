@@ -198,25 +198,18 @@ impl ConnectModal {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(
-              div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(6.))
-                .child(panel::chip(
-                  tokens,
-                  "connect-use-agent",
-                  "使用本地 ssh-agent",
-                  form.use_agent,
-                  {
-                    let toggle = toggle.clone();
-                    move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
-                  },
-                ))
-                .child(muted(tokens, agent_hint)),
-            )
-            // 私钥文件：右侧「选择…」开原生文件选择器——手输路径容易写错，选一次就到手
+            .child(panel::checkbox(
+              tokens,
+              "connect-use-agent",
+              "使用本地 ssh-agent",
+              agent_hint,
+              form.use_agent,
+              {
+                let toggle = toggle.clone();
+                move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
+              },
+            ))
+            // 私钥文件：右侧「选择」开原生文件选择器——手输路径容易写错，选一次就到手
             .child(
               div()
                 .flex()
@@ -228,7 +221,7 @@ impl ConnectModal {
                     .min_w(px(0.))
                     .child(input::field(tokens, cx, "私钥文件", &form.key_path)),
                 )
-                .child(panel::secondary_button(tokens, "connect-pick-key", "选择…", None, {
+                .child(panel::secondary_button(tokens, "connect-pick-key", "选择", None, {
                   let pick = actions.pick_key_file.clone();
                   move |_, window, cx| pick(window, cx)
                 })),
@@ -254,7 +247,7 @@ impl ConnectModal {
     );
     fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
-    // 组 3：跳板机（ADR-020）：折叠管可见性，chip 只管功能开关——关掉时
+    // 组 3：跳板机（ADR-020）：折叠管可见性，checkbox 只管功能开关——关掉时
     // 字段照常显示、配置保留，只是连接不走跳板。跳板密码不进钥匙串写进
     // 段说明。
     let jump_agent_hint = if form.jump_use_agent {
@@ -267,30 +260,23 @@ impl ConnectModal {
       .flex()
       .flex_col()
       .gap(px(8.))
-      .child(
-        div()
-          .flex()
-          .flex_wrap()
-          .items_center()
-          .gap(px(6.))
-          .child(panel::chip(
-            tokens,
-            "connect-jump-enabled",
-            "经跳板机连接",
-            form.jump_enabled,
-            {
-              let toggle = toggle.clone();
-              move |_, _, cx| toggle(ConnectToggle::JumpEnabled, cx)
-            },
-          ))
-          // 跳板链的第二跳要借本机 agent 盖章：依赖关系写在决策现场，
-          // 不然用户要到内网机器认证失败才撞见这个开关
-          .children(
-            form
-              .jump_enabled
-              .then(|| muted(tokens, "第二跳登录需要配合会话选项里的「转发 agent 到远端」")),
-          ),
-      )
+      .child(panel::checkbox(
+        tokens,
+        "connect-jump-enabled",
+        "经跳板机连接",
+        // 跳板链的第二跳要借本机 agent 盖章：依赖关系写在决策现场，
+        // 不然用户要到内网机器认证失败才撞见这个开关
+        if form.jump_enabled {
+          "第二跳登录需要配合会话选项里的「转发 agent 到远端」"
+        } else {
+          ""
+        },
+        form.jump_enabled,
+        {
+          let toggle = toggle.clone();
+          move |_, _, cx| toggle(ConnectToggle::JumpEnabled, cx)
+        },
+      ))
       .child(
         div()
           .flex()
@@ -306,24 +292,17 @@ impl ConnectModal {
               .child(input::field(tokens, cx, "跳板用户", &form.jump.user)),
           ),
       )
-      .child(
-        div()
-          .flex()
-          .flex_wrap()
-          .items_center()
-          .gap(px(6.))
-          .child(panel::chip(
-            tokens,
-            "connect-jump-agent",
-            "跳板用本地 ssh-agent",
-            form.jump_use_agent,
-            {
-              let toggle = toggle.clone();
-              move |_, _, cx| toggle(ConnectToggle::JumpUseAgent, cx)
-            },
-          ))
-          .child(muted(tokens, jump_agent_hint)),
-      )
+      .child(panel::checkbox(
+        tokens,
+        "connect-jump-agent",
+        "跳板用本地 ssh-agent",
+        jump_agent_hint,
+        form.jump_use_agent,
+        {
+          let toggle = toggle.clone();
+          move |_, _, cx| toggle(ConnectToggle::JumpUseAgent, cx)
+        },
+      ))
       .child(input::field(tokens, cx, "跳板私钥文件", &form.jump.key_path))
       .child(
         div()
@@ -381,26 +360,21 @@ impl ConnectModal {
           },
         ))
         .children(options_open.then(|| {
-          div().flex().flex_wrap().gap(px(8.)).child(
-            div()
-              .flex()
-              .flex_1()
-              .min_w(px(0.))
-              .flex_wrap()
-              .items_center()
-              .gap(px(6.))
-              .child(panel::chip(
-                tokens,
-                "connect-forward-agent",
-                "转发 agent 到远端",
-                form.forward_agent,
-                {
-                  let toggle = toggle.clone();
-                  move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
-                },
-              ))
-              .child(muted(tokens, "私钥不出本机")),
-          )
+          div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .child(div().flex().flex_1().min_w(px(0.)).child(panel::checkbox(
+              tokens,
+              "connect-forward-agent",
+              "转发 agent 到远端",
+              "私钥不出本机",
+              form.forward_agent,
+              {
+                let toggle = toggle.clone();
+                move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
+              },
+            )))
         })),
     );
     fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));

@@ -35,9 +35,13 @@ pub struct Actions {
   pub apply: WindowAction,
   /// 取消：要窗口——关闭时把焦点还给会话
   pub cancel: WindowAction,
-  pub toggle_kind: AppAction,
+  /// segmented 直选转发类型（选项下标）
+  pub select_kind: KindAction,
   pub toggle_bind: AppAction,
 }
+
+/// 直选转发类型的回调（segmented 落点）：参数是选项下标。
+pub type KindAction = Rc<dyn Fn(usize, &mut App)>;
 
 /// 运行中加规则的模态表单：一条共享草稿（GLOSSARY「转发规则草稿」）加
 /// 模态自己的错误位与焦点环——投影、校验、类型循环都在草稿里。
@@ -63,6 +67,11 @@ impl ForwardForm {
 
   pub fn toggle_kind(&mut self) {
     self.draft.kind = self.draft.kind.toggle();
+  }
+
+  /// segmented 直选转发类型。
+  pub fn select_kind(&mut self, option: usize) {
+    self.draft.kind = ForwardKind::from_index(option);
   }
 
   pub fn toggle_bind(&mut self) {
@@ -137,26 +146,28 @@ impl ModalView for ForwardModal {
       .items_center()
       .gap(px(6.))
       .child(prefix("监听"))
-      .child(panel::chip(
+      .child(panel::segmented(
         &tokens,
         "forward-form-kind",
-        form.draft.kind.label(),
-        true,
+        &ForwardKind::LABELS,
+        form.draft.kind.index(),
         {
-          let toggle = actions.toggle_kind.clone();
-          move |_, _, cx| toggle(cx)
+          let select = actions.select_kind.clone();
+          move |option, _, cx| select(option, cx)
         },
       ));
     if form.draft.kind.binds_locally() {
-      let (label, risky) = if form.draft.all_interfaces {
-        ("对外网开放", true)
-      } else {
-        ("仅本机", false)
-      };
-      listen_line = listen_line.child(panel::chip(&tokens, "forward-form-bind", label, risky, {
-        let toggle = actions.toggle_bind.clone();
-        move |_, _, cx| toggle(cx)
-      }));
+      listen_line = listen_line.child(panel::checkbox(
+        &tokens,
+        "forward-form-bind",
+        "对外网开放",
+        "",
+        form.draft.all_interfaces,
+        {
+          let toggle = actions.toggle_bind.clone();
+          move |_, _, cx| toggle(cx)
+        },
+      ));
     }
     listen_line = listen_line.child(div().w(px(96.)).child(form.draft.listen_port.clone()));
 

@@ -1,0 +1,7 @@
+# 统一行尾：仓库与工作区一律 LF，三平台检出与提交口径一致，不受各机 core.autocrlf 影响
+* text=auto eol=lf
+
+# 二进制资产显式排除，防止自动检测误判导致行尾转换损坏文件
+*.png binary
+*.ico binary
+*.icns binary

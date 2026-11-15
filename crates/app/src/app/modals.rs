@@ -726,11 +726,11 @@ fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> zhimaterm_connections::f
     apply: modal_action(cx, |this, window, cx| this.apply_forward(window, cx)),
     // 取消/关闭要还焦点：焦点是窗口资源，还焦点得拿得到窗口
     cancel: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),
-    toggle_kind: {
+    select_kind: {
       let app = app.clone();
-      Rc::new(move |cx| {
+      Rc::new(move |option, cx| {
         app.update(cx, |this, cx| {
-          this.mutate_forward_form(cx, |form| form.toggle_kind());
+          this.mutate_forward_form(cx, |form| form.select_kind(option));
         });
       })
     },

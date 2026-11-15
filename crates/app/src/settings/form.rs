@@ -11,7 +11,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Context, Entity, FocusHandle, Keystroke, Pixels, Window, div, px, relative};
+use gpui::{
+  AnyElement, App, Bounds, Context, Entity, FocusHandle, Keystroke, MouseDownEvent, Pixels, Window, div, px, relative,
+};
 
 use crate::settings::{
   DEFAULT_SCROLLING_HISTORY, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_UI_FONT_SIZE, SettingsValues,
@@ -1041,15 +1043,20 @@ impl ModalView for SettingsModal {
     let pick = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
       pick_form.update(cx, |form, cx| form.pick(field, index, cx));
     });
-    // 按下即进入拖选：高亮落在按下项，松开由拖选监听统一裁决拾取
+    // 按下即进入拖选：高亮落在按下项，按下位置即刻入账——静止点击没有
+    // mousemove 更新 drag_pos，自动滚动泵的视口判断只能靠它；漏记会让泵
+    // 拿陈旧值误判「指针在视口外」，点击变成逐帧滚动并选中漂移后的错行
     let press_form = self.form.clone();
-    let press = Rc::new(move |index: usize, _: &mut Window, cx: &mut App| {
-      press_form.update(cx, |form, cx| {
-        form.highlight = Some(index);
-        form.dropdown_dragging = true;
-        cx.notify();
-      });
-    });
+    let press = Rc::new(
+      move |index: usize, event: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+        press_form.update(cx, |form, cx| {
+          form.drag_pos = event.position;
+          form.highlight = Some(index);
+          form.dropdown_dragging = true;
+          cx.notify();
+        });
+      },
+    );
     let close_form = self.form.clone();
     let backdrop = select_backdrop(move |_, cx| {
       close_form.update(cx, |form, cx| form.close_dropdowns(cx));
@@ -1352,5 +1359,126 @@ mod tests {
     assert_eq!(RegistryChoice::from_index(0, 2), RegistryChoice::Default);
     assert_eq!(RegistryChoice::from_index(2, 2), RegistryChoice::Candidate(1));
     assert_eq!(RegistryChoice::from_index(3, 2), RegistryChoice::Custom);
+  }
+
+  /// 静止点击回归：按下选项到松开之间没有任何 mousemove，拖选自动滚动泵
+  /// 不得武装——滚动偏移不动、高亮停在按下项、松开选中按下的行。曾经
+  /// press 不记按下位置，drag_pos 停在初始 (0,0)，泵误判「指针在视口上方」
+  /// 逐帧上滚，点击变成「列表滚一段、选中漂移后的错行」。
+  #[gpui::test]
+  fn a_still_click_picks_the_pressed_row_without_drag_scrolling(cx: &mut gpui::TestAppContext) {
+    struct Harness {
+      form: Entity<SettingsForm>,
+    }
+
+    // 与 OverlayHost::render 同构的最小外壳：卡片与 floaters 挂同一根，
+    // 浮层的 absolute 定位因此落在窗口坐标系上，与生产一致
+    impl gpui::Render for Harness {
+      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let modal = SettingsModal {
+          form: self.form.clone(),
+          actions: ModalActions {
+            apply: Rc::new(|_, _| {}),
+            cancel: Rc::new(|_, _| {}),
+          },
+          error_banner: None,
+        };
+        let mut root = div()
+          .id("settings-harness")
+          .size_full()
+          .relative()
+          .child(modal.card(window, cx));
+        for floater in modal.floaters(window, cx) {
+          root = root.child(floater);
+        }
+        root
+      }
+    }
+
+    // 候选多于浮层容量（200px 上限约露 8 行）且选中项靠中：居中落位后
+    // 视口上方有真实滚动余量，泵若被误武装才滚得动
+    let mut lists = lists();
+    lists.terminal_fonts = (0..12).map(|index| format!("Mono {index}")).collect();
+    let candidate_count = lists.terminal_fonts.len();
+    let current = SettingsValues {
+      font_family: "Mono 6".to_owned(),
+      ..effective()
+    };
+
+    cx.update(|cx| zhimaterm_base::theme::init(None, cx));
+    let form = cx.new(|cx| SettingsForm::new(lists, current, cx));
+    let window = cx.add_window(|_, _| Harness { form: form.clone() });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    // 首帧画出卡片，选择框 bounds 记入槽位；点选择框展开下拉
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let anchor = cx.update(|_, cx| form.read(cx).terminal.bounds.get().center());
+    cx.simulate_click(anchor, gpui::Modifiers::default());
+    assert!(
+      cx.update(|_, cx| form.read(cx).is_open(DropdownField::Terminal)),
+      "点选择框应展开下拉"
+    );
+
+    // 居中在 on_next_frame 回调里应用，测试没有平台帧循环，手动泵两轮：
+    // 第一轮渲染浮层并排定位回调，第二轮应用居中并画出偏移
+    for _ in 0..2 {
+      cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        window.draw(cx).clear(cx);
+      });
+    }
+
+    // 挑一个居中后画在视口内、又不是选中项的候选行作点击目标
+    let (pressed, target) = cx.update(|_, cx| {
+      let form = form.read(cx);
+      let scroll = &form.dropdown_scroll;
+      let viewport = scroll.bounds();
+      assert!(scroll.offset().y < px(0.), "选中项居中后视口上方应有滚动余量");
+      let painted_center = |index: usize| {
+        let bounds = scroll.bounds_for_item(index).expect("候选行已布局");
+        gpui::point(viewport.center().x, bounds.center().y + scroll.offset().y)
+      };
+      let index = (1..candidate_count)
+        .find(|index| {
+          *index != form.terminal.selected && {
+            let y = painted_center(*index).y;
+            y > viewport.top() && y < viewport.bottom()
+          }
+        })
+        .expect("视口内应存在可点的非选中行");
+      (index, painted_center(index))
+    });
+
+    let offset_before = cx.update(|_, cx| form.read(cx).dropdown_scroll.offset().y);
+
+    // 按下后不再派发任何 mousemove（静止点击），帧循环跑几轮：泵若被
+    // 误武装，这几轮就是它的发作机会
+    cx.simulate_mouse_down(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+    for _ in 0..4 {
+      cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        window.draw(cx).clear(cx);
+      });
+    }
+
+    assert_eq!(
+      cx.update(|_, cx| form.read(cx).dropdown_scroll.offset().y),
+      offset_before,
+      "静止点击不得触发拖选自动滚动"
+    );
+    assert_eq!(
+      cx.update(|_, cx| form.read(cx).highlight),
+      Some(pressed),
+      "高亮必须停在按下项"
+    );
+
+    // 松开：拾取按下的那一行，下拉收起
+    cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+    assert_eq!(
+      cx.update(|_, cx| form.read(cx).terminal.selected),
+      pressed,
+      "静止点击必须选中按下的那一行"
+    );
+    assert!(!cx.update(|_, cx| form.read(cx).dropdown_open()), "拾取后下拉收起");
   }
 }
