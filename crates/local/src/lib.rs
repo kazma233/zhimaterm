@@ -15,6 +15,7 @@ pub mod shells;
 // 跨进程读 PEB 参数块（cwd/argv 采集）只存在于 Windows 生产路径
 #[cfg(windows)]
 pub mod peb;
-// WSL 只在 Windows 生产存在（ADR-021）；解析层的 fixture 测试保留在所有平台的测试构建里
-#[cfg(any(windows, test))]
+// WSL 域只在 Windows 存在（ADR-021），整文件平台模块（ADR-029 档 3）：
+// 编译与单测都在 Windows 实机执行，不在其他平台构建
+#[cfg(windows)]
 pub mod wsl;

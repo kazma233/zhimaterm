@@ -1,5 +1,9 @@
 //! WSL 分发版枚举、启动命令构造与管理命令层（ADR-021）。
 //!
+//! 整个模块只在 Windows 编译（ADR-029 档 3：WSL 域只在 Windows 存在，
+//! 生产调用方——session 的启动分支与 app 的管理页——同在 Windows 门内），
+//! 编译与单测在 Windows 实机执行，不在其他平台构建。
+//!
 //! 枚举只认注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`：
 //! 新版 WSL（Store 版）注册的分发版都带 `Modern=1`，Windows Terminal 的生成器
 //! 跳过它们会列出空表（本机实测），因此这里**不读** `Modern`、全部保留；
@@ -89,10 +93,8 @@ fn is_utility_distro(name: &str) -> bool {
 /// 整目录递归求和。任何一步读不到都返回 None——占用是展示信息，缺了不能
 /// 拖垮列表。
 pub(crate) fn disk_usage(base_path: Option<&str>, wsl_version: Option<u32>) -> Option<u64> {
-  // 注册表里的 BasePath 混用 `\` 与 `/`（导入分发版常见正斜杠），统一成
-  // 当前平台的主分隔符：Windows 归 `\`，其余平台归 `/`——本函数无平台
-  // 门控，跨平台单测要求它在哪边都拿得到真实路径
-  let base = std::path::PathBuf::from(base_path?.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR));
+  // 注册表里的 BasePath 混用 `\` 与 `/`（导入分发版常见正斜杠），统一成 `\`
+  let base = std::path::PathBuf::from(base_path?.replace('/', "\\"));
   if wsl_version == Some(2) {
     return std::fs::metadata(base.join("ext4.vhdx")).ok().map(|meta| meta.len());
   }
@@ -117,7 +119,7 @@ fn directory_size(dir: &std::path::Path) -> Option<u64> {
 
 /// wsl.exe 管理命令的输出解码：重定向下 wsl.exe 写 UTF-16LE（带 BOM 更稳），
 /// 交互控制台下又是当前代码页的字节。按「BOM → UTF-8 可解 → 按 UTF-16LE」
-/// 的顺序试，纯函数可跨平台单测。
+/// 的顺序试。
 pub(crate) fn decode_wsl_output(bytes: &[u8]) -> String {
   if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
     return decode_utf16le(&bytes[2..]);
@@ -203,8 +205,6 @@ pub(crate) fn parse_online_list(text: &str) -> Vec<String> {
 
 /// WSL 会话的子进程命令（ADR-021）。显式 System32 全路径防 PATH 劫持；
 /// `--cd ~` 让会话落在 Linux home（不传则落在应用 cwd 的 `/mnt/c/...` 翻译）。
-/// 只在 Windows 有调用方：`LocalShell::Wsl` 的命令构造分支是 cfg(windows) 的。
-#[cfg(windows)]
 pub fn launch_command(distro: &str) -> crate::pty::Command {
   let mut command = crate::pty::Command::new(system32_wsl());
   command.args(["-d", distro, "--cd", "~"]);
@@ -213,7 +213,6 @@ pub fn launch_command(distro: &str) -> crate::pty::Command {
 
 /// System32 下的 wsl.exe 全路径。`SystemRoot` 是 Windows 保证存在的环境变量，
 /// 读不到宁可 panic 也不用相对路径顶替——那正是要防的劫持面。
-#[cfg(windows)]
 fn system32_wsl() -> std::path::PathBuf {
   let system_root = std::env::var_os("SystemRoot").expect("Windows 保证 SystemRoot 环境变量存在");
   std::path::PathBuf::from(system_root).join("System32").join("wsl.exe")
@@ -222,7 +221,6 @@ fn system32_wsl() -> std::path::PathBuf {
 /// 枚举本机分发版（仅 Windows，ADR-021）：读 `HKCU\...\Lxss` 的 `{GUID}` 子键，
 /// 运行态以 `wsl --list --running` 为准（注册表 `State` 停止后不回写，不可信）。
 /// 根键打不开（未装 WSL）按零分发版处理，调用方据此隐藏入口。
-#[cfg(windows)]
 pub fn list_distros() -> Vec<WslDistro> {
   const LXSS: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss";
 
@@ -264,7 +262,6 @@ pub fn list_distros() -> Vec<WslDistro> {
 
 /// 跑一条 wsl.exe 子命令，成功返回 stdout 文本，失败带错误文本或退出码。
 /// 阻塞调用（安装/转换可能数分钟），调用方放后台线程。
-#[cfg(windows)]
 fn run_wsl(args: &[&str]) -> Result<String, String> {
   let output = std::process::Command::new(system32_wsl())
     .args(args)
@@ -276,7 +273,6 @@ fn run_wsl(args: &[&str]) -> Result<String, String> {
 /// [`run_wsl`] 的 stdin 变体：`stdin` 全量写入子进程标准输入（写
 /// `/etc/wsl.conf` 用——整文件经 stdin 传输，内容不进命令行参数，免去
 /// shell 转义与注入面）。
-#[cfg(windows)]
 fn run_wsl_with_stdin(args: &[&str], stdin: &str) -> Result<String, String> {
   use std::io::Write;
   use std::process::Stdio;
@@ -302,7 +298,6 @@ fn run_wsl_with_stdin(args: &[&str], stdin: &str) -> Result<String, String> {
 }
 
 /// 汇总退出码与输出（[`run_wsl`]/[`run_wsl_with_stdin`] 共用）。
-#[cfg(windows)]
 fn finish_wsl(args: &[&str], output: std::process::Output) -> Result<String, String> {
   if !output.status.success() {
     return Err(failure_message(
@@ -317,7 +312,6 @@ fn finish_wsl(args: &[&str], output: std::process::Output) -> Result<String, Str
 
 /// 失败消息取可读文本：wsl.exe 把错误写在 stdout（UTF-16，如更新包下载被拒的
 /// `Wsl/UpdatePackage/0x80190193`），stderr 通常为空；两边都空才报退出码。
-#[cfg(windows)]
 fn failure_message(args: &[&str], stdout: &[u8], stderr: &[u8], code: Option<i32>) -> String {
   let stderr = decode_wsl_output(stderr).trim().to_owned();
   if !stderr.is_empty() {
@@ -331,18 +325,14 @@ fn failure_message(args: &[&str], stdout: &[u8], stderr: &[u8], code: Option<i32
 }
 
 /// 可在线安装的分发版（`wsl --list --online`）。
-#[cfg(windows)]
 pub fn list_online() -> Result<Vec<String>, String> {
   let text = run_wsl(&["--list", "--online"])?;
   Ok(parse_online_list(&text))
 }
 
-/// 在线安装的参数拼装（纯函数可测）：`location`/`name`/`vhd_size` 为空用
-/// 系统默认，`no_launch` 装完不自动进首次设置（回列表由用户自己开），
-/// `web_download` 走网络源而非 Microsoft Store，`fixed_vhd` 建固定大小磁盘。
-/// 唯一调用方 `install` 是 Windows 门控，参数拼装随同门（macOS/Linux 不编译，
-/// 避免 dead_code 警告）。
-#[cfg(windows)]
+/// 在线安装的参数拼装：`location`/`name`/`vhd_size` 为空用系统默认，
+/// `no_launch` 装完不自动进首次设置（回列表由用户自己开），`web_download`
+/// 走网络源而非 Microsoft Store，`fixed_vhd` 建固定大小磁盘。
 pub(crate) fn install_args(
   distro: &str,
   location: Option<&str>,
@@ -372,7 +362,6 @@ pub(crate) fn install_args(
 }
 
 /// 在线安装分发版（`wsl --install`，参数见 [`install_args`]）。
-#[cfg(windows)]
 pub fn install(
   distro: &str,
   location: Option<&str>,
@@ -407,7 +396,6 @@ pub fn is_valid_user_name(name: &str) -> bool {
 /// `adduser -D`）；加 sudo/wheel 组（逐个尽力而为，缺组不致命）；官方
 /// `--manage --set-default-user` 写默认用户。前两步会短暂启动一次分发版，
 /// 调用方在「装完不自动启动」时负责随后终止。
-#[cfg(windows)]
 pub fn install_set_default_user(distro: &str, user: &str) -> Result<(), String> {
   if !is_valid_user_name(user) {
     return Err(format!("用户名 {user:?} 不合法（字母或 _ 开头，仅字母/数字/_.-）"));
@@ -439,14 +427,12 @@ pub fn install_set_default_user(distro: &str, user: &str) -> Result<(), String> 
 }
 
 /// 设为默认分发版（`wsl --set-default`）。
-#[cfg(windows)]
 pub fn set_default(name: &str) -> Result<String, String> {
   run_wsl(&["--set-default", name])
 }
 
 /// `wsl --manage` 的分发版专属设置（稀疏 VHD/移动/调整磁盘大小）。
 /// 默认用户走 `/etc/wsl.conf` 的 `[user] default`（见 [`merge_wsl_conf`]）。
-#[cfg(windows)]
 pub fn manage(distro: &str, options: &[&str]) -> Result<String, String> {
   let mut args = vec!["--manage", distro];
   args.extend_from_slice(options);
@@ -454,19 +440,16 @@ pub fn manage(distro: &str, options: &[&str]) -> Result<String, String> {
 }
 
 /// 稀疏 VHD 开关（`--set-sparse true|false`）：开了允许自动回收磁盘空间。
-#[cfg(windows)]
 pub fn manage_set_sparse(distro: &str, sparse: bool) -> Result<String, String> {
   manage(distro, &["--set-sparse", if sparse { "true" } else { "false" }])
 }
 
 /// 把分发版移到新位置（`--move`）：耗时与目标盘速度相关，分发版需停止。
-#[cfg(windows)]
 pub fn manage_move(distro: &str, location: &str) -> Result<String, String> {
   manage(distro, &["--move", location])
 }
 
 /// 调整分发版磁盘大小（`--resize`，如 `512GB`）。
-#[cfg(windows)]
 pub fn manage_resize(distro: &str, size: &str) -> Result<String, String> {
   manage(distro, &["--resize", size])
 }
@@ -520,7 +503,6 @@ pub struct WslConfSettings {
 
 /// 读取分发版的 `/etc/wsl.conf`（文件不存在按空文件处理）。
 /// 注意这会启动分发版（需要秒级）。
-#[cfg(windows)]
 pub fn read_wsl_conf(distro: &str) -> Result<String, String> {
   run_wsl(&["-d", distro, "--exec", "cat", "/etc/wsl.conf"]).or_else(|_| {
     run_wsl(&[
@@ -536,7 +518,6 @@ pub fn read_wsl_conf(distro: &str) -> Result<String, String> {
 
 /// 写回分发版的 `/etc/wsl.conf`（root 身份，整文件经 stdin 传输）。
 /// 写完需要 `wsl --terminate <distro>` 才生效。
-#[cfg(windows)]
 pub fn write_wsl_conf(distro: &str, content: &str) -> Result<(), String> {
   run_wsl_with_stdin(
     &["-d", distro, "-u", "root", "--exec", "sh", "-c", "cat > /etc/wsl.conf"],
@@ -778,20 +759,17 @@ pub fn merge_wsl_conf(original: &str, settings: &WslConfSettings) -> String {
 }
 
 /// 终止分发版（`wsl --terminate`）。
-#[cfg(windows)]
 pub fn terminate(name: &str) -> Result<String, String> {
   run_wsl(&["--terminate", name])
 }
 
 /// 删除分发版（`wsl --unregister`）：数据永久丢失，调用方必须先确认。
-#[cfg(windows)]
 pub fn unregister(name: &str) -> Result<String, String> {
   run_wsl(&["--unregister", name])
 }
 
 /// 关闭全部分发版与 WSL2 轻量虚拟机（`wsl --shutdown`）。`force` 加
 /// `--force`：即使有操作在执行也终止，可能数据丢失，调用方必须先确认。
-#[cfg(windows)]
 pub fn shutdown(force: bool) -> Result<String, String> {
   if force {
     run_wsl(&["--shutdown", "--force"])
@@ -801,19 +779,16 @@ pub fn shutdown(force: bool) -> Result<String, String> {
 }
 
 /// 更新 WSL 本体（`wsl --update`）。
-#[cfg(windows)]
 pub fn update() -> Result<String, String> {
   run_wsl(&["--update"])
 }
 
 /// WSL 本体的版本信息（`wsl --version`，多行文本，只读展示用）。
-#[cfg(windows)]
 pub fn version() -> Result<String, String> {
   run_wsl(&["--version"])
 }
 
 /// Lxss 下的分发版子键名是 38 字符的 `{GUID}`；其余子键（如 `AutoProxy`）跳过。
-#[cfg(windows)]
 fn is_distro_guid(guid: &str) -> bool {
   guid.len() == 38 && guid.starts_with('{') && guid.ends_with('}')
 }
@@ -822,7 +797,6 @@ fn is_distro_guid(guid: &str) -> bool {
 mod tests {
   use super::{RawDistro, WslDistro, decode_wsl_output, disk_usage, parse_online_list, select_distros};
 
-  #[cfg(windows)]
   use super::launch_command;
 
   fn raw(guid: &str, name: &str) -> RawDistro {
@@ -838,7 +812,6 @@ mod tests {
 
   /// 真实注册表冒烟：读出来的是「干净的用户分发版列表」——名字非空、
   /// 无工具分发版、默认至多一个。不绑定具体机器装了哪些分发版。
-  #[cfg(windows)]
   #[test]
   fn real_registry_lists_clean_user_distros() {
     let distros = super::list_distros();
@@ -852,7 +825,6 @@ mod tests {
   }
 
   /// 启动命令钉死 System32 全路径（防 PATH 劫持）与 `--cd ~`（Linux home）。
-  #[cfg(windows)]
   #[test]
   fn launch_command_pins_system32_and_home() {
     use std::ffi::OsStr;
@@ -1025,7 +997,6 @@ mod tests {
 
   /// 失败消息优先取 stdout 的错误文本（wsl.exe 的错误走 stdout，UTF-16LE
   /// 无 BOM），stderr 有内容才优先 stderr，两边都空才报退出码。
-  #[cfg(windows)]
   #[test]
   fn failure_message_reads_stdout_error_text() {
     use super::failure_message;
