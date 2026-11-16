@@ -89,8 +89,10 @@ fn is_utility_distro(name: &str) -> bool {
 /// 整目录递归求和。任何一步读不到都返回 None——占用是展示信息，缺了不能
 /// 拖垮列表。
 pub(crate) fn disk_usage(base_path: Option<&str>, wsl_version: Option<u32>) -> Option<u64> {
-  // 注册表里的 BasePath 混用 `\` 与 `/`（导入分发版常见正斜杠），统一成 `\`
-  let base = std::path::PathBuf::from(base_path?.replace('/', "\\"));
+  // 注册表里的 BasePath 混用 `\` 与 `/`（导入分发版常见正斜杠），统一成
+  // 当前平台的主分隔符：Windows 归 `\`，其余平台归 `/`——本函数无平台
+  // 门控，跨平台单测要求它在哪边都拿得到真实路径
+  let base = std::path::PathBuf::from(base_path?.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR));
   if wsl_version == Some(2) {
     return std::fs::metadata(base.join("ext4.vhdx")).ok().map(|meta| meta.len());
   }
