@@ -2186,7 +2186,7 @@ impl zhimaterm_base::ui::overlay::ModalView for WslInstallModal {
       selected,
       highlighted,
       &bounds,
-      window.viewport_size().height,
+      window.viewport_size(),
       &scroll,
       press,
       pick,

@@ -513,7 +513,7 @@ impl TerminalView {
     self.state.data().title.as_deref()
   }
 
-  /// 会话来源（`LOCAL` / `user@host:port`）：侧栏行的第二行显示它。
+  /// 会话来源（`LOCAL` / `user@host:port`）：关闭确认模态里标识受影响的格。
   pub fn source(&self) -> &str {
     &self.source
   }
@@ -1686,8 +1686,9 @@ fn status_extras(
   any.then(move || row.into_any_element())
 }
 
-/// 搜索条（ADR-015）：终端底部的覆盖层——输入框、正则开关、反馈与关闭。
-/// 覆盖而不是挤占网格：搜索开关不改变网格行列数，PTY 不被无谓 resize。
+/// 搜索条（ADR-015，2026-11-16 修订位置）：终端右上角的浮动覆盖层——输入框、
+/// 正则开关、反馈与关闭。覆盖而不是挤占网格：搜索开关不改变网格行列数，
+/// PTY 不被无谓 resize。右缘锚定、宽度随内容自适应（反馈文案长了向左生长）。
 fn render_search_bar(
   input: Option<&gpui::Entity<TextInput>>,
   regex_enabled: bool,
@@ -1700,8 +1701,7 @@ fn render_search_bar(
   let regex_view = view.clone();
   let mut bar = div()
     .absolute()
-    .bottom(px(8.))
-    .left(px(8.))
+    .top(px(8.))
     .right(px(8.))
     .rounded(px(8.))
     .border_1()
@@ -1721,7 +1721,8 @@ fn render_search_bar(
         .child("搜索"),
     );
   if let Some(input) = input {
-    bar = bar.child(div().flex_1().min_w(px(0.)).child(input.clone()));
+    // 列包装让输入框沿交叉轴撑满定宽（与 input::field 同款机制）
+    bar = bar.child(div().w(px(180.)).flex().flex_col().child(input.clone()));
   }
   // 正则开关：默认关（字面匹配），开着时文案提示当前解释方式
   bar = bar.child(

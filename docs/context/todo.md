@@ -19,6 +19,11 @@ perf-acceptance §5、mobaxterm-gap-and-priorities，现以本文件为唯一入
 - 连接期密码回退（2026-10-29 小节，ADR-018/048 修订）。
 - 询问门与身份随行（2026-10-29 小节，ADR-018 修订补记；键盘交互-only 形态
   优先真机验收，测试容器改制只作降级路径）。
+- 窗口顶栏与侧栏动作行（2026-11-16 小节，ADR-057 及修订）：macOS 全套
+  （红绿灯留位、拖拽/双击、搜索过滤、图标入口、几何往返、全屏切换）；
+  Windows/Linux 实机验证与冒烟步骤见小节。
+- 终端搜索条位置（2026-11-16 小节，ADR-015 修订）：右上角浮动条的人工
+  验收（不挤占网格、增量搜索与 Esc 语义不变）。
 - PowerShell 下「cd 后退出」的目录恢复无平台途径（Set-Location 不落进程
   cwd，ADR-039 修订段）；要覆盖它需 shell integration（OSC 7 被动监听或
   prompt 注入），是否立项待定。
@@ -41,6 +46,17 @@ perf-acceptance §5、mobaxterm-gap-and-priorities，现以本文件为唯一入
 - 2026-10-23 之后的批次（连接弹窗列表优先、侧栏重命名、探针结束进程与详情弹层、
   连接期密码询问全链路、gpui-pre 0.3.10 升级）只在本机（macOS）验证过；
   Windows/Linux 无实机记录（Windows 侧编译门控 unverified）。
+- 窗口顶栏（ADR-057，2026-11-16）：macOS 全量收尾检查通过；Windows/Linux
+  分支（caption 按钮、Client 装饰请求与按钮渲染）是同源 gpui API 的统一代码，
+  rustc/clippy 在 macOS 侧已过，但两平台均未编译与实机验证——待 Windows/
+  Linux 桌面各跑一遍 `cargo check --all-targets` + 冒烟（步骤见
+  `manual-acceptance.md` 窗口顶栏小节）。Linux CSD 的阴影/圆角精修
+  （`set_client_inset`/`set_client_corner_radii`）后置。
+- 遗留（2026-11-16 发现，先于顶栏批次存在）：`wsl::tests::wsl2_size_reads_ext4_vhdx`
+  与 `wsl1_size_sums_directory` 在 macOS 上失败（干净 main 同样失败，
+  stash 对照确证；WSL 批次应只在 Windows 验证过）；`install_args` 的
+  dead_code 警告已随本次补 `#[cfg(windows)]` 门。两个失败用例需要 WSL
+  批次的作者在 Windows 上复核门控或修断言。
 - CI 三平台 matrix：暂缓（见「明确不管/后置」）。
 
 ## 功能池 P2 剩余

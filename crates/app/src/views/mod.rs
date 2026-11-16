@@ -8,6 +8,8 @@
 //! 位置），依赖方向一律自上而下。
 
 pub mod grid;
+/// 内嵌单色 SVG 图标（侧栏会话入口等 icon-only 控件共用）。
+pub mod icons;
 pub mod panes;
 pub mod session_state;
 pub mod sftp_panel;
@@ -15,6 +17,8 @@ pub mod shell;
 pub mod terminal_keys;
 pub mod terminal_view;
 pub mod theme_picker;
+/// 窗口顶栏（ADR-057）：自绘标题栏的平台部分；内容装配在 app/render.rs。
+pub mod title_bar;
 /// WSL 管理页面（仅 Windows）：域数据全在 local，页面只是消费方。
 #[cfg(windows)]
 pub mod wsl_page;

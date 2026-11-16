@@ -1,4 +1,4 @@
-//! 应用外壳：左侧会话栏 + 当前标签的终端区域。
+//! 应用外壳：窗口顶栏（ADR-057）+ 左侧会话栏 + 当前标签的终端区域。
 //!
 //! 每个标签持有若干分屏格（ADR-014），每格是独立的 `TerminalView` 实体
 //! （各自持有 worker 与画面帧）；这里只负责标签与格的创建、分割、切换、
@@ -9,7 +9,7 @@
 //! - `workspace_io`：工作区快照、恢复与防抖落盘
 //! - `modals`：连接/设置/转发/快捷键/重命名等模态装配与动作回调
 //! - `keys`：裸键分发与侧栏菜单的捕获阶段按键
-//! - `render`：`Render` 实现、侧栏与格区域渲染装配
+//! - `render`：`Render` 实现、窗口顶栏内容装配与侧栏/格区域渲染装配
 
 mod keys;
 mod modals;
@@ -32,6 +32,7 @@ use crate::views::terminal_view::TerminalView;
 use crate::views::theme_picker::ThemePicker;
 use crate::workspace::{self, PaneId};
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
+use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView};
 use zhimaterm_connections::connections;
@@ -106,6 +107,10 @@ pub struct ZhimaTermApp {
   /// 遮罩与浮层挂在应用根部盖住全窗；不入浮层栈——它不持有焦点，与主题
   /// 下拉同为锚定浮层，任何层入栈即收起
   sidebar_menu: Option<(usize, Point<Pixels>)>,
+  /// 顶栏拖拽状态机的武装标记（ADR-057）：按下置位、移动触发挪窗并复位、
+  /// 抬起/外部按下复位。Rc<Cell> 让 views::title_bar 的监听闭包只捕获共享
+  /// 标记、不捕获应用实体，平台渲染件保持「数据进、Div 出」。
+  title_bar_move_armed: Rc<Cell<bool>>,
   /// 侧栏右键菜单的键盘高亮游标：菜单开着期间与 `sidebar_menu` 配对使用
   sidebar_menu_cursor: menu::MenuCursor,
   /// 保存过的 SSH 连接与读盘错误（ADR-044 实体化）。读走投影、写走冻结
@@ -114,6 +119,9 @@ pub struct ZhimaTermApp {
   /// 发生在本实体的 update 里，读同实体会重入 panic——数据归属仍是这里，
   /// 模态只读渲染。
   saved: Entity<SavedSources>,
+  /// 侧栏顶部的会话搜索框（ADR-057 修订）：过滤文本唯一住在输入框里，
+  /// 侧栏行装配时读它现算；编辑经实体观察者唤醒本实体重画。
+  session_search: Entity<TextInput>,
   /// 主题选择器：开合状态与浮层锚点，渲染在 views::theme_picker（ADR-027）。
   /// 点击项切换但不收起，收起只由点击下拉之外触发——连续点几项比对
   /// 观感是主要用法。不属于模态：打开任何模态时收起它（等价「点外部」）。
@@ -183,6 +191,17 @@ impl ZhimaTermApp {
       settings_store.settings().and_then(|store| store.text_editor.as_deref()),
     );
 
+    let session_search = cx.new(|cx| {
+      TextInput::new(
+        cx,
+        "搜索会话",
+        false,
+        font::ui_font(ui_font_family.as_deref().unwrap_or(font::SYSTEM_UI_FONT)),
+      )
+    });
+    // 搜索文本存在输入框实体里（单一来源），观察者只负责唤醒侧栏重算过滤
+    cx.observe(&session_search, |_, _, cx| cx.notify()).detach();
+
     let mut app = Self {
       tabs: Vec::new(),
       active: 0,
@@ -206,7 +225,9 @@ impl ZhimaTermApp {
       sidebar_resizing: None,
       sidebar_menu: None,
       sidebar_menu_cursor: Default::default(),
+      title_bar_move_armed: Rc::new(Cell::new(false)),
       saved: cx.new(|_| saved_sources),
+      session_search,
       theme_picker: ThemePicker::new(),
       last_window: Some(workspace::Workspace::saved_window(window.window_bounds())),
       bounds_save_generation: 0,

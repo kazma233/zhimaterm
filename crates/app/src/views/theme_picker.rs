@@ -1,4 +1,4 @@
-//! 主题选择器：侧栏底部的入口行与向上弹出的锚定浮层（ADR-027）。
+//! 主题选择器：窗口顶栏右区的入口与向下弹出的锚定浮层（ADR-027/057）。
 //!
 //! 开合状态、bounds 槽与全部渲染单点在本模块（视图层的外壳部件，ADR-007
 //! 修订五从 `theme::picker` 移入）；应用与落盘的编排——`set_theme`、扇出
@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, Pixels, div, px};
+use gpui::{App, Bounds, MouseButton, Pixels, Size, div, px};
 
 use zhimaterm_base::theme::{UiTokens, builtin, builtin_names_sorted, current};
 use zhimaterm_base::ui::canvas;
@@ -54,8 +54,10 @@ pub struct PickerActions {
 /// 选定一个主题的回调：主题名是内嵌表里的静态名，故取 `&'static str`。
 pub type PickTheme = Rc<dyn Fn(&'static str, &mut App)>;
 
-/// 侧边栏底部动作行末尾的主题入口（ADR-041）：只显示当前主题的三点色板，
-/// 不放主题名；名字在展开的下拉项里看。入口宽度固定，不随主题名长短变化。
+/// 窗口顶栏右区的主题入口（ADR-057，取代 ADR-041 的侧栏底部位置）：只显示
+/// 当前主题的三点色板，不放主题名；名字在展开的下拉项里看。入口宽度固定，
+/// 不随主题名长短变化。按下与点击截断传播——顶栏根元素是拖拽区，入口按下
+/// 不武装拖拽、点击不触发根元素的双击判定。
 pub fn entry(tokens: &UiTokens, picker: &ThemePicker, actions: &PickerActions, cx: &App) -> gpui::Stateful<gpui::Div> {
   let scheme = current(cx).scheme;
   div()
@@ -72,22 +74,27 @@ pub fn entry(tokens: &UiTokens, picker: &ThemePicker, actions: &PickerActions, c
     .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .on_click({
       let toggle = actions.toggle.clone();
-      move |_, _, cx| toggle(cx)
+      move |_, _, cx| {
+        cx.stop_propagation();
+        toggle(cx)
+      }
     })
     // 入口只有色板没有名字：主题名由 tooltip 补上（名字在展开的下拉项里看）
     .tooltip(zhimaterm_base::ui::tooltip::tip(current(cx).name))
-    // bounds 在渲染帧写进槽位：展开的浮层按它定位到正上方
+    // bounds 在渲染帧写进槽位：展开的浮层按它定位到正下方
     .child(canvas::bounds_recorder(picker.bounds.clone()))
+    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .child(swatch(tokens, &scheme))
 }
 
 /// 展开时的点击遮罩与锚定浮层（遮罩在下层截住「点别处收起」，浮层锚在入口
-/// 正上方——入口贴着侧栏底缘，向下展开会溢出窗口）；未展开时为空。
+/// 正下方——入口贴着窗口顶缘，向上展开会溢出窗口；横向夹取在浮层外壳，
+/// 右区入口不会带着下拉溢出右缘）；未展开时为空。
 pub fn layers(
   tokens: &UiTokens,
   picker: &ThemePicker,
   actions: &PickerActions,
-  viewport_height: Pixels,
+  viewport: Size<Pixels>,
   cx: &App,
 ) -> Vec<gpui::AnyElement> {
   if !picker.open {
@@ -109,7 +116,8 @@ pub fn layers(
       tokens,
       "theme-popover",
       anchor,
-      PopoverSide::Above { viewport_height },
+      PopoverSide::Below,
+      viewport,
       px(230.),
       px(420.),
       None,
@@ -169,7 +177,8 @@ fn row(
 }
 
 /// 主题色板：主题背景色块内叠红/绿/蓝三个点，一眼读出配色倾向。
-/// 底部入口与下拉项共用这一尺寸：入口只靠它表达当前主题（ADR-041）。
+/// 顶栏入口与下拉项共用这一尺寸：入口只靠它表达当前主题（ADR-041 形态、
+/// ADR-057 位置）。
 fn swatch(tokens: &UiTokens, scheme: &zhimaterm_base::theme::ColorScheme) -> gpui::Div {
   let dot = |color: u32| {
     div()

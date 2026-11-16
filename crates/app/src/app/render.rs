@@ -5,16 +5,17 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{App, Context, MouseButton, MouseDownEvent, Pixels, Point, Render, Size, Window, div, px};
 
+use crate::views::icons;
 use crate::views::panes;
 use crate::views::shell;
 use crate::views::theme_picker;
+use crate::views::title_bar;
 use crate::workspace::SplitAxis;
 use zhimaterm_base::font;
 use zhimaterm_base::input::{CloseSession, NewSession, SplitDown, SplitRight};
-use zhimaterm_base::ui::WindowAction;
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::overlay::{KeyHandling, overlay_host};
-use zhimaterm_base::ui::{ACTION_ENTRY_HEIGHT, panel, ui_rems, vertical_divider};
+use zhimaterm_base::ui::{panel, ui_rems};
 
 use super::modals::theme_picker_actions;
 use super::{Tab, ZhimaTermApp};
@@ -25,7 +26,6 @@ use super::{Tab, ZhimaTermApp};
 struct DraggedSession {
   from: usize,
   label: String,
-  source: String,
   /// 拖起时的侧栏宽度：幻影浮在侧栏之外没有父宽度约束，不记下来会缩成内容宽
   width: f32,
 }
@@ -39,75 +39,40 @@ struct DragGhost {
 impl Render for DragGhost {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let tokens = zhimaterm_base::theme::tokens(cx);
-    shell::render_sidebar_row(
-      &tokens,
-      &self.session.label,
-      &self.session.source,
-      true,
-      false,
-      false,
-      false,
-    )
-    .w(px(self.session.width))
-    .opacity(0.85)
+    shell::render_sidebar_row(&tokens, &self.session.label, true, false, false, false)
+      .w(px(self.session.width))
+      .opacity(0.85)
   }
 }
 
 impl ZhimaTermApp {
-  /// 侧栏底部的会话入口（ADR-041）：在动作行里等分，短标签居中，
-  /// 与顶栏入口同字号、同 hover。点击语义由按钮基座接管。
-  fn session_entry(
+  /// 侧栏顶部的图标会话入口（SSH / WSL / 本地，ADR-057 修订）：SVG 图标
+  /// SVG 图标入口（侧栏动作行 SSH/WSL/本地 与顶栏右区 快捷键/设置 共用，
+  /// ADR-057 修订）：单色 SVG 按 `color` 渲染，语义由 tooltip 补上；共用
+  /// [`shell::header_button`] 的固定外框。按下与点击都截断传播——顶栏根
+  /// 元素是拖拽区，入口按下不武装拖拽、点击不触发根元素的双击判定（侧栏
+  /// 处无副作用，入口行为统一一套）。
+  fn svg_icon_entry(
     &self,
     id: &'static str,
-    label: &str,
-    open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    cx: &mut Context<Self>,
-  ) -> gpui::Stateful<gpui::Div> {
-    panel::clickable(id, cx.listener(move |this, _, window, cx| open(this, window, cx)))
-      .flex_1()
-      .min_w(px(0.))
-      .flex()
-      .items_center()
-      .justify_center()
-      .overflow_hidden()
-      .px(px(2.))
-      // 与主题色板入口显式等高（ACTION_ENTRY_HEIGHT）：hover 高亮框大小一致
-      .h(px(ACTION_ENTRY_HEIGHT))
-      .rounded(px(4.))
-      .text_size(ui_rems(11.))
-      .text_color(gpui::rgb(zhimaterm_base::theme::tokens(cx).fg_secondary))
-      .hover(|style| style.bg(gpui::rgb(zhimaterm_base::theme::tokens(cx).bg_hover)))
-      .child(label.to_owned())
-  }
-
-  /// 顶栏右侧的图标入口（设置）：与 ? 共用 [`shell::header_button`] 的固定外框，
-  /// 这里只设置图标字号与字形本身；不占用底部动作行（ADR-041）。
-  fn icon_entry(
-    &self,
-    id: &'static str,
-    icon: &str,
+    icon: &'static str,
     tip: &'static str,
+    color: u32,
     open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     cx: &mut Context<Self>,
   ) -> gpui::Stateful<gpui::Div> {
+    let tokens = zhimaterm_base::theme::tokens(cx);
     shell::header_button(
-      &zhimaterm_base::theme::tokens(cx),
+      &tokens,
       id,
-      cx.listener(move |this, _, window, cx| open(this, window, cx)),
+      cx.listener(move |this, _, window, cx| {
+        cx.stop_propagation();
+        open(this, window, cx)
+      }),
     )
     .tooltip(zhimaterm_base::ui::tooltip::tip(tip))
-    .text_size(ui_rems(14.))
-    // 图标字形宽度不等：固定宽度并居中，换图标也不会带着整行的间距跑
-    .child(
-      div()
-        .relative()
-        // ⚙ 放大到 14px 后墨迹中心比 11px 的 ? 低约 1.5px：只上移字形，
-        // 行高与点击区域保持与 ? 对齐
-        .top(px(-1.5))
-        .w(px(14.))
-        .text_center()
-        .child(icon.to_owned()),
-    )
+    .child(icons::icon(icon).text_color(gpui::rgb(color)))
+    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
   }
 
   // 侧栏调宽：手柄在右缘，指针偏移即宽度偏移，夹在允许范围内。
@@ -265,93 +230,107 @@ impl Render for ZhimaTermApp {
       self.applied_title = title;
     }
 
-    let rows = self
+    // 会话搜索框的过滤文本（唯一住在输入框实体里，ADR-057 修订）：
+    // 侧栏行按它现算，编辑经实体观察者唤醒重画
+    let filter = self.session_search.read(cx).text().trim().to_lowercase();
+    let rows: Vec<gpui::AnyElement> = self
       .tabs
       .iter()
       .enumerate()
-      .map(|(index, tab)| {
+      .filter_map(|(index, tab)| {
         // 标题：用户起的名字优先，否则聚焦格的自动标题（ADR-047/053）
         let label = tab.label(cx);
-        let (source, exited, bell, log_warning) = tab
+        let (exited, bell, log_warning) = tab
           .focused_view()
           .map(|view| {
             let view = view.read(cx);
             (
-              view.source().to_owned(),
               view.is_exited(),
               tab.views.values().any(|pane| pane.read(cx).bell_pending()),
               tab.views.values().any(|pane| pane.read(cx).log_warning()),
             )
           })
-          .unwrap_or_else(|| ("—".to_owned(), true, false, false));
+          .unwrap_or_else(|| (true, false, false));
+        // 过滤只影响渲染：行仍携带原始下标，✕/激活/拖拽排序都不受影响
+        if !session_matches_filter(&label, &filter) {
+          return None;
+        }
         let bg_drag = tokens.bg_drag;
         let width = self.sidebar_width;
-        shell::render_sidebar_row(
-          &tokens,
-          &label,
-          &source,
-          index == self.active,
-          exited,
-          bell,
-          log_warning,
-        )
-        .id(("session-row", index))
-        .on_mouse_down(
-          MouseButton::Left,
-          cx.listener(move |this, _, window, cx| {
-            // 按下即选中该标签；拖拽排序由 gpui 在指针移过阈值后接管
-            this.activate(index, window, cx);
-          }),
-        )
-        // 右键弹这一行的菜单（重命名，ADR-047）；不切标签、不起拖拽
-        .on_mouse_down(
-          MouseButton::Right,
-          cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            this.open_sidebar_menu(index, event.position, cx);
-          }),
-        )
-        .on_drag(
-          DraggedSession {
-            from: index,
-            label,
-            source,
-            width,
-          },
-          |session, _, _, cx| {
-            cx.new(|_| DragGhost {
-              session: session.clone(),
+        Some(
+          shell::render_sidebar_row(&tokens, &label, index == self.active, exited, bell, log_warning)
+            .id(("session-row", index))
+            .on_mouse_down(
+              MouseButton::Left,
+              cx.listener(move |this, _, window, cx| {
+                // 按下即选中该标签；拖拽排序由 gpui 在指针移过阈值后接管
+                this.activate(index, window, cx);
+              }),
+            )
+            // 右键弹这一行的菜单（重命名，ADR-047）；不切标签、不起拖拽
+            .on_mouse_down(
+              MouseButton::Right,
+              cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_sidebar_menu(index, event.position, cx);
+              }),
+            )
+            .on_drag(
+              DraggedSession {
+                from: index,
+                label,
+                width,
+              },
+              |session, _, _, cx| {
+                cx.new(|_| DragGhost {
+                  session: session.clone(),
+                })
+              },
+            )
+            // 落点行换成拖拽色；拖回自己原位不算落点，不提示
+            .drag_over::<DraggedSession>(move |style, session, _, _| {
+              if session.from == index {
+                style
+              } else {
+                style.bg(gpui::rgb(bg_drag))
+              }
             })
-          },
-        )
-        // 落点行换成拖拽色；拖回自己原位不算落点，不提示
-        .drag_over::<DraggedSession>(move |style, session, _, _| {
-          if session.from == index {
-            style
-          } else {
-            style.bg(gpui::rgb(bg_drag))
-          }
-        })
-        .on_drop(cx.listener(move |this, session: &DraggedSession, _, cx| {
-          // 标签顺序属于工作区状态（ADR-037）：换了位就落盘
-          if this.drop_session(session.from, index) {
-            this.layout_changed(cx);
-          }
-        }))
-        .child(
-          // ✕ 藏在会话行里：occlude 挡住按下（行不切换、不开始拖拽），
-          // 触发走点击语义——松开在 ✕ 上才算
-          panel::clickable(
-            ("close-session", index),
-            cx.listener(move |this, _, window, cx| this.request_close_session(index, window, cx)),
-          )
-          .px(px(4.))
-          .text_size(ui_rems(11.))
-          .text_color(gpui::rgb(tokens.fg_muted))
-          .occlude()
-          .child("✕"),
+            .on_drop(cx.listener(move |this, session: &DraggedSession, _, cx| {
+              // 标签顺序属于工作区状态（ADR-037）：换了位就落盘
+              if this.drop_session(session.from, index) {
+                this.layout_changed(cx);
+              }
+            }))
+            .child(
+              // ✕ 藏在会话行里：occlude 挡住按下（行不切换、不开始拖拽），
+              // 触发走点击语义——松开在 ✕ 上才算
+              panel::clickable(
+                ("close-session", index),
+                cx.listener(move |this, _, window, cx| this.request_close_session(index, window, cx)),
+              )
+              .px(px(4.))
+              .text_size(ui_rems(11.))
+              .text_color(gpui::rgb(tokens.fg_muted))
+              .occlude()
+              .child("✕"),
+            )
+            .into_any_element(),
         )
       })
-      .collect::<Vec<_>>();
+      .collect();
+    // 过滤后一行不剩：列表位给占位提示（滚动容器的元素 id 不变，滚动状态不丢）
+    let rows = if rows.is_empty() && !filter.is_empty() {
+      vec![
+        div()
+          .px(px(6.))
+          .py(px(10.))
+          .text_size(ui_rems(11.))
+          .text_color(gpui::rgb(tokens.fg_muted))
+          .child("无匹配会话")
+          .into_any_element(),
+      ]
+    } else {
+      rows
+    };
 
     let active_view = self.render_active_tab(cx);
     // 侧栏右键菜单（ADR-023/047）：挂在根部、盖住全窗；浮层栈在场时它已被收起
@@ -359,56 +338,82 @@ impl Render for ZhimaTermApp {
       .sidebar_menu
       .map(|(index, click)| self.render_sidebar_menu(index, click, window.viewport_size(), cx))
       .unwrap_or_default();
-    // 顶栏只留全局入口（设置）与 ?，会话入口全部落在底部动作行（ADR-041）
-    let header_actions = vec![self.icon_entry(
-      "entry-settings",
-      "⚙",
-      "设置",
-      |this, window, cx| this.open_settings_form(window, cx),
+    // 窗口顶栏（ADR-057）：中区活动会话标题 + 右区全局入口；会话入口已
+    // 迁回侧栏顶部动作行（ADR-057 修订）。装配在这里是因为入口回调要触达
+    // 外壳方法（pub(super)）；平台部分（拖拽状态机、红绿灯留位、窗口控制
+    // 按钮）在 views::title_bar。
+    let active_label = self.tabs.get(self.active).map(|tab| tab.label(cx));
+    let bar_right = vec![
+      theme_picker::entry(&tokens, &self.theme_picker, &theme_picker_actions(cx), cx).into_any_element(),
+      self
+        .svg_icon_entry(
+          "shortcuts-entry",
+          icons::SHORTCUTS,
+          "快捷键",
+          tokens.fg_secondary,
+          |this, window, cx| this.open_shortcuts_modal(window, cx),
+          cx,
+        )
+        .into_any_element(),
+      self
+        .svg_icon_entry(
+          "entry-settings",
+          icons::SETTINGS,
+          "设置",
+          tokens.fg_secondary,
+          |this, window, cx| this.open_settings_form(window, cx),
+          cx,
+        )
+        .into_any_element(),
+    ];
+    let title_bar = title_bar::render(
+      &tokens,
+      active_label.as_deref(),
+      bar_right,
+      &self.title_bar_move_armed,
+      window,
       cx,
-    )];
-    // 底部动作行（ADR-041）：本地、WSL（仅 Windows）、SSH 等分。标签用
-    // 短名，侧栏拖到最窄时仍放得下。WSL 入口常显：管理页面可在线安装，
-    // 零分发版不再是死按钮
-    let mut session_entries = vec![self.session_entry(
-      "entry-local",
-      "本地",
-      |this, window, cx| this.open_session(window, cx),
-      cx,
-    )];
-    #[cfg(windows)]
-    session_entries.push(self.session_entry(
-      "entry-wsl",
-      "WSL",
-      |this, window, cx| this.open_wsl_page(window, cx),
-      cx,
-    ));
-    session_entries.push(self.session_entry(
+    );
+    // 侧栏顶部动作行（ADR-057 修订）：搜索框过滤会话行，右侧是 SSH/WSL/
+    // 本地 的图标入口（从远端到本地）。WSL 仅 Windows 且常显（ADR-056：
+    // 管理页可在线安装，零分发版不再是死按钮）。搜索输入框用列包装——
+    // 交叉轴 stretch 撑满剩余宽度（与 input::field 同款机制）。
+    let mut sidebar_header = div().flex().items_center().gap_x(px(4.)).child(
+      div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .child(self.session_search.clone()),
+    );
+    sidebar_header = sidebar_header.child(self.svg_icon_entry(
       "entry-ssh",
-      "SSH",
+      icons::SSH,
+      "SSH 会话",
+      tokens.fg_secondary,
       |this, window, cx| this.open_connect_form(window, cx),
       cx,
     ));
-    // 动作段之间与主题色板之间用竖线分组；主题入口只显示三点色板
-    let mut session_row = div().flex().items_center().flex_1().min_w(px(0.));
-    for (index, entry) in session_entries.into_iter().enumerate() {
-      if index > 0 {
-        session_row = session_row.child(vertical_divider(&tokens));
-      }
-      session_row = session_row.child(entry);
-    }
-    let sidebar_footer = div()
-      .flex()
-      .items_center()
-      .gap_x(px(4.))
-      .child(session_row)
-      .child(vertical_divider(&tokens))
-      .child(theme_picker::entry(
-        &tokens,
-        &self.theme_picker,
-        &theme_picker_actions(cx),
+    #[cfg(windows)]
+    {
+      // WSL 与本地同形（同一控制台图形），以主题 accent 强调色区分
+      sidebar_header = sidebar_header.child(self.svg_icon_entry(
+        "entry-wsl",
+        icons::LOCAL,
+        "WSL 管理",
+        tokens.accent,
+        |this, window, cx| this.open_wsl_page(window, cx),
         cx,
       ));
+    }
+    sidebar_header = sidebar_header.child(self.svg_icon_entry(
+      "entry-local",
+      icons::LOCAL,
+      "新建本地会话",
+      tokens.fg_secondary,
+      |this, window, cx| this.open_session(window, cx),
+      cx,
+    ));
 
     // 侧栏调宽期间挂全局监听：松开才算结束
     let sidebar_resize_listeners = self.sidebar_resizing.is_some().then(|| {
@@ -431,6 +436,7 @@ impl Render for ZhimaTermApp {
     div()
       .size_full()
       .flex()
+      .flex_col()
       .bg(gpui::rgb(tokens.bg_root))
       // 界面字体在根节点设置，全部界面文字继承；终端网格在自己的
       // 区域里显式用终端字体，不受这里影响
@@ -471,27 +477,29 @@ impl Render for ZhimaTermApp {
       .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
         this.split_focused(SplitAxis::Stacked, window, cx);
       }))
-      .child({
-        let open_shortcuts: WindowAction = {
-          let app = cx.entity();
-          Rc::new(move |window, cx| app.update(cx, |this, cx| this.open_shortcuts_modal(window, cx)))
-        };
-        shell::render_sidebar(
-          &tokens,
-          rows,
-          header_actions,
-          sidebar_footer,
-          self.workspace_error.as_deref(),
-          self.sidebar_width,
-          cx.listener(|this, event: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-            this.sidebar_resizing = Some((f32::from(event.position.x), this.sidebar_width));
-          }),
-          open_shortcuts,
-        )
-        .children(sidebar_resize_listeners)
-      })
-      .child(div().flex_1().min_w(px(0.)).h_full().children(active_view))
+      // 纵向骨架（ADR-057）：顶栏常驻，下面是侧栏 + 终端区
+      .child(title_bar)
+      .child(
+        div()
+          .flex_1()
+          .min_h(px(0.))
+          .flex()
+          .child({
+            shell::render_sidebar(
+              &tokens,
+              sidebar_header,
+              rows,
+              self.workspace_error.as_deref(),
+              self.sidebar_width,
+              cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.sidebar_resizing = Some((f32::from(event.position.x), this.sidebar_width));
+              }),
+            )
+            .children(sidebar_resize_listeners)
+          })
+          .child(div().flex_1().min_w(px(0.)).h_full().children(active_view)),
+      )
       // 侧栏右键菜单的遮罩与浮层：在侧栏与终端区之上、浮层栈之下
       .children(sidebar_menu)
       // 浮层栈按栈序挂在根部末尾（ADR-044）：栈序即 z 序，遮罩、焦点壳
@@ -507,14 +515,14 @@ impl Render for ZhimaTermApp {
           .map(|layer| layer.into_any_element())
           .collect::<Vec<_>>()
       })
-      // 主题下拉的遮罩与浮层在 views::theme_picker（ADR-027）：遮罩截住
-      // 「点别处收起」，浮层锚在入口正上方。浮层栈非空时它已被收起
-      // （见 `overlay_open` 的互斥），不会同时出现。
+      // 主题下拉的遮罩与浮层在 views::theme_picker（ADR-027/057）：遮罩截住
+      // 「点别处收起」，浮层锚在顶栏入口正下方（视口传给浮层外壳做横向夹取）。
+      // 浮层栈非空时它已被收起（见 `overlay_open` 的互斥），不会同时出现。
       .children(theme_picker::layers(
         &tokens,
         &self.theme_picker,
         &theme_picker_actions(cx),
-        window.viewport_size().height,
+        window.viewport_size(),
         cx,
       ))
   }
@@ -527,4 +535,36 @@ fn tab_title(app: &mut ZhimaTermApp, cx: &mut Context<ZhimaTermApp>) -> Option<S
     .get(app.active)
     .and_then(Tab::focused_view)
     .and_then(|view| view.read(cx).title().map(str::to_owned))
+}
+
+/// 会话行的搜索过滤规则：对显示标题做大小写不敏感的子串匹配；空串（或全
+/// 空白）视为不过滤。来源标签已撤出侧栏行（ADR-057 修订），过滤只看行上
+/// 可见的标题，不做看不见的来源匹配。
+fn session_matches_filter(label: &str, filter: &str) -> bool {
+  let needle = filter.trim().to_lowercase();
+  needle.is_empty() || label.to_lowercase().contains(&needle)
+}
+
+#[cfg(test)]
+mod sidebar_filter_tests {
+  use super::session_matches_filter;
+
+  #[test]
+  fn empty_filter_keeps_every_row() {
+    assert!(session_matches_filter("任意", ""));
+    assert!(session_matches_filter("任意", "   "), "全空白等价空串");
+  }
+
+  #[test]
+  fn filter_matches_label_case_insensitively() {
+    assert!(session_matches_filter("MyServer", "server"));
+    assert!(session_matches_filter("vim ~/.config", "VIM"));
+    assert!(session_matches_filter("ubuntu-22.04", "ubu"));
+  }
+
+  #[test]
+  fn non_matching_rows_are_hidden() {
+    assert!(!session_matches_filter("zsh", "ssh"));
+    assert!(!session_matches_filter("zsh", "b"));
+  }
 }

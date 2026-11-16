@@ -1,4 +1,5 @@
-//! 应用外壳的框架部件：标题栏、会话栏、状态底栏、主机密钥确认与输入法组合条。
+//! 应用外壳的框架部件：会话栏、状态底栏、主机密钥确认与输入法组合条
+//! （窗口顶栏在 `views::title_bar`，ADR-057）。
 //!
 //! 这些部件画的是"围着终端内容转的外壳"——多会话切换、状态与提示，
 //! 不是终端网格本身（网格的布局与绘制见 `view`）。全部是无状态的
@@ -65,8 +66,8 @@ pub struct AutoReconnect {
   pub max_attempts: u32,
 }
 
-/// 底栏统一高度：控制台下方状态栏与会话栏底部动作行共用同一常量，两条横向
-/// 底栏在窗口里保持等高，谁也不能单独改。
+/// 底栏统一高度：控制台下方状态栏（仅远端会话）。原与会话栏底部动作行共用，
+/// 动作行已随 ADR-057 收编进窗口顶栏，常量保留给状态底栏。
 pub const STATUS_BAR_HEIGHT: f32 = 30.0;
 
 /// 状态开关 chip 的「开」配色语义：开关亮起时说的是什么。
@@ -673,24 +674,19 @@ pub const SIDEBAR_DEFAULT_WIDTH: f32 = 300.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 140.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 420.0;
 
-/// 左侧会话栏容器：宽度由调用方传入（可拖拽），会话行由调用方组装（监听器要绑在 app 上）。
-/// 侧边栏：顶栏（标题 + 全局入口 + 快捷键入口）与列表之间画一条横线，列表占满剩余高度，
-/// 底部固定放一行会话入口与主题色板。列表单独滚动，会话多了也不会把底部入口挤出可视区。
-/// `header_actions` 是顶栏右侧的全局入口（设置，ADR-041），监听器由调用方绑定；
-/// 底部 footer 由调用方组装成一行：会话入口段 + 分隔线 + 主题色板。
-/// 快捷键回调用 `Rc<dyn Fn>`：捕获 app 的闭包在泛型 `impl Fn(&mut, &mut)` 参数位上
-/// 会撞上 rustc 的高阶生命周期推导限制（与 `ModalActions` 同款取舍）。
-#[allow(clippy::too_many_arguments)]
+/// 左侧会话栏容器（ADR-057 修订）：宽度由调用方传入（可拖拽），顶部动作行
+/// `header`（搜索框 + 会话入口图标，装配在 app/render.rs——监听器要绑在 app
+/// 上）由这里套上分隔线框，会话行由调用方组装后传入。工作区读写失败提示
+/// 显示在动作行下方（ADR-037），列表单独滚动、占满剩余高度，右缘 5px 是
+/// 拖宽手柄。全局入口（设置/快捷键/主题）在窗口顶栏（ADR-057）。
 pub fn render_sidebar(
   tokens: &UiTokens,
-  rows: Vec<gpui::Stateful<gpui::Div>>,
-  header_actions: Vec<gpui::Stateful<gpui::Div>>,
-  footer: gpui::Div,
-  // 工作区读写失败提示（ADR-037）：显示在顶栏下方，不弹窗
+  header: gpui::Div,
+  rows: Vec<gpui::AnyElement>,
+  // 工作区读写失败提示（ADR-037）：显示在动作行下方，不弹窗
   error: Option<&str>,
   width: f32,
   on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-  on_open_shortcuts: WindowAction,
 ) -> gpui::Div {
   div()
     .flex_none()
@@ -702,8 +698,6 @@ pub fn render_sidebar(
     .border_r_1()
     .border_color(gpui::rgb(tokens.border_subtle))
     .bg(gpui::rgb(tokens.bg_panel))
-    // 8px 内边距只包住内容区：底部动作行要和控制台底栏一样贴窗口下缘、
-    // 通到侧栏左右边缘，两条分隔线才能齐平
     .child(
       div()
         .flex_1()
@@ -712,27 +706,14 @@ pub fn render_sidebar(
         .flex_col()
         .pt(px(8.))
         .px(px(8.))
-        // 横线把顶栏和会话行分开：标题区是框架，列表是内容
+        // 分隔线框归外壳：动作行与列表之间画一条横线（框架/内容之界）
         .child(
-          div()
+          header
             .px(px(6.))
             .pb(px(6.))
             .mb(px(6.))
             .border_b_1()
-            .border_color(gpui::rgb(tokens.border_subtle))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            // 标题留在左缘；全局入口（设置）与 ? 一起贴右缘（ADR-041）
-            .child(
-              div()
-                .text_size(ui_rems(11.))
-                .text_color(gpui::rgb(tokens.fg_muted))
-                .child("会话"),
-            )
-            .child(div().flex_1())
-            .children(header_actions)
-            .child(shortcuts_button(tokens, on_open_shortcuts)),
+            .border_color(gpui::rgb(tokens.border_subtle)),
         )
         .children(error.map(|message| div().px(px(6.)).pb(px(6.)).child(panel::error_line(tokens, message))))
         // 滚动需要一个稳定的元素 id（滚动位置挂在元素状态上）
@@ -745,21 +726,6 @@ pub fn render_sidebar(
             .children(rows),
         ),
     )
-    .child(
-      div()
-        .mt(px(3.))
-        .flex_none()
-        // 与控制台底栏等高（STATUS_BAR_HEIGHT）：内容在栏内垂直居中；
-        // 分隔线通到边缘，内容仍留 8px 内边距
-        .h(px(STATUS_BAR_HEIGHT))
-        .px(px(8.))
-        .border_t_1()
-        .border_color(gpui::rgb(tokens.border_subtle))
-        .flex()
-        .flex_col()
-        .justify_center()
-        .child(footer),
-    )
     // 最后挂载：盖在内容之上，右缘 5px 是拖宽命中区
     .child(zhimaterm_base::ui::resize_grip(
       zhimaterm_base::ui::GripSide::Right,
@@ -767,8 +733,9 @@ pub fn render_sidebar(
     ))
 }
 
-/// 顶栏右侧入口共用的外框：固定宽高，图标与文字入口的 hover 背景因此完全一致。
-/// 文字字号由调用方设置，外框只负责尺寸、圆角、颜色与 hover。
+/// 窗口顶栏图标入口共用的外框（装配在 app/render.rs，ADR-057）：固定宽高，
+/// 所有入口（SVG 图标）的尺寸与 hover 背景因此完全一致；子元素与渲染色由
+/// 调用方装配，外框只负责尺寸、圆角、颜色与 hover。
 pub fn header_button(
   tokens: &UiTokens,
   id: impl Into<gpui::ElementId>,
@@ -785,27 +752,25 @@ pub fn header_button(
     .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
 }
 
-/// 顶栏右侧的快捷键入口（?）：与设置图标共用 [`header_button`] 的固定外框。
-fn shortcuts_button(tokens: &UiTokens, on_open: WindowAction) -> gpui::Stateful<gpui::Div> {
-  header_button(tokens, "shortcuts-entry", move |_, window, cx| on_open(window, cx))
-    .text_size(ui_rems(11.))
-    .tooltip(zhimaterm_base::ui::tooltip::tip("快捷键"))
-    .child("?")
-}
-
-/// 一行会话：两行高度——上行是前台程序标题（标题超长省略，没有标题时用创建编号），
-/// 下行是来源标签（本地 `LOCAL` / 远端 `user@host:port`）。顶栏去掉后来源标识落在
-/// 这里：分屏多格时也能从侧栏一眼看出每一格连的是哪里。已结束的会话用暗色区分。
-/// 拖拽排序的落点高亮与幻影在调用侧接线，这里只管一行本身的样子。
+/// 一行会话：行高恒为两行标题文本（单行标题在块内垂直居中，最多两行、
+/// 超长末行省略；已结束的会话用暗色区分）。行底三态走专属 token：选中
+/// `bg_accent`（强调色暗调，色相差异一眼可辨，与 WSL 管理页激活态同款）、
+/// 未选中 `bg_row`、未选中悬停 `bg_row_hover`（选中行悬停不再变化）。
+/// 🔔 响铃与 ⚠ 日志告警仅以图标内联在标题之前（主题语义色着色，行内
+/// 垂直居中）。拖拽排序的落点高亮与幻影在调用侧接线，这里只管一行本身的样子。
 pub fn render_sidebar_row(
   tokens: &UiTokens,
   label: &str,
-  source: &str,
   active: bool,
   exited: bool,
   bell: bool,
   log_warning: bool,
 ) -> gpui::Div {
+  let (row_bg, row_hover_bg) = if active {
+    (tokens.bg_accent, tokens.bg_accent)
+  } else {
+    (tokens.bg_row, tokens.bg_row_hover)
+  };
   div()
     .w_full()
     .mb(px(2.))
@@ -815,63 +780,42 @@ pub fn render_sidebar_row(
     .flex()
     .items_center()
     .gap_x(px(6.))
-    .bg(gpui::rgb(if active { tokens.bg_hover } else { tokens.bg_panel }))
+    .bg(gpui::rgb(row_bg))
+    .hover(move |style| style.bg(gpui::rgb(row_hover_bg)))
+    // 告警在标题之前，仅图标（flex_none 不吃标题宽度）。🔔 是 emoji 字形，
+    // 恒彩色、text_color 不生效；⚠ 默认文本呈现（单色字形），主题 danger
+    // 色能染上——两种告警的色相区分依赖这一点
+    // 响铃通知：该格响过铃且用户还没看过（看过即清）
+    .children(bell.then(|| {
+      div()
+        .flex_none()
+        .text_size(ui_rems(11.))
+        .text_color(gpui::rgb(tokens.warn))
+        .child("🔔")
+    }))
+    // 日志已失效（ADR-017）：与响铃不同，坏了不会自愈，持续亮到本格结束
+    .children(log_warning.then(|| {
+      div()
+        .flex_none()
+        .text_size(ui_rems(11.))
+        .text_color(gpui::rgb(tokens.danger))
+        .child("⚠")
+    }))
     .child(
+      // 行高恒为两行文本：块高与行高都显式标定（2 × 行高），单行在块内
+      // 垂直居中，不依赖字体的隐式行框
       div()
         .flex_1()
         .min_w(px(0.))
+        .h(ui_rems(30.))
         .flex()
         .flex_col()
-        .gap(px(2.))
-        .child(
-          div()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_size(ui_rems(12.))
-            .text_color(gpui::rgb(if exited { tokens.fg_muted } else { tokens.fg_value }))
-            .child(label.to_owned()),
-        )
-        .child(
-          div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(
-              div()
-                .flex_none()
-                .px(px(5.))
-                .py(px(1.))
-                .rounded(px(3.))
-                .bg(gpui::rgb(tokens.bg_success))
-                .text_color(gpui::rgb(tokens.accent))
-                .text_size(ui_rems(9.))
-                .child(source.to_owned()),
-            )
-            .children(exited.then(|| {
-              div()
-                .text_size(ui_rems(9.))
-                .text_color(gpui::rgb(tokens.fg_muted))
-                .child("已结束")
-            }))
-            // 响铃通知：该格响过铃且用户还没看过（看过即清）
-            .children(bell.then(|| {
-              div()
-                .flex_none()
-                .text_size(ui_rems(9.))
-                .text_color(gpui::rgb(tokens.warn))
-                .child("🔔 响铃")
-            }))
-            // 日志已失效（ADR-017）：与响铃不同，坏了不会自愈，
-            // 持续亮到本格结束
-            .children(log_warning.then(|| {
-              div()
-                .flex_none()
-                .text_size(ui_rems(9.))
-                .text_color(gpui::rgb(tokens.danger))
-                .child("⚠ 日志")
-            })),
-        ),
+        .justify_center()
+        .line_height(ui_rems(15.))
+        .line_clamp(2)
+        .text_size(ui_rems(12.))
+        .text_color(gpui::rgb(if exited { tokens.fg_muted } else { tokens.fg_value }))
+        .child(label.to_owned()),
     )
 }
 

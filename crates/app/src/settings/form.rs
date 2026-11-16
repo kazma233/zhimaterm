@@ -971,7 +971,7 @@ impl ModalView for SettingsModal {
   fn floaters(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
     let tokens = &zhimaterm_base::theme::tokens(cx);
     let form = self.form.read(cx);
-    let viewport_height = window.viewport_size().height;
+    let viewport = window.viewport_size();
 
     // 展开着的下拉只有一个（单值 `open`）：候选、选中项、锚点与是否
     // 按候选字体预览都在这里取一次，浮层装配只有一份
@@ -1070,7 +1070,7 @@ impl ModalView for SettingsModal {
         selected,
         highlighted,
         &bounds,
-        viewport_height,
+        viewport,
         preview_font,
         font_display_name,
         &scroll,
@@ -1084,7 +1084,7 @@ impl ModalView for SettingsModal {
         selected,
         highlighted,
         &bounds,
-        viewport_height,
+        viewport,
         &scroll,
         press,
         pick,
