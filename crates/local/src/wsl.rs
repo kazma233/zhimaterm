@@ -338,6 +338,9 @@ pub fn list_online() -> Result<Vec<String>, String> {
 /// 在线安装的参数拼装（纯函数可测）：`location`/`name`/`vhd_size` 为空用
 /// 系统默认，`no_launch` 装完不自动进首次设置（回列表由用户自己开），
 /// `web_download` 走网络源而非 Microsoft Store，`fixed_vhd` 建固定大小磁盘。
+/// 唯一调用方 `install` 是 Windows 门控，参数拼装随同门（macOS/Linux 不编译，
+/// 避免 dead_code 警告）。
+#[cfg(windows)]
 pub(crate) fn install_args(
   distro: &str,
   location: Option<&str>,
