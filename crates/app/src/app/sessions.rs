@@ -68,11 +68,14 @@ impl ZhimaTermApp {
   /// 常显——零分发版也能在线安装，不再是死按钮。
   #[cfg(windows)]
   pub(super) fn open_wsl_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    // 开会话是外壳的编排动作，经回调注入页面（ADR-007 修订七）。管理模态
-    // 不收：浮层按栈进出（先进后出），会话开出来后在终端里，模态由用户自己
-    // Esc/「关闭」退出
+    // 开会话是外壳的编排动作，经回调注入页面（ADR-007 修订七）。行主体
+    // 点击 = 开会话并收掉管理模态（需求口径 §3.2）：会话落终端标签区，
+    // 模态自动退出，不让用户再按一次 Esc
     let on_pick: crate::views::wsl_page::PickAction = Rc::new(|name, window, cx| {
-      super::update_app(window, cx, |app, window, cx| app.open_wsl_distro(name, window, cx));
+      super::update_app(window, cx, |app, window, cx| {
+        zhimaterm_base::ui::overlay::overlay_close_top(window, cx);
+        app.open_wsl_distro(name, window, cx);
+      });
     });
     let font = zhimaterm_base::font::terminal_font(&self.font.family);
     let page = cx.new(|cx| crate::views::wsl_page::WslManagerPage::new(font, on_pick, cx));

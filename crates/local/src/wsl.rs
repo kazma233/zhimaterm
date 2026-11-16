@@ -143,20 +143,31 @@ fn decode_utf16le(bytes: &[u8]) -> String {
 
 /// `wsl --list --running` 输出 → 运行中的分发版名列表。无表头；标题行
 /// （「正在运行的分发:」/ "Windows … Distributions:"）与空态文案（「没有
-/// 正在运行的分发。」）以冒号/句号结尾或含空格，先排除；其余整行只有
-/// 一个 ASCII 名称 token 的行才是分发版名。
+/// 正在运行的分发。」/ "There are no running distributions."）以冒号/句号
+/// 结尾或首 token 不为合法名称字符，先排除；名称行取行首 token——默认
+/// 分发版行带括号标注（`dev (默认)` / `dev (Default)`），整行 token 数
+/// 会大于 1，不能按 token 数排除，只看首 token 为名称字符、其余 token
+/// 以 `(` 开头。
 pub(crate) fn parse_running_list(text: &str) -> Vec<String> {
   text
     .lines()
     .map(|line| line.trim().trim_end_matches(['\r', ':', '.']))
-    .filter(|line| !line.is_empty() && line.split_whitespace().count() == 1)
-    .filter_map(|line| line.split_whitespace().next())
-    .filter(|token| {
-      token
+    .filter_map(|line| {
+      let mut tokens = line.split_whitespace();
+      let name = tokens.next()?;
+      let name_is_clean = name
         .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_')
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_');
+      let rest_is_annotation = match tokens.next() {
+        None => true,
+        Some(second) => second.starts_with('('),
+      };
+      if name_is_clean && rest_is_annotation {
+        Some(name.to_owned())
+      } else {
+        None
+      }
     })
-    .map(str::to_owned)
     .collect()
 }
 
@@ -959,6 +970,12 @@ mod tests {
     assert!(parse_running_list(empty).is_empty());
     let empty_en = "There are no running distributions.\r\n";
     assert!(parse_running_list(empty_en).is_empty());
+    // 默认分发版行带括号标注（两种 locale 同形）：整行 token 数大于 1，
+    // 名称行的判定不能按 token 数——否则默认分发版恒被判为非运行
+    let zh_default = "正在运行的分发:\r\ndev (默认)\r\n";
+    assert_eq!(parse_running_list(zh_default), vec!["dev"]);
+    let en_default = "Windows Subsystem for Linux Distributions:\r\nUbuntu-22.04 (Default)\r\ndev\r\n";
+    assert_eq!(parse_running_list(en_default), vec!["Ubuntu-22.04", "dev"]);
   }
 
   /// WSL2 的占用是 `BasePath\ext4.vhdx` 单文件大小；BasePath 里的正斜杠

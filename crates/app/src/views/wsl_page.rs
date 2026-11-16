@@ -389,6 +389,9 @@ impl WslManagerPage {
               fixed_vhd,
               vhd_size,
             } => {
+              // 安装带 --name 时注册名与分发名不同：装后的用户落地与终止
+              // 都必须对注册名 -d，用原始分发名会 WSL_E_DISTRO_NOT_FOUND
+              let registered = name.as_deref().unwrap_or(distro);
               let installed = zhimaterm_local::wsl::install(
                 distro,
                 location.as_deref(),
@@ -405,12 +408,12 @@ impl WslManagerPage {
                 // 自定义用户名在装完后落地（创建用户要短暂启动分发版）；
                 // 「装完不自动启动」承诺的是装完的稳态，随后终止恢复
                 let settled = match user.as_deref() {
-                  Some(user) => zhimaterm_local::wsl::install_set_default_user(distro, user),
+                  Some(user) => zhimaterm_local::wsl::install_set_default_user(registered, user),
                   None => Ok(()),
                 };
                 match settled {
                   Err(message) => Err(message),
-                  Ok(()) if *no_launch => zhimaterm_local::wsl::terminate(distro)
+                  Ok(()) if *no_launch => zhimaterm_local::wsl::terminate(registered)
                     .map(|_| ())
                     .map_err(|message| format!("设置用户后终止 Distribution 失败：{message}")),
                   Ok(()) => Ok(()),
