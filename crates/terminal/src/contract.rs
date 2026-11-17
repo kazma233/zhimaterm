@@ -213,7 +213,7 @@ contract!(search_matches_and_navigates, |model, label| {
   assert!(
     matches!(
       model.search("error", false, SearchDirection::Forward),
-      super::SearchOutcome::Matched(_)
+      super::SearchOutcome::Matched { .. }
     ),
     "{label}: 全小写不区分大小写"
   );
@@ -483,7 +483,7 @@ trait KindText {
 impl KindText for super::SearchOutcome {
   fn kind_text(&self) -> &'static str {
     match self {
-      super::SearchOutcome::Matched(_) => "hit",
+      super::SearchOutcome::Matched { .. } => "hit",
       super::SearchOutcome::NoMatch => "miss",
       super::SearchOutcome::InvalidPattern => "invalid",
     }

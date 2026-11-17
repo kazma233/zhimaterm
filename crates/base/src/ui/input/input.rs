@@ -116,6 +116,15 @@ impl TextInput {
     self.error.as_deref()
   }
 
+  /// 错误态（框边框变红，区别于 `set_error` 的文案）：搜索条正则无效这类
+  /// 即时校验。变化才通知；不变时静默（渲染期同步调用不引发重渲染循环）。
+  pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+    if self.core.invalid != invalid {
+      self.core.set_invalid(invalid);
+      cx.notify();
+    }
+  }
+
   /// 当前是否掩码显示（表单测试断言用）。
   /// 不加 `cfg(test)`：消费方在另一个 crate 里，依赖方按测试编译时不会
   /// 带上本 crate 的 cfg(test)。

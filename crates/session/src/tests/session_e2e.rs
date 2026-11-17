@@ -380,7 +380,7 @@ fn local_scrollback_is_restored_by_the_next_session() {
   let ready = wait_session_event(&events, Duration::from_secs(10), |event| {
     match event {
       SessionEvent::Control(ControlEvent::SearchResult(outcome)) => {
-        search_matched = matches!(outcome, SearchOutcome::Matched(_));
+        search_matched = matches!(outcome, SearchOutcome::Matched { .. });
       }
       SessionEvent::Frame(snapshot) => {
         let restored_colors = snapshot.rendered_text().contains("上次会话结束于") && output_visible(&snapshot);
@@ -790,7 +790,7 @@ fn search_reaches_scrollback_and_reports_highlight_in_frames() {
     .expect("搜索命令应被接受");
   let outcome = wait_for_search_result(&events, Duration::from_secs(3));
   assert!(
-    matches!(outcome, Some(SearchOutcome::Matched(_))),
+    matches!(outcome, Some(SearchOutcome::Matched { .. })),
     "历史内容应命中：{outcome:?}"
   );
 
@@ -824,7 +824,7 @@ fn search_reaches_scrollback_and_reports_highlight_in_frames() {
     .search("line-5", false, SearchDirection::Forward)
     .expect("搜索命令应被接受");
   let outcome = wait_for_search_result(&events, Duration::from_secs(3));
-  assert!(matches!(outcome, Some(SearchOutcome::Matched(_))));
+  assert!(matches!(outcome, Some(SearchOutcome::Matched { .. })));
   session.clear_search();
   let cleared = wait_for_frame(&events, Duration::from_secs(3), |snapshot| {
     snapshot.search_highlight.is_none()

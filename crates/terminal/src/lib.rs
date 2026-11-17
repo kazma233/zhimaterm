@@ -369,11 +369,38 @@ pub enum SearchDirection {
 /// 一次搜索的反馈，供搜索条展示；匹配高亮不走这里（进画面帧）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchOutcome {
-  /// 命中：匹配首行的网格行号（0 = 屏幕首行，负数 = 历史）
-  Matched(i32),
+  /// 命中：匹配首行的网格行号（0 = 屏幕首行，负数 = 历史）与整份网格
+  /// （视口 + 滚动历史）的匹配总数
+  Matched { line: i32, total: usize },
+  /// 有模式串但一处都没命中（搜索条按总数 0 展示）
   NoMatch,
   /// 模式串编译失败（仅正则模式可能出现）
   InvalidPattern,
+}
+
+impl SearchOutcome {
+  /// 命中的匹配首行；未命中返回 None。
+  pub fn line(&self) -> Option<i32> {
+    match self {
+      SearchOutcome::Matched { line, .. } => Some(*line),
+      SearchOutcome::NoMatch | SearchOutcome::InvalidPattern => None,
+    }
+  }
+
+  /// 搜索条展示的匹配总数：命中带实际值，无匹配为 0，正则无效没有
+  /// 可数的结果（None = 展示层不渲染计数区）。
+  pub fn total(&self) -> Option<usize> {
+    match self {
+      SearchOutcome::Matched { total, .. } => Some(*total),
+      SearchOutcome::NoMatch => Some(0),
+      SearchOutcome::InvalidPattern => None,
+    }
+  }
+
+  /// 模式串是否编译失败（搜索条据此把输入框标红）。
+  pub fn is_invalid(&self) -> bool {
+    matches!(self, SearchOutcome::InvalidPattern)
+  }
 }
 
 impl SelectionKind {
@@ -704,8 +731,8 @@ impl TerminalModel {
   /// 执行一次搜索（ADR-015）：正则开关关时模式串按字面匹配（转义元字符），
   /// 开时原样编译；大小写智能：模式全小写不区分大小写。
   ///
-  /// 命中即更新当前匹配（快照据此生成高亮）并把匹配行滚进视口；
-  /// 无匹配/无效/空模式清掉旧高亮。
+  /// 命中即更新当前匹配（快照据此生成高亮）并把匹配行滚进视口，同时回报
+  /// 整份网格的匹配总数（搜索条展示用）；无匹配/无效/空模式清掉旧高亮。
   pub fn search(&mut self, pattern: &str, regex_enabled: bool, direction: SearchDirection) -> SearchOutcome {
     if pattern.is_empty() {
       self.search_match = None;
@@ -723,7 +750,11 @@ impl TerminalModel {
     };
     self.scroll_match_into_view(&found);
     self.search_match = Some(found);
-    SearchOutcome::Matched(found.line)
+    let total = search::count_matches(self.core.as_ref(), &regex);
+    SearchOutcome::Matched {
+      line: found.line,
+      total,
+    }
   }
 
   /// 清掉当前匹配与高亮（关闭搜索条时）。
@@ -2831,11 +2862,9 @@ mod tests {
 
     let first = model.search("needle", false, SearchDirection::Forward);
     let second = model.search("needle", false, SearchDirection::Forward);
-    let SearchOutcome::Matched(first_line) = first else {
-      panic!("第一处应命中");
-    };
-    let SearchOutcome::Matched(second_line) = second else {
-      panic!("第二处应命中");
+    let (first_line, second_line) = (first.line(), second.line());
+    let (Some(first_line), Some(second_line)) = (first_line, second_line) else {
+      panic!("两处都应命中");
     };
     assert!(
       second_line < first_line,
@@ -2881,13 +2910,9 @@ mod tests {
     model.advance(b"         a\r\na\r\n");
 
     let first = model.search("a", false, SearchDirection::Forward);
-    assert_eq!(first, SearchOutcome::Matched(0), "第一处应在第 0 行行尾");
+    assert_eq!(first.line(), Some(0), "第一处应在第 0 行行尾");
     let second = model.search("a", false, SearchDirection::Forward);
-    assert_eq!(
-      second,
-      SearchOutcome::Matched(1),
-      "行尾匹配之后应前进到下一处，而不是原地打转"
-    );
+    assert_eq!(second.line(), Some(1), "行尾匹配之后应前进到下一处，而不是原地打转");
     assert_eq!(
       model.snapshot().search_highlight,
       Some(SearchHighlight { row: 1, columns: 0..1 })
@@ -2895,7 +2920,7 @@ mod tests {
 
     // 反向：行首匹配之后应退到上一处
     let back = model.search("a", false, SearchDirection::Backward);
-    assert_eq!(back, SearchOutcome::Matched(0), "行首匹配之后应退回上一处");
+    assert_eq!(back.line(), Some(0), "行首匹配之后应退回上一处");
   }
 
   /// 字面模式的正则转义必须能被上游接受：含 `#`、`-`、`{`、`~` 这类标点的
@@ -2928,6 +2953,32 @@ mod tests {
     );
   }
 
+  /// 搜索回报整份网格（视口 + 滚动历史）的匹配总数：滚出视口的历史命中
+  /// 也要计入；无匹配总数 0；正则无效没有可数结果（is_invalid 标红输入框）。
+  #[test]
+  fn search_reports_the_total_match_count_across_history() {
+    let mut model = TerminalModel::new(40, 3);
+    model.advance(b"needle one\r\nplain\r\nneedle two\r\nneedle three\r\n");
+
+    let outcome = model.search("needle", false, SearchDirection::Forward);
+    assert_eq!(outcome.total(), Some(3), "视口外的历史命中也要计入");
+    assert!(outcome.line().is_some());
+
+    // 无匹配：总数 0；同一行多处命中各算一条（一行两处 → 数两处）
+    let miss = model.search("absent", false, SearchDirection::Forward);
+    assert_eq!(miss.total(), Some(0));
+
+    let mut model = TerminalModel::new(40, 3);
+    model.advance(b"pair pair\r\n");
+    let doubled = model.search("pair", false, SearchDirection::Forward);
+    assert_eq!(doubled.total(), Some(2), "同行两处各算一条");
+
+    // 正则无效：没有可数的结果
+    let invalid = model.search("[unclosed", true, SearchDirection::Forward);
+    assert_eq!(invalid.total(), None);
+    assert!(invalid.is_invalid());
+  }
+
   /// 历史深处的命中要滚进视口，且快照里给出视口行号与列区间的高亮。
   #[test]
   fn search_scrolls_history_into_view_and_reports_the_highlight() {
@@ -2935,7 +2986,7 @@ mod tests {
     model.advance(b"first\r\nneedle here\r\nthird\r\nfourth\r\nfifth\r\nsixth\r\n");
 
     let outcome = model.search("needle", false, SearchDirection::Forward);
-    assert!(matches!(outcome, SearchOutcome::Matched(_)), "应命中");
+    assert!(matches!(outcome, SearchOutcome::Matched { .. }), "应命中");
 
     let snapshot = model.snapshot();
     // 匹配行已对齐到视口（历史深处 → 视口中部附近）
@@ -2955,7 +3006,7 @@ mod tests {
     let before = model.snapshot().display_offset;
 
     let snapshot_taken = model.search("visible", false, SearchDirection::Forward);
-    assert!(matches!(snapshot_taken, SearchOutcome::Matched(_)));
+    assert!(matches!(snapshot_taken, SearchOutcome::Matched { .. }));
     assert_eq!(model.snapshot().display_offset, before, "屏内命中不应跳视口");
     assert!(model.snapshot().search_highlight.is_some());
 
@@ -2978,17 +3029,15 @@ mod tests {
 
     let first = model.search("hit", false, SearchDirection::Forward);
     let second = model.search("hit", false, SearchDirection::Forward);
-    let SearchOutcome::Matched(first_line) = first else {
-      panic!("第一处应命中");
-    };
-    let SearchOutcome::Matched(second_line) = second else {
-      panic!("第二处应命中");
+    let (first_line, second_line) = (first.line(), second.line());
+    let (Some(first_line), Some(second_line)) = (first_line, second_line) else {
+      panic!("两处都应命中");
     };
     assert!(second_line > first_line, "向前导航应到更晚的匹配");
 
     // 向后回到第一处
     let back = model.search("hit", false, SearchDirection::Backward);
-    assert_eq!(back, SearchOutcome::Matched(first_line));
+    assert_eq!(back.line(), Some(first_line));
   }
 
   /// 上游搜索按行喂字符、行边界按输入结束处理：单次匹配不跨行。
@@ -3025,7 +3074,7 @@ mod tests {
   impl SearchOutcomeKind for SearchOutcome {
     fn kind(&self) -> &'static str {
       match self {
-        SearchOutcome::Matched(_) => "hit",
+        SearchOutcome::Matched { .. } => "hit",
         SearchOutcome::NoMatch => "miss",
         SearchOutcome::InvalidPattern => "invalid",
       }

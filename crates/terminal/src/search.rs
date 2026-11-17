@@ -89,6 +89,14 @@ fn scan_lines(grid: &dyn GridView, start: i32, forward: bool) -> Vec<i32> {
   lines
 }
 
+/// 整份网格（视口 + 全部滚动历史）的匹配总数，供搜索条展示。
+/// 与导航同级的全量扫描：搜索本身就走一圈，成本同级。
+pub(super) fn count_matches(grid: &dyn GridView, regex: &Regex) -> usize {
+  let top = grid.topmost_line();
+  let bottom = grid.bottommost_line();
+  (top..=bottom).map(|line| line_matches(grid, regex, line).len()).sum()
+}
+
 /// 匹配是否在起点之后（向前）或之前（向后）。
 ///
 /// 向前看匹配的起点，向后看匹配的终点：两个方向的「下一处」都以同一侧的

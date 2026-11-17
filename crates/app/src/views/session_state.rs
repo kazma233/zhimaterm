@@ -58,8 +58,9 @@ pub(crate) struct SessionViewStateData {
   pub closes_on_shell_exit: bool,
   /// SSH 目标副本：会话结束后原地重连、密码询问的身份比对（ADR-018 修订）。
   pub reconnect_target: Option<SshTarget>,
-  /// 搜索反馈文案（无匹配 / 正则无效）；None = 上次命中或还没搜过。
-  pub search_feedback: Option<String>,
+  /// 最近一次搜索的结果（ADR-015）：搜索条据此渲染总数与错误态；
+  /// None = 模式串为空或已清掉（渲染层不显示计数区）。
+  pub search_outcome: Option<SearchOutcome>,
 }
 
 impl SessionViewState {
@@ -85,7 +86,7 @@ impl SessionViewState {
         blur_pending: false,
         closes_on_shell_exit,
         reconnect_target,
-        search_feedback: None,
+        search_outcome: None,
       },
     }
   }
@@ -288,7 +289,7 @@ pub(super) fn reduce(
       ]
     }
     ControlEvent::SearchResult(outcome) => {
-      state.data.search_feedback = feedback_for(outcome);
+      state.data.search_outcome = Some(outcome);
       Vec::new()
     }
     ControlEvent::LoggingStopped(reason) => {
@@ -363,7 +364,7 @@ pub(super) fn fold_signal(state: &mut SessionViewState, signal: SessionSignal, n
       Vec::new()
     }
     SessionSignal::SearchFeedbackCleared => {
-      state.data.search_feedback = None;
+      state.data.search_outcome = None;
       Vec::new()
     }
     SessionSignal::Receipt(text) => {
@@ -476,14 +477,6 @@ fn apply_schedule(state: &mut SessionViewState, outcome: ScheduleOutcome) -> boo
       ));
       false
     }
-  }
-}
-
-fn feedback_for(outcome: SearchOutcome) -> Option<String> {
-  match outcome {
-    SearchOutcome::Matched(_) => None,
-    SearchOutcome::NoMatch => Some("无匹配".to_owned()),
-    SearchOutcome::InvalidPattern => Some("正则无效".to_owned()),
   }
 }
 
@@ -786,6 +779,6 @@ mod tests {
     );
     assert_eq!(state.data.status, "已复制 3 字符");
     fold_signal(&mut state, SessionSignal::SearchFeedbackCleared, Instant::now());
-    assert_eq!(state.data.search_feedback, None);
+    assert_eq!(state.data.search_outcome, None);
   }
 }

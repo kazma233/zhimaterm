@@ -35,7 +35,7 @@ use zhimaterm_session::{
   Session, SessionConfig, SessionEvent, SessionTarget, StartupSize,
 };
 use zhimaterm_terminal::backend::BackendKind;
-use zhimaterm_terminal::{SearchDirection, TerminalLink, TerminalSnapshot};
+use zhimaterm_terminal::{SearchDirection, SearchOutcome, TerminalLink, TerminalSnapshot};
 
 // 连接看门狗与自动重连（ADR-013）的裁决都在 session 域的重连计划
 // （`zhimaterm_session::reconnect`），这里只保留每秒时钟的驱动。
@@ -1249,7 +1249,6 @@ impl TerminalView {
     Some(input.read(cx).text().to_owned())
   }
 
-  /// 搜索反馈落地：命中清掉旧提示，无匹配/正则无效如实显示。
   /// 复制快捷键派发的动作（绑定见 `input::app_key_bindings`）。
   /// 结束态与连接中没有可复制的内容，与按键路径迁移前的行为一致。
   fn copy_selection(&mut self) {
@@ -1686,19 +1685,28 @@ fn status_extras(
   any.then(move || row.into_any_element())
 }
 
-/// 搜索条（ADR-015，2026-11-16 修订位置）：终端右上角的浮动覆盖层——输入框、
-/// 正则开关、反馈与关闭。覆盖而不是挤占网格：搜索开关不改变网格行列数，
-/// PTY 不被无谓 resize。右缘锚定、宽度随内容自适应（反馈文案长了向左生长）。
+/// 搜索条（ADR-015，2026-11-16 修订位置；2026-11-17 修订反馈形态）：终端
+/// 右上角的浮动覆盖层——输入框、正则开关、上/下跳转与匹配总数、关闭。
+/// 覆盖而不是挤占网格：搜索开关不改变网格行列数，PTY 不被无谓 resize。
+/// 正则无效时输入框标红（`danger` 边框），不再用文字提示；「上跳 / 下跳 /
+/// 总数」三元素常驻，有匹配时强调色可点，没有时总数 0、上下置灰。
 fn render_search_bar(
   input: Option<&gpui::Entity<TextInput>>,
   regex_enabled: bool,
-  feedback: Option<&str>,
+  outcome: Option<&SearchOutcome>,
   cx: &mut Context<TerminalView>,
 ) -> gpui::Div {
   let tokens = zhimaterm_base::theme::tokens(cx);
   let view = cx.entity();
   let close_view = view.clone();
   let regex_view = view.clone();
+  let nav_view = view.clone();
+  let invalid = outcome.is_some_and(SearchOutcome::is_invalid);
+  if let Some(input) = input {
+    // 错误态在渲染期同步进输入框实体：变化才通知，不变时静默，不会引发
+    // 重渲染循环
+    input.update(cx, |input, cx| input.set_invalid(invalid, cx));
+  }
   let mut bar = div()
     .absolute()
     .top(px(8.))
@@ -1745,15 +1753,40 @@ fn render_search_bar(
       })
       .child(".* 正则"),
   );
-  if let Some(feedback) = feedback {
-    bar = bar.child(
+  // 匹配计数区常驻：「上跳 / 下跳 / 总数」在搜索条开着期间始终显示，没有
+  // 可数的匹配（空模式、无命中、正则无效）时总数显示 0、上下置灰不可点；
+  // 错误仍由红框表达，这里只按「无匹配」对待
+  let total = outcome.and_then(SearchOutcome::total).unwrap_or(0);
+  let jumpable = total > 0;
+  let jump = |direction, label, id: &'static str| {
+    let nav_view = nav_view.clone();
+    div()
+      .id(id)
+      .flex_none()
+      .px(px(3.))
+      .rounded(px(4.))
+      .text_size(ui_rems(11.))
+      .text_color(gpui::rgb(if jumpable { tokens.accent } else { tokens.fg_faint }))
+      .when(jumpable, |btn| {
+        btn
+          .cursor(zhimaterm_base::ui::CLICKABLE)
+          .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
+          .on_click(move |_, _, cx| {
+            nav_view.update(cx, |view, cx| view.navigate_search(direction, cx));
+          })
+      })
+      .child(label)
+  };
+  bar = bar
+    .child(jump(SearchDirection::Backward, "↑", "search-prev"))
+    .child(jump(SearchDirection::Forward, "↓", "search-next"))
+    .child(
       div()
         .flex_none()
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.warn_strong))
-        .child(feedback.to_owned()),
+        .text_color(gpui::rgb(if jumpable { tokens.accent } else { tokens.fg_faint }))
+        .child(total.to_string()),
     );
-  }
   bar.child(
     div()
       .id("search-close")
@@ -2199,7 +2232,7 @@ impl TerminalView {
         render_search_bar(
           self.search_input.as_ref(),
           self.search_regex,
-          self.state.data().search_feedback.as_deref(),
+          self.state.data().search_outcome.as_ref(),
           cx,
         )
       }))

@@ -189,6 +189,9 @@ pub struct TextCore {
   /// 只读态:可聚焦、可选中、可复制,但任何编辑路径都不生效。
   /// 与 disabled 的区别是不灰化——它展示的是"已生成的结果",不是"不可用"
   pub(crate) read_only: bool,
+  /// 错误态:边框用危险色标红(搜索条正则无效这类即时校验)。与业务错误
+  /// 文案(TextInput.error)无关——这里只表达框本身的红色警示
+  pub(crate) invalid: bool,
   /// 上/下移动的记忆列目标(视觉行内 x)。横向移动、鼠标点击、内容编辑
   /// 都会失锚,下次纵向移动以光标新位置重新锚定(标准编辑器 goal column)
   pub(crate) column_goal: Option<Pixels>,
@@ -225,6 +228,7 @@ impl TextCore {
       secret_stored: false,
       disabled: false,
       read_only: false,
+      invalid: false,
       column_goal: None,
       history: EditHistory::default(),
       on_change: None,
@@ -259,6 +263,11 @@ impl TextCore {
 
   pub fn set_read_only(&mut self, read_only: bool) {
     self.read_only = read_only;
+  }
+
+  /// 错误态开关:开启时边框用危险色,优先于聚焦色(错误必须盖过高亮)。
+  pub fn set_invalid(&mut self, invalid: bool) {
+    self.invalid = invalid;
   }
 
   pub fn set_on_change(&mut self, callback: impl Fn(&str, &mut Window, &mut App) + 'static) {
@@ -1011,10 +1020,18 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
     // 单行控件与下拉框显式等高;多行框撑满父容器高度(父链需为 flex 且高度确定)
     let multiline = self.core().multiline;
     let tokens = crate::theme::tokens(cx);
-    let (border, background, text_color) = if focused {
-      (tokens.border_focus, tokens.bg_focus, tokens.fg_bright)
+    // 错误态优先于聚焦色:红色警示不能被聚焦高亮盖掉
+    let border = if self.core().invalid {
+      tokens.danger
+    } else if focused {
+      tokens.border_focus
     } else {
-      (tokens.border_default, tokens.bg_input, tokens.fg)
+      tokens.border_default
+    };
+    let (background, text_color) = if focused {
+      (tokens.bg_focus, tokens.fg_bright)
+    } else {
+      (tokens.bg_input, tokens.fg)
     };
     let mut base = div()
       .flex()
@@ -1039,7 +1056,7 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
         gpui::rgb(background)
       })
       .border_1()
-      .border_color(if read_only {
+      .border_color(if read_only && !self.core().invalid {
         gpui::rgb(tokens.border_default)
       } else {
         gpui::rgb(border)
@@ -1050,8 +1067,9 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
       .line_height(crate::ui::ui_rems(super::LINE_HEIGHT))
       .text_size(crate::ui::ui_rems(super::FONT_SIZE))
       .text_color(gpui::rgb(text_color));
-    // 聚焦时不再叠悬停色,否则悬停会把高亮盖掉,看起来像没聚焦
-    if !focused {
+    // 聚焦时不再叠悬停色,否则悬停会把高亮盖掉,看起来像没聚焦;
+    // 错误态同理,悬停不得盖掉红色警示
+    if !focused && !self.core().invalid {
       base = base.hover(|style| style.border_color(gpui::rgb(tokens.border_hover)));
     }
 
