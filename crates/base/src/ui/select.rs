@@ -10,7 +10,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, ClickEvent, ElementId, MouseButton, MouseDownEvent, Pixels, Size, Window, div, point, px};
+use gpui::{
+  Anchor, App, Bounds, ClickEvent, Edges, ElementId, MouseButton, MouseDownEvent, Pixels, Size, Window, anchored, div,
+  point, px,
+};
 
 use crate::theme::UiTokens;
 use crate::ui::{CLICKABLE, CONTROL_HEIGHT, popover_shadow, ui_rems};
@@ -134,25 +137,28 @@ pub enum PopoverSide {
 
 /// 锚定下拉浮层的外壳：定位、边框底色、滚动与点击截断都在这里，行内容由
 /// 调用方注入。宽度是下限：行内容更长（Shell 路径、长字体名）时浮层自然
-/// 撑开，不在行内截断。`viewport` 是当前视口：纵向按 `side` 停靠，横向把
-/// 浮层夹在视口内（入口在窗口顶栏右区后，锚点贴右缘是常态，ADR-057）。
-/// `id` 要在多次渲染间稳定：滚动位置挂在元素状态上。
+/// 撑开，不在行内截断。定位交给 gpui 的 [`anchored`]：按 `side` 停靠在锚点
+/// 对应侧之外 2px，实际布局尺寸比 min_width 预期宽时（行内容随界面字号
+/// 撑宽，顶栏右区入口贴右缘是常态，ADR-057）自动贴回视口内 8px——撑宽的
+/// 浮层向左生长，不会被窗口右缘裁掉。`id` 要在多次渲染间稳定：滚动位置
+/// 挂在元素状态上。
 #[allow(clippy::too_many_arguments)]
 pub fn anchored_popover<Row: IntoElement>(
   tokens: &UiTokens,
   id: impl Into<ElementId>,
   anchor: Bounds<Pixels>,
   side: PopoverSide,
-  viewport: Size<Pixels>,
   min_width: Pixels,
   max_height: Pixels,
   scroll: Option<&gpui::ScrollHandle>,
   rows: Vec<Row>,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui::AnyElement {
+  let element_id = id.into();
   let popover = div()
-    .id(id.into())
-    .absolute()
-    .left(anchored_left(anchor.origin.x, viewport.width, min_width))
+    .id(element_id.clone())
+    // 元素 id 兼作测试锚点：外层由 anchored() 包装，调用方够不到浮层本体，
+    // 布局断言按 debug_bounds(id) 查（非 test 构建是无开销的空操作）
+    .debug_selector(move || element_id.to_string())
     .min_w(min_width)
     .max_h(max_height)
     .overflow_y_scroll()
@@ -170,18 +176,19 @@ pub fn anchored_popover<Row: IntoElement>(
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .when_some(scroll, |popover, scroll| popover.track_scroll(scroll))
     .children(rows);
-  match side {
-    PopoverSide::Below => popover.top(anchor.origin.y + anchor.size.height + px(2.)),
-    PopoverSide::Above => popover.bottom(viewport.height - anchor.origin.y + px(2.)),
-  }
-}
-
-/// 浮层左缘的横向夹取：按锚点 x 直接定位会让 min_width 溢出视口右缘（顶栏
-/// 右区入口是常态，ADR-057），夹到「浮层右缘贴视口、留 8px 边距」；极窄
-/// 视口下保底左缘 8px（此时右溢不可避免——宽度契约是下限不是上限，行内容
-/// 超过 min_width 撑宽浮层时由调用方挑锚点避让）。
-fn anchored_left(anchor_x: Pixels, viewport_width: Pixels, min_width: Pixels) -> Pixels {
-  anchor_x.min(viewport_width - min_width - px(8.)).max(px(8.))
+  // 左缘对齐锚点（下拉的正下/正上方口径不变），2px 间隙与旧口径一致；
+  // 贴边回弹全权交给 anchored——它按布局后的实际尺寸回弹，无需按 min_width 预判。
+  let (corner, offset) = match side {
+    PopoverSide::Below => (Anchor::BottomLeft, point(px(0.), px(2.))),
+    PopoverSide::Above => (Anchor::TopLeft, point(px(0.), px(-2.))),
+  };
+  anchored()
+    .attach(anchor, corner)
+    .anchor(Anchor::TopLeft)
+    .offset(offset)
+    .snap_to_window_with_margin(Edges::all(px(8.)))
+    .child(popover)
+    .into_any_element()
 }
 
 /// 展开的选项浮层：锚在 `bounds_slot` 记录的选择框下方，下方放不下时贴上方
@@ -285,7 +292,6 @@ fn select_popover_with(
     id,
     anchor,
     popover_side(anchor, viewport.height, px(200.)),
-    viewport,
     anchor.size.width,
     px(200.),
     Some(scroll),
@@ -549,18 +555,42 @@ mod tests {
     );
   }
 
-  /// 浮层左缘横向夹取：常规锚点原位、右缘锚点左移到浮层完整可见（顶栏右区
-  /// 入口，ADR-057）、极窄视口保底 8px。
-  #[test]
-  fn anchored_left_clamps_to_keep_popover_on_screen() {
-    // 视口宽裕：贴锚点原位
-    assert_eq!(anchored_left(px(100.), px(1200.), px(230.)), px(100.));
-    // 顶栏右区入口（锚点 1100）：左移到浮层右缘贴视口、留 8px 边距
-    assert_eq!(anchored_left(px(1100.), px(1200.), px(230.)), px(962.));
-    // 刚好放得下：夹取值与锚点重合时不左移
-    assert_eq!(anchored_left(px(962.), px(1200.), px(230.)), px(962.));
-    // 极窄视口（min_width 都放不下）：保底左缘 8px
-    assert_eq!(anchored_left(px(60.), px(120.), px(230.)), px(8.));
+  /// 贴边夹取的布局断言：行内容把浮层撑得比 min_width 宽时，浮层向左生长、
+  /// 右缘停在「视口 - 8px」，整份留在视口内。此前按 min_width 预判左缘，
+  /// 撑宽的部分溢出视口右缘被窗口裁掉（顶栏右区的主题下拉，ADR-057）。
+  #[gpui::test]
+  fn right_pinned_popover_stays_inside_viewport(cx: &mut gpui::TestAppContext) {
+    struct Harness;
+
+    impl gpui::Render for Harness {
+      fn render(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let tokens = crate::theme::tokens(cx);
+        // 行声明 260px 宽，远超 min_width(100)：浮层实际宽度 = 260 + 两侧 4px 内边距 + 两侧 1px 边框 = 270
+        let rows = vec![div().w(px(260.)).h(px(20.)).bg(gpui::rgb(0x000000))];
+        anchored_popover(
+          &tokens,
+          "popover-under-test",
+          Bounds::new(point(px(200.), px(20.)), size(px(28.), px(24.))),
+          PopoverSide::Below,
+          px(100.),
+          px(420.),
+          None,
+          rows,
+        )
+      }
+    }
+
+    cx.update(|cx| crate::theme::init(None, cx));
+    // 窗口 300 宽：锚点 200 + 下限 100 + 8px 边距放不下，靠贴边夹取回弹到视口内
+    let window = cx.open_window(size(px(300.), px(200.)), |_, _| Harness);
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+      .unwrap();
+    let popover = gpui::VisualTestContext::from_window(window.into(), cx)
+      .debug_bounds("popover-under-test")
+      .expect("浮层要画出来");
+    assert_eq!(popover.right(), px(292.), "右缘贴回视口内 8px");
+    assert!(popover.left() >= px(0.), "撑宽后向左生长，整份浮层留在视口内");
+    assert_eq!(popover.size.width, px(270.), "实际宽度由行内容决定，min_width 只是下限");
   }
 
   /// 单行控件等高契约（CONTROL_HEIGHT）：收起下拉与文本输入框同排并立时

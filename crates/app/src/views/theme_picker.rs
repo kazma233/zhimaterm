@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, MouseButton, Pixels, Size, div, px};
+use gpui::{App, Bounds, MouseButton, Pixels, div, px};
 
 use zhimaterm_base::theme::{UiTokens, builtin, builtin_names_sorted, current};
 use zhimaterm_base::ui::canvas;
@@ -88,15 +88,9 @@ pub fn entry(tokens: &UiTokens, picker: &ThemePicker, actions: &PickerActions, c
 }
 
 /// 展开时的点击遮罩与锚定浮层（遮罩在下层截住「点别处收起」，浮层锚在入口
-/// 正下方——入口贴着窗口顶缘，向上展开会溢出窗口；横向夹取在浮层外壳，
-/// 右区入口不会带着下拉溢出右缘）；未展开时为空。
-pub fn layers(
-  tokens: &UiTokens,
-  picker: &ThemePicker,
-  actions: &PickerActions,
-  viewport: Size<Pixels>,
-  cx: &App,
-) -> Vec<gpui::AnyElement> {
+/// 正下方——入口贴着窗口顶缘，向上展开会溢出窗口；横向夹取在浮层外壳按
+/// 实际布局尺寸回弹，右区入口不会带着下拉溢出右缘）；未展开时为空。
+pub fn layers(tokens: &UiTokens, picker: &ThemePicker, actions: &PickerActions, cx: &App) -> Vec<gpui::AnyElement> {
   if !picker.open {
     return Vec::new();
   }
@@ -117,7 +111,6 @@ pub fn layers(
       "theme-popover",
       anchor,
       PopoverSide::Below,
-      viewport,
       px(230.),
       px(420.),
       None,

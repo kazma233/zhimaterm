@@ -516,13 +516,13 @@ impl Render for ZhimaTermApp {
           .collect::<Vec<_>>()
       })
       // 主题下拉的遮罩与浮层在 views::theme_picker（ADR-027/057）：遮罩截住
-      // 「点别处收起」，浮层锚在顶栏入口正下方（视口传给浮层外壳做横向夹取）。
-      // 浮层栈非空时它已被收起（见 `overlay_open` 的互斥），不会同时出现。
+      // 「点别处收起」，浮层锚在顶栏入口正下方（贴边夹取由浮层外壳按实际
+      // 布局尺寸处理）。浮层栈非空时它已被收起（见 `overlay_open` 的互斥），
+      // 不会同时出现。
       .children(theme_picker::layers(
         &tokens,
         &self.theme_picker,
         &theme_picker_actions(cx),
-        window.viewport_size(),
         cx,
       ))
   }
