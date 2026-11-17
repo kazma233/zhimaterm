@@ -19,6 +19,7 @@ use gpui::{
 
 use crate::editor::{self, EditorChoice};
 use crate::views::grid;
+use crate::views::panes;
 use crate::views::session_state::{FocusAction, SessionEffect, SessionSignal, fold_signal};
 use crate::views::shell;
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
@@ -1685,11 +1686,11 @@ fn status_extras(
   any.then(move || row.into_any_element())
 }
 
-/// 搜索条（ADR-015，2026-11-16 修订位置；2026-11-17 修订反馈形态）：终端
-/// 右上角的浮动覆盖层——输入框、正则开关、上/下跳转与匹配总数、关闭。
-/// 覆盖而不是挤占网格：搜索开关不改变网格行列数，PTY 不被无谓 resize。
-/// 正则无效时输入框标红（`danger` 边框），不再用文字提示；「上跳 / 下跳 /
-/// 总数」三元素常驻，有匹配时强调色可点，没有时总数 0、上下置灰。
+/// 搜索条（ADR-015，2026-11-17 修订位置：动作行下方）：终端右上的浮动
+/// 覆盖层——输入框、正则开关、上/下跳转与匹配总数、关闭。覆盖而不是
+/// 挤占网格：搜索开关不改变网格行列数，PTY 不被无谓 resize。正则无效时
+/// 输入框标红（`danger` 边框），不再用文字提示；「上跳 / 下跳 / 总数」
+/// 三元素常驻，有匹配时强调色可点，没有时总数 0、上下置灰。
 fn render_search_bar(
   input: Option<&gpui::Entity<TextInput>>,
   regex_enabled: bool,
@@ -1709,7 +1710,7 @@ fn render_search_bar(
   }
   let mut bar = div()
     .absolute()
-    .top(px(8.))
+    .top(px(panes::OVERLAY_TOP_BELOW_ACTION_ROW))
     .right(px(8.))
     .rounded(px(8.))
     .border_1()
@@ -1802,9 +1803,9 @@ fn render_search_bar(
   )
 }
 
-/// 终端格的右键菜单（ADR-023）：拆分与搜索的另一条入口，动作语义与键位完全
-/// 一致——拆分走既有 action 派发（应用根的 on_action 处理，跟随焦点格），搜索
-/// 直接调视图方法。
+/// 终端格的右键菜单（ADR-023，2026-11-17 修订：只剩两个拆分项，搜索入口
+/// 移至格右上角动作行）：动作语义与键位完全一致——拆分走既有 action 派发
+/// （应用根的 on_action 处理，跟随焦点格）。
 fn render_context_menu(
   click: gpui::Point<gpui::Pixels>,
   container: gpui::Size<gpui::Pixels>,
@@ -1843,19 +1844,11 @@ fn terminal_context_menu_items(cx: &mut Context<TerminalView>) -> Vec<menu::Menu
       window.dispatch_action(SplitDown.boxed_clone(), cx);
     });
   });
-  let entity = cx.entity();
-  let search = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
-    entity.update(cx, |this, cx| {
-      this.context_menu = None;
-      this.open_search(window, cx);
-    });
-  });
   vec![
-    menu::MenuEntry::item("水平拆分", split_right),
-    menu::MenuEntry::item("垂直拆分", split_down),
-    // 拆分是布局动作、搜索是内容动作：两类之间用分隔线隔开
-    menu::MenuEntry::Separator,
-    menu::MenuEntry::item("搜索", search),
+    // 措辞与动作行的 tooltip 统一（ADR-058）：废弃「水平/垂直拆分」的
+    // 歧义叫法，动作与键位参考表同口径
+    menu::MenuEntry::item("左右分屏", split_right),
+    menu::MenuEntry::item("上下分屏", split_down),
   ]
 }
 
@@ -2033,7 +2026,8 @@ fn render_forward_overlay(
 
   div()
     .absolute()
-    .top(px(8.))
+    // 与搜索条同一条避让规则：动作行下方（ADR-058）
+    .top(px(panes::OVERLAY_TOP_BELOW_ACTION_ROW))
     .right(px(8.))
     .w(px(340.))
     .rounded(px(8.))
@@ -2213,8 +2207,8 @@ impl TerminalView {
       // 探针停靠面板（ADR-028）：展开时作为 flex 子元素贴右缘，
       // 终端让宽、PTY 按新列数重排；收起时不渲染
       .children(self.probe_panel.clone())
-      // 转发状态浮层（ADR-011/012/038）：右上角小卡片，标题栏按钮开关；
-      // 增删在浮层里完成，写回配置经外壳回调
+      // 转发状态浮层（ADR-011/012/038）：右上角小卡片（动作行下方避让，
+      // ADR-058），标题栏按钮开关；增删在浮层里完成，写回配置经外壳回调
       .children(self.forward_open.then(|| {
         render_forward_overlay(
           tokens,
@@ -2227,7 +2221,8 @@ impl TerminalView {
         )
       }))
       .children(self.sftp_panel.clone())
-      // 搜索条（ADR-015）：底部覆盖层，不挤占网格（PTY 不因开关无谓 resize）
+      // 搜索条（ADR-015，2026-11-17 修订：动作行下方的右上角覆盖层），
+      // 不挤占网格（PTY 不因开关无谓 resize）
       .children(self.search_open.then(|| {
         render_search_bar(
           self.search_input.as_ref(),
@@ -2279,7 +2274,7 @@ impl TerminalView {
     // 网格绘制参数每帧快照一次；画面数据不进闭包，paint 时从实体现读，避免整帧拷贝
     let painter = grid::GridPainter {
       metrics,
-      font: font::terminal_font(&self.font.family),
+      font: font::terminal_grid_font(&self.font),
       font_size,
       hovered,
       hovered_link: self.hovered_link.clone(),
@@ -2325,9 +2320,9 @@ impl TerminalView {
     div()
       .id("terminal-surface")
       .relative()
-      // 终端字体只属于网格区域：顶栏、底栏与 SFTP 面板这些
-      // 界面文字从应用根继承界面字体（设置里可换）
-      .font(font::terminal_font(&self.font.family))
+      // 终端字体只属于网格区域（含字体特性，ADR-059）：顶栏、底栏与
+      // SFTP 面板这些界面文字从应用根继承界面字体（设置里可换）
+      .font(font::terminal_grid_font(&self.font))
       .text_size(px(self.font.size))
       .flex_1()
       .min_w(px(0.))

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, FocusHandle, Window, px};
 
-use crate::settings::SettingsValues;
 use crate::settings::form::{CandidateLists, ModalActions, SettingsForm, SettingsModal};
+use crate::settings::{self, SettingsValues, merge_font_features};
 use crate::views::shell;
 use crate::views::terminal_view::TerminalView;
 use crate::views::theme_picker;
@@ -236,15 +236,37 @@ impl ZhimaTermApp {
     );
   }
 
-  /// 打开设置表单：按当前生效值预填（建造与预填由表单自持）。焦点归模态
-  /// 自己（ADR-043），不落到某个输入框上。
+  /// 打开设置表单：先从盘上重读设置（ADR-055 修订），外部改动进预填、
+  /// 不再被陈旧内存值覆盖，修好的冻结文件也随这次重读自动解冻。表单按
+  /// 重读后的生效值预填（建造与预填由表单自持）。焦点归模态自己
+  /// （ADR-043），不落到某个输入框上。
   pub(super) fn open_settings_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let (store, error) = settings::Store::load();
+    self.settings = store;
+    self.settings_error = error;
     let store = self.settings.settings();
+    // 连字与手输特性：文件里的 calt 折进开关，输入框只带其余特性
+    // （ADR-059）——表单里的特性串永远是校验能过的形态
+    let (font_ligatures, font_features) = store
+      .map(|store| store.form_ligature_features())
+      .unwrap_or((true, String::new()));
+    // 字体家族/字号优先取盘上保存值：表单编辑的是「设置」，应用后会落到
+    // self.font；盘上没存（自动挑选/默认值）才回落当前生效值
     let current = SettingsValues {
-      font_family: self.font.family.clone(),
-      font_size: self.font.size,
-      ui_font_family: self.ui_font_family.clone(),
-      ui_font_size: self.ui_font_size,
+      font_family: store
+        .and_then(|store| store.font_family.clone())
+        .unwrap_or_else(|| self.font.family.clone()),
+      font_size: store
+        .map(|store| store.font_size_or_default())
+        .unwrap_or(self.font.size),
+      font_ligatures,
+      font_features,
+      ui_font_family: store
+        .and_then(|store| store.ui_font_family.clone())
+        .or_else(|| self.ui_font_family.clone()),
+      ui_font_size: store
+        .map(|store| store.ui_font_size_or_default())
+        .unwrap_or(self.ui_font_size),
       scrolling_history: store
         .map(|store| store.scrolling_history_or_default())
         .unwrap_or(DEFAULT_SCROLLING_HISTORY),
@@ -281,6 +303,23 @@ impl ZhimaTermApp {
       window,
       cx,
     );
+  }
+
+  /// 打开设置文件（ADR-055 修订）：用重读后的编辑器档位直开盘上的
+  /// settings.json——外部改过档位时立即尊重新值。冻结（读盘失败）时路径
+  /// 仍在，打开正是修文件的入口；打开失败沿用该 ADR 的静默口径。
+  /// 只有配置目录本身定位失败才无处可开，如实报在表单底部。
+  fn open_settings_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    let choice = crate::editor::EditorChoice::from_setting(
+      self
+        .settings
+        .settings()
+        .and_then(|settings| settings.text_editor.as_deref()),
+    );
+    let Some(path) = self.settings.file_path() else {
+      return self.fail_settings("无法定位设置文件：配置目录不可用".into(), cx);
+    };
+    crate::editor::open(&choice, path, None, None);
   }
 
   /// 打开快捷键参考模态（只读，Esc 关闭）。
@@ -353,8 +392,10 @@ impl ZhimaTermApp {
     let font = FontConfig {
       family: edited.font_family.clone(),
       size: edited.font_size,
+      // 连字开关与手输特性的合流单点（ADR-059）
+      features: merge_font_features(edited.font_ligatures, edited.font_feature_pairs()),
     };
-    let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
+    let metrics = CellMetrics::measure(cx.text_system(), &font);
     self.font = font.clone();
     self.metrics = metrics;
     let runtime = zhimaterm_session::RuntimeParams {
@@ -749,6 +790,7 @@ fn forward_modal_actions(cx: &Context<ZhimaTermApp>) -> zhimaterm_connections::f
 fn settings_modal_actions(cx: &Context<ZhimaTermApp>) -> ModalActions {
   ModalActions {
     apply: modal_action(cx, |this, window, cx| this.apply_settings(window, cx)),
+    open_file: modal_action(cx, |this, window, cx| this.open_settings_file(window, cx)),
     cancel: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),
   }
 }

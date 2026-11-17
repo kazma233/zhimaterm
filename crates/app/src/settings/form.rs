@@ -17,8 +17,8 @@ use gpui::{
 
 use crate::settings::{
   DEFAULT_SCROLLING_HISTORY, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_UI_FONT_SIZE, SettingsValues,
-  validate_font_size, validate_local_shell, validate_local_workdir, validate_scrolling_history, validate_text_editor,
-  validate_ui_font_size,
+  validate_font_features, validate_font_size, validate_local_shell, validate_local_workdir, validate_scrolling_history,
+  validate_text_editor, validate_ui_font_size,
 };
 use zhimaterm_base::font;
 use zhimaterm_base::ui::card;
@@ -34,6 +34,9 @@ use zhimaterm_terminal::backend::BackendKind;
 pub struct ModalActions {
   /// 「应用」：校验表单并把设置生效到界面与持久化
   pub apply: WindowAction,
+  /// 「打开设置文件」：外壳用当前生效的编辑器档位打开盘上的
+  /// settings.json（ADR-055 修订）。动作区与冻结横幅两处共用同一动作。
+  pub open_file: WindowAction,
   /// 「取消」：关闭表单。要窗口：关闭时把焦点还给会话
   pub cancel: WindowAction,
 }
@@ -133,6 +136,9 @@ const CUSTOM_SHELL_PLACEHOLDER: &str = "/usr/local/bin/fish";
 /// 自定义编辑器输入的占位路径：同上，只作格式提示。
 const CUSTOM_EDITOR_PLACEHOLDER: &str = "/usr/local/bin/nvim";
 
+/// 手输字体特性的占位串（ADR-059）：一组常见的非连字特性作格式提示。
+const FONT_FEATURES_PLACEHOLDER: &str = "ss01 1, zero 1";
+
 pub struct SettingsForm {
   /// 终端字号
   size: Entity<TextInput>,
@@ -140,6 +146,10 @@ pub struct SettingsForm {
   ui_size: Entity<TextInput>,
   /// 滚动历史上限（行数，ADR-035）
   history: Entity<TextInput>,
+  /// 连字开关（ADR-059）：默认开 = 保持默认渲染行为
+  ligatures: bool,
+  /// 手输 OpenType 字体特性（ADR-059，「tag value」对，逗号分隔）
+  features: Entity<TextInput>,
   /// 本地 Shell 候选（系统注册表，打开表单时取一次）
   shells: Vec<String>,
   /// 选中的 Shell：系统默认 / 候选 / 自定义
@@ -218,6 +228,7 @@ impl SettingsForm {
     let size = make(&font::DEFAULT_FONT_SIZE.to_string(), cx);
     let ui_size = make(&DEFAULT_UI_FONT_SIZE.to_string(), cx);
     let history = make(&DEFAULT_SCROLLING_HISTORY.to_string(), cx);
+    let features = make(FONT_FEATURES_PLACEHOLDER, cx);
     let custom_shell = make(CUSTOM_SHELL_PLACEHOLDER, cx);
     let custom_editor = make(CUSTOM_EDITOR_PLACEHOLDER, cx);
     let workdir = make("", cx);
@@ -226,6 +237,7 @@ impl SettingsForm {
     history.update(cx, |input, cx| {
       input.set_text(&current.scrolling_history.to_string(), cx)
     });
+    features.update(cx, |input, cx| input.set_text(&current.font_features, cx));
     custom_shell.update(cx, |input, cx| input.set_text(&custom_shell_text, cx));
     custom_editor.update(cx, |input, cx| input.set_text(&custom_editor_text, cx));
     workdir.update(cx, |input, cx| {
@@ -241,6 +253,8 @@ impl SettingsForm {
       size,
       ui_size,
       history,
+      ligatures: current.font_ligatures,
+      features,
       shells,
       shell_choice,
       custom_shell,
@@ -281,6 +295,9 @@ impl SettingsForm {
     let font_size = validate_font_size(self.size.read(cx).text())?;
     let ui_font_size = validate_ui_font_size(self.ui_size.read(cx).text())?;
     let scrolling_history = validate_scrolling_history(self.history.read(cx).text())?;
+    // 手输字体特性（ADR-059）：严格校验，calt 由连字开关独占
+    let font_features = self.features.read(cx).text().to_owned();
+    validate_font_features(&font_features)?;
     // 「系统默认」= 空路径；自定义走输入框。两条路都经同一校验，
     // 候选路径在枚举时已过滤，这里再验一次防表单打开期间被删改。
     let shell_text = if self.shell_custom() {
@@ -305,6 +322,8 @@ impl SettingsForm {
     Ok(SettingsValues {
       font_family,
       font_size,
+      font_ligatures: self.ligatures,
+      font_features,
       ui_font_family,
       ui_font_size,
       scrolling_history,
@@ -322,6 +341,12 @@ impl SettingsForm {
     cx.notify();
   }
 
+  /// 切换连字（ADR-059）；生效仍由「应用」触发。
+  pub fn toggle_ligatures(&mut self, cx: &mut Context<Self>) {
+    self.ligatures = !self.ligatures;
+    cx.notify();
+  }
+
   /// 切换 ⌥ 键当 Alt 的选择；生效仍由「应用」触发。
   /// 仅 macOS 渲染该开关（ADR-033），其余平台无调用方。
   #[cfg(target_os = "macos")]
@@ -333,12 +358,13 @@ impl SettingsForm {
   /// 表单里输入框的焦点环：按视觉顺序排（ADR-043）。模态内的 Tab 沿它移动，
   /// 走完一圈回到作用域根。自定义 Shell/编辑器路径只在选中「自定义…」时在场。
   pub fn focus_ring(&self, cx: &App) -> Vec<FocusHandle> {
-    // 与视觉顺序一致（ADR-043）：编辑器行在「终端」节（history 之后），
+    // 与视觉顺序一致（ADR-043）：编辑器行在「终端」节（特性输入之后），
     // 自定义 Shell 路径行画在 Shell 行与工作目录之间
     let mut ring = vec![
       self.ui_size.read(cx).focus_handle(),
       self.size.read(cx).focus_handle(),
       self.history.read(cx).focus_handle(),
+      self.features.read(cx).focus_handle(),
     ];
     if self.editor_custom() {
       ring.push(self.custom_editor.read(cx).focus_handle());
@@ -537,6 +563,8 @@ impl SettingsForm {
     self.custom_editor.update(cx, |input, cx| input.set_text("", cx));
     self.workdir.update(cx, |input, cx| input.set_text("", cx));
     self.option_as_alt = false;
+    self.ligatures = true;
+    self.features.update(cx, |input, cx| input.set_text("", cx));
     let size = font::DEFAULT_FONT_SIZE.to_string();
     self.size.update(cx, |input, cx| input.set_text(&size, cx));
     let ui_size = DEFAULT_UI_FONT_SIZE.to_string();
@@ -615,10 +643,10 @@ fn font_row(
 
 /// 一行开关设置：勾选框与标题同行，说明独占一行并与标题对齐。
 /// 整行可点，与下拉选择行的交互重量一致；说明文字解释两个状态各自的含义。
-/// 当前唯一调用是 ⌥ 键开关（macOS-only，ADR-033），随调用点一起门控。
-#[cfg(target_os = "macos")]
+/// 调用方：连字开关（全平台，ADR-059）与 ⌥ 键开关（仅 macOS 渲染，ADR-033）。
 fn checkbox_row(
   tokens: &zhimaterm_base::theme::UiTokens,
+  id: &'static str,
   title: &str,
   description: &str,
   checked: bool,
@@ -634,48 +662,47 @@ fn checkbox_row(
         .border_color(gpui::rgb(tokens.border_default))
     }
   };
-  zhimaterm_base::ui::panel::clickable("toggle-option-as-alt", move |event, window, cx| {
-    on_toggle(event, window, cx)
-  })
-  .flex()
-  .flex_col()
-  .gap(px(3.))
-  .child(
-    div()
-      .flex()
-      .items_center()
-      .gap(px(8.))
-      .child(
-        box_style(div())
-          .flex_none()
-          .w(ui_rems(14.))
-          .h(ui_rems(14.))
-          .rounded(px(4.))
-          .flex()
-          .items_center()
-          .justify_center()
-          .when(checked, |it| {
-            it.child(
-              div()
-                .text_size(ui_rems(10.))
-                .text_color(gpui::rgb(tokens.fg_on_accent))
-                .child("✓"),
-            )
-          }),
-      )
-      .child(card::title(tokens, title)),
-  )
-  // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
-  // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
-  // 预先折算会少算间距；长文字允许换行
-  .child(
-    div()
-      .flex()
-      .items_start()
-      .gap(px(8.))
-      .child(div().flex_none().w(ui_rems(14.)))
-      .child(div().flex_1().min_w(px(0.)).child(card::label(tokens, description))),
-  )
+  zhimaterm_base::ui::panel::clickable(id, move |event, window, cx| on_toggle(event, window, cx))
+    .debug_selector(|| id.into())
+    .flex()
+    .flex_col()
+    .gap(px(3.))
+    .child(
+      div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+          box_style(div())
+            .flex_none()
+            .w(ui_rems(14.))
+            .h(ui_rems(14.))
+            .rounded(px(4.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(checked, |it| {
+              it.child(
+                div()
+                  .text_size(ui_rems(10.))
+                  .text_color(gpui::rgb(tokens.fg_on_accent))
+                  .child("✓"),
+              )
+            }),
+        )
+        .child(card::title(tokens, title)),
+    )
+    // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
+    // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
+    // 预先折算会少算间距；长文字允许换行
+    .child(
+      div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .child(div().flex_none().w(ui_rems(14.)))
+        .child(div().flex_1().min_w(px(0.)).child(card::label(tokens, description))),
+    )
 }
 
 /// 设置模态（ADR-044 接入统一浮层栈）：表单实体与预填由表单自持（ADR-026），
@@ -706,7 +733,24 @@ impl ModalView for SettingsModal {
     let form = self.form.read(cx);
     let mut content = div().flex().flex_col().gap(px(8.));
     if let Some(message) = self.error_banner.as_deref() {
-      content = content.child(panel::error_line(tokens, &format!("保存的设置不可用：{message}")));
+      content = content.child(
+        // 横幅与「打开设置文件」同行：冻结的唯一恢复路径是修好文件，
+        // 按钮就放在用户读到这句话的地方（动作区的同名按钮语义相同）
+        div()
+          .flex()
+          .items_center()
+          .gap(px(8.))
+          .child(panel::error_line(tokens, &format!("保存的设置不可用：{message}")))
+          .child(div().flex_1())
+          .child({
+            let open_file = self.actions.open_file.clone();
+            panel::clickable("open-settings-file-banner", move |_, window, cx| open_file(window, cx))
+              .text_size(ui_rems(11.))
+              .text_color(gpui::rgb(tokens.accent))
+              .hover(|style| style.text_color(gpui::rgb(tokens.fg)))
+              .child("打开设置文件")
+          }),
+      );
     }
 
     let terminal_font_section = if form.candidates.is_empty() {
@@ -795,6 +839,27 @@ impl ModalView for SettingsModal {
         cx,
         &format!("滚动历史行数：超过上限的行被丢弃；0 = 不保留，最大 {MAX_SCROLLING_HISTORY}"),
         &form.history,
+      ))
+      // 连字开关与手输字体特性（ADR-059）：只作用终端网格，应用即推给
+      // 全部已开会话
+      .child(checkbox_row(
+        tokens,
+        "toggle-ligatures",
+        "连字（ligature）",
+        "开：-> 、!= 等合成连字（字体支持时）；关：逐字符显示。只影响终端网格",
+        form.ligatures,
+        {
+          let form = self.form.clone();
+          move |_, _, cx| {
+            form.update(cx, |form, cx| form.toggle_ligatures(cx));
+          }
+        },
+      ))
+      .child(input::field(
+        tokens,
+        cx,
+        "字体特性（OpenType，逗号分隔 tag value 对；连字 calt 由上面的开关控制）",
+        &form.features,
       ));
     // ⌥ 键当 Alt 只在 macOS 有语义：其余平台的 Alt 键本就是 Alt，开关渲染
     // 出来是死设置（ADR-033）。配置字段不因平台分叉，照常持久化
@@ -802,6 +867,7 @@ impl ModalView for SettingsModal {
     {
       content = content.child(checkbox_row(
         tokens,
+        "toggle-option-as-alt",
         "⌥ 键当 Alt",
         "关：⌥+字母输入特殊字符（⌥B = ∫）；开：作为 Alt 修饰键，shell 的 meta 快捷键可用",
         form.option_as_alt,
@@ -952,6 +1018,14 @@ impl ModalView for SettingsModal {
             form.update(cx, |form, cx| form.reset_to_defaults(cx));
           }
         })
+        .into_any_element(),
+        // 直达盘上的 settings.json（ADR-055 修订）：手改与排查用，
+        // 不关模态——改完回来还在同一张表单
+        panel::secondary_button(tokens, "settings-open-file", "打开设置文件", None, {
+          let open_file = actions.open_file.clone();
+          move |_, window, cx| open_file(window, cx)
+        })
+        .debug_selector(|| "settings-open-file".into())
         .into_any_element(),
       ],
       Some(
@@ -1222,6 +1296,8 @@ mod tests {
     SettingsValues {
       font_family: "Mono B".to_owned(),
       font_size: 13.5,
+      font_ligatures: false,
+      font_features: "ss01 1".to_owned(),
       ui_font_family: Some("Sans B".to_owned()),
       ui_font_size: 13.0,
       scrolling_history: 5_000,
@@ -1248,6 +1324,10 @@ mod tests {
       assert!(edited.option_as_alt);
       // 编辑器档位经候选下标往返（ADR-055）
       assert_eq!(edited.text_editor.as_deref(), Some("vscode"));
+      // 连字与字体特性原样往返（ADR-059）
+      assert!(!edited.font_ligatures);
+      assert_eq!(edited.font_features, "ss01 1");
+      assert_eq!(edited.font_feature_pairs(), vec![("ss01".to_owned(), 1)]);
       let form = form.read(cx);
       assert_eq!(edited.font_family, "Mono B");
       assert_eq!(edited.ui_font_family.as_deref(), Some("Sans B"));
@@ -1298,6 +1378,22 @@ mod tests {
         form.read(cx).edited_settings(cx).unwrap_err(),
         "工作目录必须是绝对路径：tmp"
       );
+      form.update(cx, |form, cx| {
+        form.workdir.update(cx, |input, cx| input.set_text("", cx));
+        form.features.update(cx, |input, cx| input.set_text("calt 0", cx));
+      });
+      assert_eq!(
+        form.read(cx).edited_settings(cx).unwrap_err(),
+        "连字由「连字」开关控制，字体特性里不要再写 calt",
+        "calt 由连字开关独占（ADR-059）"
+      );
+      form.update(cx, |form, cx| {
+        form.features.update(cx, |input, cx| input.set_text("bad input", cx));
+      });
+      assert_eq!(
+        form.read(cx).edited_settings(cx).unwrap_err(),
+        "字体特性 tag 必须是 4 位字母数字：bad"
+      );
     });
   }
 
@@ -1314,6 +1410,10 @@ mod tests {
       assert_eq!(edited.local_shell, None);
       assert_eq!(edited.local_workdir, None);
       assert!(!edited.option_as_alt);
+      // 连字回到默认开、特性清空（ADR-059）
+      assert!(edited.font_ligatures);
+      assert_eq!(edited.font_features, "");
+      assert_eq!(edited.font_feature_pairs(), vec![]);
     });
   }
 
@@ -1379,6 +1479,7 @@ mod tests {
           form: self.form.clone(),
           actions: ModalActions {
             apply: Rc::new(|_, _| {}),
+            open_file: Rc::new(|_, _| {}),
             cancel: Rc::new(|_, _| {}),
           },
           error_banner: None,
@@ -1480,5 +1581,60 @@ mod tests {
       "静止点击必须选中按下的那一行"
     );
     assert!(!cx.update(|_, cx| form.read(cx).dropdown_open()), "拾取后下拉收起");
+  }
+
+  /// 设置模态的渲染级验收（ADR-055/059）：连字开关与字体特性输入框在场，
+  /// 「打开设置文件」按钮在动作区——点击真的回外壳动作（不是死按钮）。
+  #[gpui::test]
+  fn the_settings_modal_renders_the_new_controls_and_the_open_file_button(cx: &mut gpui::TestAppContext) {
+    use std::cell::Cell;
+
+    struct Harness {
+      form: Entity<SettingsForm>,
+      /// 「打开设置文件」被点了几次：动作确实回到外壳
+      opened: Rc<Cell<usize>>,
+    }
+
+    impl gpui::Render for Harness {
+      fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let opened = self.opened.clone();
+        let modal = SettingsModal {
+          form: self.form.clone(),
+          actions: ModalActions {
+            apply: Rc::new(|_, _| {}),
+            open_file: Rc::new(move |_, _| opened.set(opened.get() + 1)),
+            cancel: Rc::new(|_, _| {}),
+          },
+          error_banner: None,
+        };
+        div()
+          .id("settings-harness")
+          .size_full()
+          .relative()
+          .child(modal.card(window, cx))
+      }
+    }
+
+    cx.update(|cx| zhimaterm_base::theme::init(None, cx));
+    let form = cx.new(|cx| SettingsForm::new(lists(), effective(), cx));
+    let opened = Rc::new(Cell::new(0usize));
+    let window = cx.add_window(|_, _| Harness {
+      form: form.clone(),
+      opened: opened.clone(),
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // 连字开关与特性输入框在场（ADR-059）
+    assert!(cx.debug_bounds("toggle-ligatures").is_some(), "连字开关要渲染出来");
+    assert!(
+      cx.debug_bounds("settings-open-file").is_some(),
+      "「打开设置文件」按钮要渲染在动作区"
+    );
+
+    // 点它：动作回到外壳（按钮不是死按钮）
+    let button = cx.debug_bounds("settings-open-file").expect("按钮已渲染");
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+    assert_eq!(opened.get(), 1, "点「打开设置文件」应回外壳动作");
   }
 }

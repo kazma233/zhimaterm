@@ -78,6 +78,8 @@
 - [ADR-055：文件路径点击与编辑器打开](decisions/055-file-path-click-and-editor.md)：输出里的本地路径识别为链接（TerminalLink 分轨 URL），仅本地会话经确认浮层用配置编辑器打开（系统默认/VS Code/Zed/自定义，发现链重解析，VS Code/Zed 带行号）；SSH 不响应，延续 ADR-002 边界。
 - [ADR-056：WSL 管理命令层与管理页](decisions/056-wsl-management.md)：wsl.exe 子命令薄包装归 `local::wsl`，Windows 常显入口呼出管理模态（取代 ADR-021 选择模态），业务叠放链驱动 ADR-044 修订；安装设置一步确认、自定义用户名装后落地、wsl.conf GUI 原文基底合并。
 - [ADR-057：窗口顶栏——自绘标题栏统一承载全局入口](decisions/057-window-title-bar.md)：appears_transparent + app_owns_titlebar_drag（macOS）/ Client 装饰请求（Linux），会话入口、活动会话标题与设置/快捷键/主题色板收编进 34px 顶栏，拖拽状态机对齐 Zed，侧栏瘦身为纯会话列表（取代 ADR-041 §1/§2 位置约定）。
+- [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。
+- [ADR-059：连字开关与手输字体特性](decisions/059-font-ligatures-and-features.md)：两个设置项只作用终端网格字体，calt 唯一所有者是连字开关，表单严格校验、手改文件跳坏项留好项，测量与渲染同源。
 
 ## 背景与调研（`context/`）
 

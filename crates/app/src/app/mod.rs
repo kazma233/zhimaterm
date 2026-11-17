@@ -175,8 +175,13 @@ impl ZhimaTermApp {
         .settings()
         .map(|store| store.font_size_or_default())
         .unwrap_or(font::DEFAULT_FONT_SIZE),
+      // 连字与手输特性的合流单点在 settings（ADR-059）
+      features: settings_store
+        .settings()
+        .map(|store| store.effective_font_features())
+        .unwrap_or_default(),
     };
-    let metrics = CellMetrics::measure(cx.text_system(), &font.family, font.size);
+    let metrics = CellMetrics::measure(cx.text_system(), &font);
     let ui_font_size = settings_store
       .settings()
       .map(|store| store.ui_font_size_or_default())

@@ -35,6 +35,13 @@ pub struct Settings {
   pub font_family: Option<String>,
   /// None = 默认字号（`font::DEFAULT_FONT_SIZE`）
   pub font_size: Option<f32>,
+  /// None = 连字开（保持默认渲染行为，不回归）。关 = 网格整形带 `calt=0`，
+  /// `->`、`!=` 这类连字不再合成（ADR-059）。
+  pub font_ligatures: Option<bool>,
+  /// 手输 OpenType 特性串（「tag value」对，逗号分隔，ADR-059），原样保存；
+  /// 生效时宽松解析（坏项跳过）。`calt` 归连字开关独占，表单里写了会被
+  /// 校验拒绝；手改文件里出现的视为权力用户的显式直写，尊重之。
+  pub font_features: Option<String>,
   /// None = 界面字体用系统默认（`font::SYSTEM_UI_FONT`）
   pub ui_font_family: Option<String>,
   /// None = 默认界面字号（`ui::DEFAULT_UI_FONT_SIZE`），决定窗口 rem 根
@@ -75,6 +82,11 @@ pub struct Settings {
 pub struct SettingsValues {
   pub font_family: String,
   pub font_size: f32,
+  /// 连字开关（ADR-059）：默认开。
+  pub font_ligatures: bool,
+  /// 手输字体特性串，按输入框原文带出（落盘前在 [`SettingsValues::to_settings`]
+  /// 里裁剪；特性对的解析在出口侧 `font_feature_pairs`）。
+  pub font_features: String,
   /// None = 系统默认界面字体。
   pub ui_font_family: Option<String>,
   pub ui_font_size: f32,
@@ -93,9 +105,12 @@ impl SettingsValues {
   /// 编辑值落盘：theme 不在表单里编辑，从现有设置抄回；其余字段全部由
   /// 编辑值覆盖。这条映射是「漏抄一个字段」的唯一防线。
   pub fn to_settings(&self, existing: &Settings) -> Settings {
+    let features = self.font_features.trim();
     Settings {
       font_family: Some(self.font_family.clone()),
       font_size: Some(self.font_size),
+      font_ligatures: Some(self.font_ligatures),
+      font_features: (!features.is_empty()).then(|| features.to_owned()),
       ui_font_family: self.ui_font_family.clone(),
       ui_font_size: Some(self.ui_font_size),
       theme: existing.theme.clone(),
@@ -106,6 +121,12 @@ impl SettingsValues {
       terminal_backend: Some(self.terminal_backend.name().to_owned()),
       text_editor: self.text_editor.clone(),
     }
+  }
+
+  /// 手输特性折算成特性对（ADR-059）。调用前 `edited_settings` 已校验过，
+  /// 这里不会失败；防御性回空让坏值表现为「无特性」而不是 panic。
+  pub fn font_feature_pairs(&self) -> Vec<(String, u32)> {
+    validate_font_features(&self.font_features).unwrap_or_default()
   }
 }
 
@@ -125,6 +146,33 @@ impl Settings {
       .font_size
       .unwrap_or(zhimaterm_base::font::DEFAULT_FONT_SIZE)
       .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+  }
+
+  /// 连字开关与手输特性的折进结果（`calt` 摘出、折进开关）：折进单点，
+  /// 生效特性与预填两处读同一份，结论不会互相矛盾。
+  fn ligature_and_manual(&self) -> (bool, Vec<(String, u32)>) {
+    let manual = lenient_font_features(self.font_features.as_deref().unwrap_or(""));
+    split_ligature_tag(self.font_ligatures.unwrap_or(true), manual)
+  }
+
+  /// 生效字体特性（ADR-059）：`calt` 的唯一所有者是连字开关——文件里手写的
+  /// `calt` 读入时折进开关（值 0 = 关连字，其余 = 开），其余特性原样生效。
+  pub fn effective_font_features(&self) -> Vec<(String, u32)> {
+    let (ligatures, rest) = self.ligature_and_manual();
+    merge_font_features(ligatures, rest)
+  }
+
+  /// 表单预填用的连字与手输特性（ADR-059）：文件里的 `calt` 折进开关，
+  /// 输入框只带其余特性——表单里的特性串永远是校验能过的形态（文件里
+  /// 手写的 `calt` 不会把用户卡在「无法保存」）。
+  pub fn form_ligature_features(&self) -> (bool, String) {
+    let (ligatures, rest) = self.ligature_and_manual();
+    let text = rest
+      .iter()
+      .map(|(tag, value)| format!("{tag} {value}"))
+      .collect::<Vec<_>>()
+      .join(", ");
+    (ligatures, text)
   }
 
   /// 生效界面字号：作为窗口 rem 根，全部界面文字按它缩放；坏值同样夹回来。
@@ -209,7 +257,9 @@ impl Store {
         },
         None,
       ),
-      Err(error) => (Self::frozen(), Some(format!("{error:#}"))),
+      // 读盘失败冻结时路径仍在：「打开设置文件」（修文件的唯一入口，
+      // ADR-055 修订）要拿得到它。只有配置目录本身定位失败才没有路径。
+      Err(error) => (Self { settings: None, path }, Some(format!("{error:#}"))),
     }
   }
 
@@ -222,6 +272,12 @@ impl Store {
 
   pub fn settings(&self) -> Option<&Settings> {
     self.settings.as_ref()
+  }
+
+  /// 落盘路径（「打开设置文件」直达用，ADR-055 修订）：配置目录定位失败
+  /// 的冻结态没有路径，返回 None。
+  pub fn file_path(&self) -> Option<&std::path::Path> {
+    (!self.path.as_os_str().is_empty()).then_some(self.path.as_path())
   }
 
   /// 应用编辑值（theme 不在表单里编辑，从现有设置抄回——映射单点在
@@ -364,6 +420,89 @@ pub fn validate_scrolling_history(text: &str) -> Result<usize, String> {
   Ok(history)
 }
 
+/// 连字特性 tag：OpenType tag 是 4 位字母数字，gpui 的 `FontFeatures` 同口径。
+const FONT_FEATURE_TAG_LEN: usize = 4;
+/// 连字特性 tag 里的 `calt`：由连字开关独占（ADR-059），手输里不许出现。
+const LIGATURE_TAG: &str = "calt";
+
+/// 解析一个「tag value」段：空段返回 None（末尾多余逗号不算错）。
+fn parse_font_feature_pair(segment: &str) -> Result<Option<(String, u32)>, String> {
+  let segment = segment.trim();
+  if segment.is_empty() {
+    return Ok(None);
+  }
+  let mut parts = segment.split_whitespace();
+  let (tag, value) = match (parts.next(), parts.next(), parts.next()) {
+    (Some(tag), Some(value), None) => (tag, value),
+    _ => return Err(format!("字体特性每项写成「tag value」：{segment}")),
+  };
+  if tag.len() != FONT_FEATURE_TAG_LEN || !tag.chars().all(|c| c.is_ascii_alphanumeric()) {
+    return Err(format!("字体特性 tag 必须是 4 位字母数字：{tag}"));
+  }
+  let value: u32 = value
+    .parse()
+    .map_err(|_| format!("字体特性取值需为非负整数：{segment}"))?;
+  Ok(Some((tag.to_owned(), value)))
+}
+
+/// 校验手输字体特性串（ADR-059）：逗号分隔的「tag value」对。`calt` 在这里
+/// 被拒——连字开关是它的唯一写入方，两个入口写同一个 tag 必然打架；同一
+/// tag 写两次也没有契约（列表顺序对后端行为无保证），一并拒绝。
+pub fn validate_font_features(text: &str) -> Result<Vec<(String, u32)>, String> {
+  let mut pairs = Vec::new();
+  for segment in text.split(',') {
+    if let Some(pair) = parse_font_feature_pair(segment)? {
+      if pair.0 == LIGATURE_TAG {
+        return Err("连字由「连字」开关控制，字体特性里不要再写 calt".to_owned());
+      }
+      if pairs.iter().any(|(tag, _)| *tag == pair.0) {
+        return Err(format!("字体特性 tag 重复：{}", pair.0));
+      }
+      pairs.push(pair);
+    }
+  }
+  Ok(pairs)
+}
+
+/// 手改文件的宽松解析（ADR-059）：坏项跳过、好项保留（含 `calt`——文件是
+/// 权力用户的直写通道，显式值要尊重）。
+pub(crate) fn lenient_font_features(text: &str) -> Vec<(String, u32)> {
+  text
+    .split(',')
+    .filter_map(|segment| parse_font_feature_pair(segment).ok().flatten())
+    .collect()
+}
+
+/// 把 `calt` 从特性列表里摘出来折进连字开关（ADR-059）：`calt` 只由开关
+/// 表达，文件里手写的那个值读入时折进开关（值 0 = 关连字，其余 = 开；
+/// 同一 tag 多次出现取第一个）。返回（开关的生效值，不含 calt 的特性列表）。
+fn split_ligature_tag(ligatures: bool, manual: Vec<(String, u32)>) -> (bool, Vec<(String, u32)>) {
+  let mut explicit: Option<u32> = None;
+  let mut rest = Vec::with_capacity(manual.len());
+  for (tag, value) in manual {
+    if tag == LIGATURE_TAG {
+      if explicit.is_none() {
+        explicit = Some(value);
+      }
+    } else {
+      rest.push((tag, value));
+    }
+  }
+  let ligatures = explicit.map(|value| value != 0).unwrap_or(ligatures);
+  (ligatures, rest)
+}
+
+/// 连字开关与手输特性的合流（唯一合流点，ADR-059）：开关两个状态都**显式**
+/// 写 `calt`（开 = 1、关 = 0），不留「不写、交给字体默认」的中间态——
+/// 实测（2026-11-17，Fira Code/macOS/CoreText）不写 `calt` 时整形不应用
+/// contextual alternates，`->` 不成形；「连字开」若不下发 `calt=1` 就
+/// 等于关。同一个 tag 全程只写一遍（文件里的显式 `calt` 已被
+/// `split_ligature_tag` 折进开关摘除）。
+pub fn merge_font_features(ligatures: bool, mut manual: Vec<(String, u32)>) -> Vec<(String, u32)> {
+  manual.push((LIGATURE_TAG.to_owned(), u32::from(ligatures)));
+  manual
+}
+
 fn parse_size(text: &str, what: &str, min: f32, max: f32) -> Result<f32, String> {
   let size: f32 = text.trim().parse().map_err(|_| format!("{what}需为数字"))?;
   if !(min..=max).contains(&size) {
@@ -440,8 +579,9 @@ pub(crate) mod test_paths {
 mod tests {
   use super::{
     DEFAULT_SCROLLING_HISTORY, MAX_FONT_SIZE, MAX_SCROLLING_HISTORY, MAX_UI_FONT_SIZE, MIN_FONT_SIZE,
-    MIN_SCROLLING_HISTORY, MIN_UI_FONT_SIZE, Settings, executable_error, test_paths, validate_font_size,
-    validate_local_shell, validate_local_workdir, validate_scrolling_history, validate_ui_font_size,
+    MIN_SCROLLING_HISTORY, MIN_UI_FONT_SIZE, Settings, executable_error, lenient_font_features, merge_font_features,
+    test_paths, validate_font_features, validate_font_size, validate_local_shell, validate_local_workdir,
+    validate_scrolling_history, validate_ui_font_size,
   };
 
   fn temp_path(name: &str) -> std::path::PathBuf {
@@ -462,6 +602,8 @@ mod tests {
     let values = super::SettingsValues {
       font_family: "Mono".into(),
       font_size: 15.0,
+      font_ligatures: false,
+      font_features: " ss01 1 ".into(),
       ui_font_family: Some("Sans".into()),
       ui_font_size: 13.0,
       scrolling_history: 2_000,
@@ -476,6 +618,8 @@ mod tests {
       Settings {
         font_family: Some("Mono".into()),
         font_size: Some(15.0),
+        font_ligatures: Some(false),
+        font_features: Some("ss01 1".into()),
         ui_font_family: Some("Sans".into()),
         ui_font_size: Some(13.0),
         theme: Some("Dracula".into()),
@@ -486,7 +630,7 @@ mod tests {
         terminal_backend: Some("termwiz".into()),
         text_editor: Some("vscode".into()),
       },
-      "10 个编辑字段全部落盘，theme 从现有设置抄回"
+      "12 个编辑字段全部落盘，theme 从现有设置抄回；特性串裁剪存储"
     );
   }
 
@@ -500,6 +644,8 @@ mod tests {
     let values = super::SettingsValues {
       font_family: "Mono".into(),
       font_size: 13.0,
+      font_ligatures: true,
+      font_features: String::new(),
       ui_font_family: None,
       ui_font_size: 12.0,
       scrolling_history: 1_000,
@@ -510,6 +656,11 @@ mod tests {
       text_editor: None,
     };
     assert_eq!(values.to_settings(&existing).ui_font_family, None);
+    assert_eq!(
+      values.to_settings(&existing).font_features,
+      None,
+      "空特性串落盘为未配置，不留空串"
+    );
   }
 
   #[test]
@@ -518,6 +669,8 @@ mod tests {
     let settings = Settings {
       font_family: Some("Cascadia Mono".into()),
       font_size: Some(15.0),
+      font_ligatures: Some(false),
+      font_features: Some("ss01 1, zero 2".into()),
       ui_font_family: Some("Segoe UI".into()),
       ui_font_size: Some(14.0),
       theme: Some("Dracula".into()),
@@ -708,6 +861,8 @@ mod tests {
     let edited = super::SettingsValues {
       font_family: "Mono".into(),
       font_size: 15.0,
+      font_ligatures: true,
+      font_features: String::new(),
       ui_font_family: None,
       ui_font_size: 14.0,
       scrolling_history: DEFAULT_SCROLLING_HISTORY,
@@ -730,6 +885,8 @@ mod tests {
       "{ 手改坏的 JSON",
       "冻结时不得碰坏文件"
     );
+    // 冻结时落盘路径仍在：「打开设置文件」（修文件的唯一入口）要拿得到它
+    assert_eq!(store.file_path(), Some(path.as_path()));
   }
 
   /// 可写路径：apply 落盘成功，theme 从旧设置抄回；set_theme 就地改写。
@@ -747,6 +904,8 @@ mod tests {
     let edited = super::SettingsValues {
       font_family: "Mono".into(),
       font_size: 15.0,
+      font_ligatures: true,
+      font_features: String::new(),
       ui_font_family: None,
       ui_font_size: 14.0,
       scrolling_history: DEFAULT_SCROLLING_HISTORY,
@@ -764,5 +923,146 @@ mod tests {
 
     store.set_theme("Nord").expect("可写时换主题应成功");
     assert_eq!(Settings::load_at(path).unwrap().theme.as_deref(), Some("Nord"));
+  }
+
+  /// 手输特性串的严格校验（ADR-059）：格式、tag 形状、取值、calt 独占与
+  /// 重复项各有明确文案；空串与末尾逗号是合法的「不配置/容忍手滑」。
+  #[test]
+  fn font_features_validation_rules() {
+    assert_eq!(validate_font_features(""), Ok(vec![]));
+    assert_eq!(validate_font_features("  "), Ok(vec![]));
+    assert_eq!(
+      validate_font_features("ss01 1, zero 2"),
+      Ok(vec![("ss01".to_owned(), 1), ("zero".to_owned(), 2)])
+    );
+    assert_eq!(
+      validate_font_features("ss01 1,"),
+      Ok(vec![("ss01".to_owned(), 1)]),
+      "末尾多余逗号容忍"
+    );
+    assert_eq!(
+      validate_font_features("ss01"),
+      Err("字体特性每项写成「tag value」：ss01".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("ss01 1 2"),
+      Err("字体特性每项写成「tag value」：ss01 1 2".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("abc 1"),
+      Err("字体特性 tag 必须是 4 位字母数字：abc".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("ss0! 1"),
+      Err("字体特性 tag 必须是 4 位字母数字：ss0!".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("ss01 x"),
+      Err("字体特性取值需为非负整数：ss01 x".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("ss01 -1"),
+      Err("字体特性取值需为非负整数：ss01 -1".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("calt 0"),
+      Err("连字由「连字」开关控制，字体特性里不要再写 calt".to_owned())
+    );
+    assert_eq!(
+      validate_font_features("ss01 1, ss01 0"),
+      Err("字体特性 tag 重复：ss01".to_owned())
+    );
+  }
+
+  /// 手改文件的宽松解析与合流（ADR-059）：坏项跳过、好项（含 calt）保留；
+  /// 合流只在「关连字且没有显式 calt」时追加 calt=0。
+  #[test]
+  fn lenient_parsing_and_feature_merging() {
+    // 坏项跳过，好项保留
+    assert_eq!(
+      lenient_font_features("ss01 1, bad, zero 2, xx 1"),
+      vec![("ss01".to_owned(), 1), ("zero".to_owned(), 2)]
+    );
+    // 开关两个状态都显式写 calt（CoreText 默认不应用 calt，「不写」= 无连字）
+    assert_eq!(
+      merge_font_features(false, vec![("ss01".to_owned(), 1)]),
+      vec![("ss01".to_owned(), 1), ("calt".to_owned(), 0)]
+    );
+    assert_eq!(
+      merge_font_features(true, vec![("ss01".to_owned(), 1)]),
+      vec![("ss01".to_owned(), 1), ("calt".to_owned(), 1)]
+    );
+    assert_eq!(merge_font_features(false, vec![]), vec![("calt".to_owned(), 0)]);
+    assert_eq!(merge_font_features(true, vec![]), vec![("calt".to_owned(), 1)]);
+  }
+
+  /// 文件里的 `calt` 折进连字开关（ADR-059）：`calt=0` = 关连字、其余 = 开；
+  /// 折进后特性列表里不再有 calt，同一 tag 全程只写一遍。
+  #[test]
+  fn a_manual_calt_in_the_file_folds_into_the_ligature_switch() {
+    let off = Settings {
+      font_features: Some("calt 0, ss01 1".into()),
+      ..Default::default()
+    };
+    assert!(!off.form_ligature_features().0, "文件里的 calt=0 关连字");
+    assert_eq!(
+      off.effective_font_features(),
+      vec![("ss01".to_owned(), 1), ("calt".to_owned(), 0)]
+    ); // 表单预填：calt 折进开关，输入框只带其余特性——表单永远校验得过
+    let (ligatures, text) = off.form_ligature_features();
+    assert!(!ligatures);
+    assert_eq!(text, "ss01 1");
+    assert_eq!(
+      validate_font_features(&text),
+      Ok(vec![("ss01".to_owned(), 1)]),
+      "预填的特性串必须能通过严格校验"
+    );
+
+    // 显式 calt=1 视为开连字：开关显式下发 calt=1（唯一所有者，ADR-059）
+    let on = Settings {
+      font_features: Some("calt 1".into()),
+      ..Default::default()
+    };
+    assert!(on.form_ligature_features().0);
+    assert_eq!(on.effective_font_features(), vec![("calt".to_owned(), 1)]);
+    assert_eq!(on.form_ligature_features().1, "", "预填里 calt 已被折进开关");
+  }
+
+  /// 生效特性是「宽松解析 + 合流」的合成（ADR-059）：默认（未配置）连字
+  /// 开、无特性，等价于既有渲染行为。
+  #[test]
+  fn effective_features_merge_ligatures_and_lenient_manual_pairs() {
+    assert_eq!(
+      Settings::default().effective_font_features(),
+      vec![("calt".to_owned(), 1)],
+      "默认连字开要显式下发 calt=1"
+    );
+    assert!(Settings::default().form_ligature_features().0, "未配置 = 连字开");
+    let settings = Settings {
+      font_ligatures: Some(false),
+      font_features: Some("ss01 1, xx 9".into()),
+      ..Default::default()
+    };
+    assert_eq!(
+      settings.effective_font_features(),
+      vec![("ss01".to_owned(), 1), ("calt".to_owned(), 0)],
+      "坏项（xx 9）跳过，关连字追加 calt=0"
+    );
+  }
+
+  /// 配置目录定位失败的冻结态没有路径可开；文件可定位的冻结态路径保留。
+  #[test]
+  fn file_path_is_absent_only_when_the_config_dir_itself_is_unknown() {
+    let (store, error) = super::Store::load();
+    let _ = error;
+    // 生产环境配置目录基本总能定位（失败只在没有家目录等极端环境），
+    // 这里只断言「有路径时是 settings.json」的形状
+    if let Some(path) = store.file_path() {
+      assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("settings.json"));
+    }
+    let missing = temp_path("path-kept");
+    let (store, error) = super::Store::load_at(missing.clone());
+    assert!(error.is_none());
+    assert_eq!(store.file_path(), Some(missing.as_path()));
   }
 }

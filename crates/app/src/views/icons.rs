@@ -18,6 +18,14 @@ pub const SSH: &str = include_str!("../../assets/icons/ssh.svg");
 pub const SETTINGS: &str = include_str!("../../assets/icons/settings.svg");
 /// 快捷键入口（键盘，顶栏右区）。
 pub const SHORTCUTS: &str = include_str!("../../assets/icons/shortcuts.svg");
+/// 左右分屏（格动作行，ADR-058）：外框 + 右半实心。
+pub const SPLIT_SIDE: &str = include_str!("../../assets/icons/split_side.svg");
+/// 上下分屏（格动作行，ADR-058）：外框 + 下半实心。
+pub const SPLIT_STACK: &str = include_str!("../../assets/icons/split_stack.svg");
+/// 搜索（格动作行，ADR-058）：放大镜。
+pub const SEARCH: &str = include_str!("../../assets/icons/search.svg");
+/// 关闭此格（格动作行末位，多格时出现，ADR-058）。
+pub const CLOSE: &str = include_str!("../../assets/icons/close.svg");
 
 /// 图标元素：14px 见方，颜色由调用方 text_color 指定（继承到 svg 的机制
 /// 不作依赖，显式给色）。

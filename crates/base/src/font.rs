@@ -4,17 +4,24 @@
 //! 不缺字形。格尺寸由真实字体的字形步进量出，渲染布局与命中测试共用同一份
 //! `CellMetrics`——格宽与字体不一致时，多字符段会逐格漂移，命中测试跟着偏。
 
-use gpui::{Font, FontFallbacks, TextSystem, font, px};
+use std::sync::Arc;
+
+use gpui::{Font, FontFallbacks, FontFeatures, TextSystem, font, px};
 
 /// 默认终端字号；用户可在设置里改，改的是所有会话共用的那份。
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 
-/// 终端字体配置：家族与字号。格尺寸由它测量而来，两者必须一起换，
-/// 只换一个会让渲染字形与格宽对不上。
+/// 终端字体配置：家族、字号与网格渲染用的字体特性。格尺寸由它测量而来，
+/// 测量与渲染必须同用一份（[`terminal_grid_font`]），只换一个会让渲染
+/// 字形与格宽对不上。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontConfig {
   pub family: String,
   pub size: f32,
+  /// OpenType 特性（tag, value）对（ADR-059）：连字开关折算的 `calt` 与
+  /// 手输特性的合流结果。等宽字体里这些特性不改 advance，格尺寸不变，
+  /// 但测量仍与渲染走同一份，保持「一起换」的纪律。
+  pub features: Vec<(String, u32)>,
 }
 
 /// 默认优先顺序：按平台常见程度排序，决定「自动挑选」选谁、候选列表谁排前。
@@ -148,10 +155,21 @@ fn font_with_fallbacks(family: &str) -> Font {
   }
 }
 
-/// 终端渲染与测量共用的字体定义。
-/// 两处必须一致：格宽是按它量出来的，渲染换字体就会错位。
+/// 终端字体的家族形态（家族 + 回退链，无字体特性）：表单输入、对话框、
+/// 面板与下拉预览用——这些场合不需要连字，也不该被手输特性波及（ADR-059）。
+/// 网格渲染与格尺寸测量不用本函数，用 [`terminal_grid_font`]。
 pub fn terminal_font(family: &str) -> Font {
   font_with_fallbacks(family)
+}
+
+/// 网格渲染与格尺寸测量共用的字体定义（ADR-059）：家族、回退链与字体
+/// 特性一起带上。两处必须同用本函数：格宽是按它量出来的，渲染换字体
+/// 就会错位。
+pub fn terminal_grid_font(config: &FontConfig) -> Font {
+  Font {
+    features: FontFeatures(Arc::new(config.features.clone())),
+    ..font_with_fallbacks(&config.family)
+  }
 }
 
 /// 界面文字的字体定义：家族来自设置（任意系统字体），回退链与终端一致。
@@ -180,11 +198,12 @@ pub struct CellMetrics {
 }
 
 impl CellMetrics {
-  /// 用字体真实字形步进量出格宽，行高取字体行框。
+  /// 用字体真实字形步进量出格宽，行高取字体行框。与网格渲染共用一份
+  /// [`FontConfig`]（含字体特性，「两者必须一起换」）。
   /// 测量失败时退回等宽字体的常见经验值，保证窗口仍能画出来。
-  pub fn measure(text_system: &TextSystem, family: &str, font_size: f32) -> Self {
-    let font_id = text_system.resolve_font(&terminal_font(family));
-    let size = px(font_size);
+  pub fn measure(text_system: &TextSystem, config: &FontConfig) -> Self {
+    let font_id = text_system.resolve_font(&terminal_grid_font(config));
+    let size = px(config.size);
     let width = text_system
       .advance(font_id, size, 'M')
       .map(|advance| f32::from(advance.width))
@@ -193,7 +212,7 @@ impl CellMetrics {
     let height = line_height(
       f32::from(text_system.ascent(font_id, size)),
       f32::from(text_system.descent(font_id, size)),
-      font_size,
+      config.size,
     );
     Self { width, height }
   }
@@ -208,7 +227,31 @@ impl CellMetrics {
 
 #[cfg(test)]
 mod tests {
-  use super::{line_height, order_by_priority, probe_widths_agree};
+  use super::{FontConfig, line_height, order_by_priority, probe_widths_agree, terminal_grid_font};
+
+  /// 网格字体带上配置里的字体特性（ADR-059）：关连字 = `calt=0`，
+  /// 手输特性原样透传；无特性时与普通终端字体同形。
+  #[test]
+  fn the_grid_font_carries_the_configured_features() {
+    let config = FontConfig {
+      family: "Menlo".to_owned(),
+      size: 13.0,
+      features: vec![("calt".to_owned(), 0), ("ss01".to_owned(), 1)],
+    };
+    let font = terminal_grid_font(&config);
+    assert_eq!(
+      font.features.tag_value_list(),
+      &[("calt".to_owned(), 0), ("ss01".to_owned(), 1)]
+    );
+
+    // 无特性：特性列表为空（字体默认行为）
+    let plain = terminal_grid_font(&FontConfig {
+      family: "Menlo".to_owned(),
+      size: 13.0,
+      features: Vec::new(),
+    });
+    assert!(plain.features.tag_value_list().is_empty());
+  }
 
   #[test]
   fn line_height_uses_descent_as_depth_below_the_baseline() {

@@ -24,6 +24,26 @@ perf-acceptance §5、mobaxterm-gap-and-priorities，现以本文件为唯一入
   Windows/Linux 实机验证与冒烟步骤见小节。
 - 终端搜索条位置（2026-11-16 小节，ADR-015 修订）：右上角浮动条的人工
   验收（不挤占网格、增量搜索与 Esc 语义不变）。
+- 2026-11-17 批次（ADR-058/059，ADR-015/023/055 修订）：格右上角动作
+  图标行（三个图标动作生效、满 8 格拆分钮禁用、tooltip 与 hover；点哪格
+  拆哪格、搜索开在本格）；搜索条与转发卡片下移后不与动作行重叠；右键
+  菜单只剩两个拆分项；设置模态「打开设置文件」按钮（动作区与冻结横幅
+  两处）在配置的编辑器里打开 settings.json；打开设置模态重读盘上值
+  （手改 settings.json 后预填可见、应用不覆盖外部改动；修好坏文件后
+  冻结解除）；连字开关即时生效（Fira Code 看 `->`）、字体特性非法输入
+  报错、合法输入（如 `zero 1`）应用后生效。
+  已验证部分：图标行在 macOS 实机渲染正确（三个图标形状与位置）；
+  「打开设置文件」按钮与连字开关的存在/点击由渲染级测试守住
+  （`the_settings_modal_renders_the_new_controls_and_the_open_file_button`）。
+  连字成形的实测结论（2026-11-17，ADR-059 已知限制段）：macOS CoreText
+  整形对 calt 完全不应用（默认与显式 calt=1 都逐字符），连字开关在
+  macOS 两态同显——上游/平台限制，非设置实现缺陷；连字测试方法：字形
+  数判据（`->` 成形 = 1 字形，逐字符 = 2 字形），生产侧经网格绘制探针
+  或独立 CTLine 实验取证（`cargo test` 环境 gpui 字体枚举为空，整形
+  无法在单测里验证）。
+  未验证：Windows（DirectWrite）与 Linux 上连字开关/字体特性是否有
+  可见效果，待实机验证——方法同上（字形数判据）；tooltip 文案、满格
+  禁用态的实机观感需真人过一遍。
 - PowerShell 下「cd 后退出」的目录恢复无平台途径（Set-Location 不落进程
   cwd，ADR-039 修订段）；要覆盖它需 shell integration（OSC 7 被动监听或
   prompt 注入），是否立项待定。
@@ -74,7 +94,9 @@ Unix 绝对路径——已修，见 ADR-002 落盘串行化段与 `settings::tes
 
 ## unverified
 
-- 连字（ligature）跨格成形未实测。
+- ~~连字（ligature）跨格成形未实测~~（2026-11-17 实测关闭：macOS CoreText
+  对 calt 完全不应用，连字从不成形，见 ADR-059 已知限制段；Windows/Linux
+  待实机用同一字形数判据验证）。
 - 彩色 emoji 三平台字体回退表现。
 - macOS lsof 实机输出（Windows 侧 lsof 对应项——GetExtendedTcpTable 参数序与
   字节序——已于 2026-10-22 用实机测试 `own_listening_sockets_appear_in_the_sample`
@@ -92,6 +114,12 @@ Unix 绝对路径——已修，见 ADR-002 落盘串行化段与 `settings::tes
 - **已落地（2026-10-30）**：固定 Rust 工具链（`rust-toolchain.toml`，编译期下限见
   `Cargo.toml` 的 `rust-version`）——原「不管」条目已按可复现构建的要求补上，
   CI matrix 部分仍按上面的口径不排期。
+- **明确不做（2026-11-17 讨论）**：滚动历史上限按字节/内存设限。维持行数口径
+  （ADR-035）：三后端语义无法统一——alacritty 上游只有行数 API，ghostty 原生
+  `SCROLLBACK_MAX_BYTES` 被有意留空（行数才是口径），termwiz 需自算估算；用户可见
+  单位与主流终端一致；性能验收也按行数断言。内存最坏 100k 行 150–200 MB 已写入
+  设置注释。若将来真实痛点是宽窗口内存放大（内存 ≈ 列数 × 行数 × ≤72B/格），
+  备选是内部派生守卫（按列数收紧有效行数上限），对用户不可见。
 - **明确不做**：见 `mobaxterm-gap-and-priorities.md` §3 P3（本地编辑器编辑远端文件、
   命令片段、SFTP 双栏/拖放、Telnet/串口决策项、RDP/VNC/XDMCP/网络工具箱、内嵌
   X server、Mosh、`~/.ssh/config` 兼容、背景透明未立项）。
