@@ -97,8 +97,6 @@ pub enum ConnectSection {
   Auth,
   /// 跳板机
   Jump,
-  /// 会话选项
-  Options,
   /// 端口转发
   Forwards,
 }
@@ -188,7 +186,6 @@ pub struct ConnectForm {
   /// 展开。之后用户手点为准
   auth_open: bool,
   jump_open: bool,
-  options_open: bool,
   forwards_open: bool,
   /// 跳板区（ADR-020，默认关）：开关 + 独立的目标与认证信息
   jump_enabled: bool,
@@ -241,7 +238,6 @@ impl ConnectForm {
       remember_password: false,
       auth_open: true,
       jump_open: false,
-      options_open: false,
       forwards_open: false,
       jump_enabled: false,
       jump_use_agent: true,
@@ -477,7 +473,6 @@ impl ConnectForm {
     match section {
       ConnectSection::Auth => self.auth_open = !self.auth_open,
       ConnectSection::Jump => self.jump_open = !self.jump_open,
-      ConnectSection::Options => self.options_open = !self.options_open,
       ConnectSection::Forwards => self.forwards_open = !self.forwards_open,
     }
     cx.notify();
@@ -736,7 +731,6 @@ impl ConnectForm {
     // 段里有默认值之外的东西才展开，纯默认态收起
     self.auth_open = true;
     self.jump_open = saved.jump.is_some();
-    self.options_open = saved.forward_agent;
     self.forwards_open = !saved.forwards.is_empty();
     // 回填的文字是基线：随后的观察者通知（含 set_error 与掩码刷新）不算编辑
     self.rebase_edits(cx);
@@ -752,7 +746,6 @@ impl ConnectForm {
     self.remember_password = false;
     self.auth_open = true;
     self.jump_open = false;
-    self.options_open = false;
     self.forwards_open = false;
     self.jump_enabled = false;
     self.jump_use_agent = true;

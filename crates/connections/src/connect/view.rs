@@ -168,9 +168,9 @@ impl ConnectModal {
     );
     fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
-    // 组 2：认证信息（ADR-010）：agent 开关 + 可选的私钥与密码，三者可叠加。
-    // 「都可选」与尝试顺序写在段说明里；开关旁提示跟随状态。段可折叠，
-    // 恒以展开起手（填单主路径）。
+    // 组 2：认证信息（ADR-010/012）：本地 agent 与 agent 转发两个 agent 开关
+    // 相邻，加可选的私钥与密码。「都可选」与尝试顺序写在段说明里；开关旁
+    // 提示跟随状态。段可折叠，恒以展开起手（填单主路径）。
     let agent_hint = if form.use_agent {
       "本机 agent 里的钥匙自动参与认证"
     } else {
@@ -198,17 +198,36 @@ impl ConnectModal {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(panel::checkbox(
-              tokens,
-              "connect-use-agent",
-              "使用本地 ssh-agent",
-              agent_hint,
-              form.use_agent,
-              {
-                let toggle = toggle.clone();
-                move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
-              },
-            ))
+            // 两个 agent 开关同行（与端口/用户同一套两列节奏）：同是 agent
+            // 在认证链里的角色，一个管本地参与，一个管递给远端继续认证
+            // （ADR-012）；两侧说明都短，最窄弹窗下半列也放得下
+            .child(
+              div()
+                .flex()
+                .gap(px(8.))
+                .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
+                  tokens,
+                  "connect-use-agent",
+                  "使用本地 ssh-agent",
+                  agent_hint,
+                  form.use_agent,
+                  {
+                    let toggle = toggle.clone();
+                    move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
+                  },
+                )))
+                .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
+                  tokens,
+                  "connect-forward-agent",
+                  "转发 agent 到远端",
+                  "私钥不出本机",
+                  form.forward_agent,
+                  {
+                    let toggle = toggle.clone();
+                    move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
+                  },
+                ))),
+            )
             // 私钥文件：右侧「选择」开原生文件选择器——手输路径容易写错，选一次就到手
             .child(
               div()
@@ -267,7 +286,7 @@ impl ConnectModal {
         // 跳板链的第二跳要借本机 agent 盖章：依赖关系写在决策现场，
         // 不然用户要到内网机器认证失败才撞见这个开关
         if form.jump_enabled {
-          "第二跳登录需要配合会话选项里的「转发 agent 到远端」"
+          "第二跳登录需要配合认证信息里的「转发 agent 到远端」"
         } else {
           ""
         },
@@ -339,47 +358,7 @@ impl ConnectModal {
     );
     fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
-    // 组 4：会话选项——agent 转发（ADR-012）一个「开关 + 短说明」。
-    // 会话输出日志不再有连接级开关（ADR-017 修订）：记录只在会话内经
-    // 底栏「记录」入口开关。
-    let options_open = form.options_open;
-    fields = fields.child(
-      div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(fold_section(
-          tokens,
-          "connect-fold-options",
-          "会话选项",
-          Some("转发 agent 到远端；随连接生效"),
-          options_open,
-          {
-            let toggle = toggle_section.clone();
-            move |_, _, cx| toggle(ConnectSection::Options, cx)
-          },
-        ))
-        .children(options_open.then(|| {
-          div()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.))
-            .child(div().flex().flex_1().min_w(px(0.)).child(panel::checkbox(
-              tokens,
-              "connect-forward-agent",
-              "转发 agent 到远端",
-              "私钥不出本机",
-              form.forward_agent,
-              {
-                let toggle = toggle.clone();
-                move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
-              },
-            )))
-        })),
-    );
-    fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
-
-    // 组 5：端口转发（ADR-011）——规则列表天然占行，组内收窄到 6。
+    // 组 4：端口转发（ADR-011）——规则列表天然占行，组内收窄到 6。
     let mut forward_rows = div().flex().flex_col().gap(px(6.));
     for (index, draft) in form.forwards.iter().enumerate() {
       forward_rows = forward_rows.child(forward_rule_row(tokens, index, draft, &form_entity));

@@ -715,8 +715,8 @@ fn blank_name_normalizes_to_none(cx: &mut gpui::TestAppContext) {
 }
 
 /// 折叠段的行为分区：认证信息恒以展开起手，其余段在默认值时收起；手点
-/// 只翻转对应段、不影响业务开关；载入按内容展开——跳板、开着 agent 转发、
-/// 有转发规则各自展开，纯默认连接只留认证段展开。
+/// 只翻转对应段、不影响业务开关；载入按内容展开——跳板、有转发规则
+/// 各自展开，纯默认连接只留认证段展开。
 #[gpui::test]
 fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppContext) {
   use super::ConnectSection;
@@ -729,11 +729,11 @@ fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppConte
     let form = cx.new(|cx| ConnectForm::new(font.clone(), cx));
     form.update(cx, |form, cx| {
       assert!(form.auth_open);
-      assert!(!form.jump_open && !form.options_open && !form.forwards_open);
+      assert!(!form.jump_open && !form.forwards_open);
       form.toggle_section(ConnectSection::Auth, cx);
       form.toggle_section(ConnectSection::Forwards, cx);
       assert!(!form.auth_open && form.forwards_open);
-      assert!(!form.jump_open && !form.options_open);
+      assert!(!form.jump_open);
       form.toggle(ConnectToggle::ForwardAgent, cx);
       assert!(form.forward_agent);
     });
@@ -770,7 +770,8 @@ fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppConte
     loaded.update(cx, |form, cx| {
       form.load_saved(&full, cx);
       assert!(form.auth_open, "认证段恒展开");
-      assert!(form.jump_open && form.options_open && form.forwards_open);
+      assert!(form.forward_agent, "agent 转发随条目载入");
+      assert!(form.jump_open && form.forwards_open);
     });
 
     // 纯 agent 默认连接：认证段仍展开，其余段收起
@@ -792,7 +793,7 @@ fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppConte
     loaded.update(cx, |form, cx| {
       form.load_saved(&bare, cx);
       assert!(form.auth_open);
-      assert!(!form.jump_open && !form.options_open && !form.forwards_open);
+      assert!(!form.jump_open && !form.forwards_open);
     });
 
     // 密码型条目：焦点落进密码框时认证段必然是展开的（恒展开的推论）
