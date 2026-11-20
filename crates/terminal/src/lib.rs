@@ -2264,15 +2264,15 @@ mod tests {
     // 两段物理行都带同一完整 URL，⌘/Ctrl+点击任一段都打开完整链接
     assert_eq!(row_text(&snapshot, 0), "see https://example.");
     assert_eq!(row_text(&snapshot, 1), "com/long");
-    for row in 0..2 {
-      let link_runs: Vec<&str> = snapshot.rows[row]
+    for (row, runs) in snapshot.rows.iter().enumerate().take(2) {
+      let link_runs: Vec<&str> = runs
         .iter()
         .filter(|run| run.link.is_some())
         .map(|run| run.text.as_str())
         .collect();
       assert_eq!(link_runs.len(), 1, "第 {row} 行恰好一段是链接");
       assert_eq!(
-        snapshot.rows[row].iter().find(|run| run.link.is_some()).unwrap().link,
+        runs.iter().find(|run| run.link.is_some()).unwrap().link,
         Some(TerminalLink::Url(expected.clone()))
       );
     }
@@ -2308,9 +2308,9 @@ mod tests {
       line: None,
       column: None,
     };
-    for row in 0..2 {
+    for (row, runs) in snapshot.rows.iter().enumerate().take(2) {
       assert_eq!(
-        snapshot.rows[row].iter().find(|run| run.link.is_some()).unwrap().link,
+        runs.iter().find(|run| run.link.is_some()).unwrap().link,
         Some(expected.clone()),
         "折断的每一段都指向完整路径（第 {row} 段）"
       );

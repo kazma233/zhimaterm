@@ -310,11 +310,11 @@ fn materialize_viewport(
     if row_iter.attach_cells(cell_iter).is_err() {
       break;
     }
-    for column in 0..columns {
+    for (column, slot) in buffer.cells.iter_mut().enumerate().take(columns) {
       if cell_iter.select(column.min(u16::MAX as usize) as u16).is_err() {
         break;
       }
-      buffer.cells[column] = convert_render_cell(
+      *slot = convert_render_cell(
         terminal,
         cell_iter,
         column,
@@ -551,13 +551,13 @@ impl GridView for GhosttyCore {
       // 配置上限），钳制值只用于 history_size 上报，不能拿来寻址
       let base = self.terminal.scrollback_rows().unwrap_or(0) as i32;
       let y = (base + line).max(0) as u32;
-      for column in 0..self.columns {
-        out.cells[column] = self.grid_ref_cell(vt::point_history(column.min(u16::MAX as usize) as u16, y));
+      for (column, slot) in out.cells.iter_mut().enumerate().take(self.columns) {
+        *slot = self.grid_ref_cell(vt::point_history(column.min(u16::MAX as usize) as u16, y));
       }
     } else {
       // 活动区行：寻址与回看偏移无关（回看只移动视口，不移动内容）
-      for column in 0..self.columns {
-        out.cells[column] = self.grid_ref_cell(vt::point_active(column.min(u16::MAX as usize) as u16, line as u32));
+      for (column, slot) in out.cells.iter_mut().enumerate().take(self.columns) {
+        *slot = self.grid_ref_cell(vt::point_active(column.min(u16::MAX as usize) as u16, line as u32));
       }
     }
   }

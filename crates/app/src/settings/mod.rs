@@ -521,9 +521,18 @@ pub(crate) mod test_paths {
     "/bin/sh".to_owned()
   }
 
-  #[cfg(unix)]
+  /// 与 shell() 不同的第二个必然存在的可执行文件：macOS 默认装 zsh；
+  /// Linux/FreeBSD 不保证有第二个 shell，取 coreutils 的 env（POSIX 环境
+  /// 必备，校验只查存在/是文件/可执行）。/bin/zsh 在 Linux 是散装的
+  /// （Fedora 不预装、装了也在 /usr/bin），不能当「必然存在」用。
+  #[cfg(target_os = "macos")]
   pub fn alt_shell() -> String {
     "/bin/zsh".to_owned()
+  }
+
+  #[cfg(all(unix, not(target_os = "macos")))]
+  pub fn alt_shell() -> String {
+    "/usr/bin/env".to_owned()
   }
 
   #[cfg(unix)]
