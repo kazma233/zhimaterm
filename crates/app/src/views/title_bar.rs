@@ -296,7 +296,7 @@ fn resize_band(id: &'static str, edge: ResizeEdge, cursor: CursorStyle) -> gpui:
 /// 右端窗口控制按钮：Windows 画 caption 三连（命中由系统原生处理）；macOS
 /// 无（系统红绿灯）；Linux 只在 CSD（Client 装饰）下按桌面环境按钮布局画，
 /// compositor 协商回 Server 装饰时它自己画。全屏时一律不出。
-fn right_window_controls(tokens: &UiTokens, window: &Window, cx: &App) -> Option<AnyElement> {
+fn right_window_controls(tokens: &UiTokens, window: &Window, _cx: &App) -> Option<AnyElement> {
   if window.is_fullscreen() {
     return None;
   }
@@ -309,7 +309,7 @@ fn right_window_controls(tokens: &UiTokens, window: &Window, cx: &App) -> Option
     if !matches!(window.window_decorations(), Decorations::Client { .. }) {
       return None;
     }
-    let layout = cx.button_layout()?;
+    let layout = _cx.button_layout()?;
     let buttons = layout
       .right
       .iter()
@@ -336,23 +336,24 @@ fn right_window_controls(tokens: &UiTokens, window: &Window, cx: &App) -> Option
 
 /// 左端窗口控制按钮（GNOME 的 macOS 风格布局）。macOS 上 `window_decorations`
 /// 是 Server（trait 默认），运行时直接短路为 None。
-fn left_window_controls(tokens: &UiTokens, window: &Window, cx: &App) -> Option<AnyElement> {
+/// 参数仅非 Windows 分支使用，Windows 下函数恒为 None，按惯例加下划线前缀。
+fn left_window_controls(_tokens: &UiTokens, _window: &Window, _cx: &App) -> Option<AnyElement> {
   #[cfg(not(target_os = "windows"))]
   {
-    if window.is_fullscreen() || !matches!(window.window_decorations(), Decorations::Client { .. }) {
+    if _window.is_fullscreen() || !matches!(_window.window_decorations(), Decorations::Client { .. }) {
       return None;
     }
-    let layout = cx.button_layout()?;
+    let layout = _cx.button_layout()?;
     let buttons = layout
       .left
       .iter()
       .filter_map(|button| *button)
       .filter(|button| match button {
-        WindowButton::Minimize => window.window_controls().minimize,
-        WindowButton::Maximize => window.window_controls().maximize,
+        WindowButton::Minimize => _window.window_controls().minimize,
+        WindowButton::Maximize => _window.window_controls().maximize,
         WindowButton::Close => true,
       })
-      .map(|button| decoration_button(button, tokens, window))
+      .map(|button| decoration_button(button, _tokens, _window))
       .collect::<Vec<_>>();
     (!buttons.is_empty()).then(|| {
       div()
