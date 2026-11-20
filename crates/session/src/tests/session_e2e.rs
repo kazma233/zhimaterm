@@ -33,20 +33,25 @@ use zhimaterm_terminal::{SearchDirection, SearchOutcome, TerminalSnapshot};
 #[cfg(windows)]
 fn pty_probe_command(mode: &str) -> String {
   fn probe_exe() -> std::path::PathBuf {
-    let direct = std::env::current_exe()
-      .expect("测试进程路径")
-      .parent()
-      .and_then(|dir| dir.parent())
-      .map(|dir| dir.join("zhimaterm-pty-probe.exe"))
-      .expect("target/debug 目录");
+    // 探针 exe 固定落 target/debug（cargo 普通(bin) 的输出位置）。不能从
+    // current_exe 上溯推导：cargo 1.100 起 lib 测试二进制搬进了
+    // build/<pkg>/<hash>/out/，两级父目录不再是 target/debug；改从
+    // CARGO_MANIFEST_DIR（本仓成员恒在 crates/ 一级下）上溯到 workspace 根。
+    let direct = std::path::Path::new(std::env!("CARGO_MANIFEST_DIR"))
+      .ancestors()
+      .nth(2)
+      .expect("workspace 根目录")
+      .join("target/debug")
+      .join("zhimaterm-pty-probe.exe");
     if direct.is_file() {
       return direct;
     }
     let cargo = std::env::var_os("CARGO").expect("cargo test 会设置 CARGO");
-    let manifest = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo test 会设置 CARGO_MANIFEST_DIR");
+    // -p 钉死探针所在包：按需构建以本 crate 为 cwd，session 没有这个
+    // bin，裸 --bin 直接报 no bin target in default-run packages
     let status = std::process::Command::new(cargo)
-      .args(["build", "--bin", "zhimaterm-pty-probe"])
-      .current_dir(manifest)
+      .args(["build", "-p", "zhimaterm-local", "--bin", "zhimaterm-pty-probe"])
+      .current_dir(std::env!("CARGO_MANIFEST_DIR"))
       .status()
       .expect("按需构建探针应能启动");
     assert!(status.success(), "按需构建探针失败");
