@@ -45,6 +45,27 @@ SetCursorPos + mouse_event 真实输入驱动（与真人点击同机制，坐�
 
 ## 发现的 bug（待修，勿删）
 
+### 最大化/还原后画面延迟铺满 0.4–3.3s（gpui Linux Wayland 帧调度，依赖层）
+
+2026-11-20 KDE Wayland 实机（gpui-pre 0.3.12/0.3.13）：点最大化/还原后，
+终端内容右/下方向留白，约 0.4–3.3s 后才铺满；时长不固定、每次不同。
+2026-11-20 四点探针（ui paint/send → worker apply → frame pub → ui frame）
+实锤：**应用侧全链毫秒级**（send 与 apply 同毫秒、帧发布 +12ms、消费同毫秒），
+空窗期内 canvas paint 回调一次未执行——即 gpui 从未 draw。机制：Wayland
+configure 后 gpui 只为 ack_configure 做一次配套 commit（非绘制帧），真正的
+重绘 draw 被 `refresh()` 置 dirty 后压在帧循环里不调度，直到下一个无关
+重绘源（光标闪烁 500ms tick / 鼠标悬停 / 其他 notify）恰好唤醒——延迟时长
+取决于「下一个无关事件何时到来」，与 0.5s/2.5s 双峰实测吻合。gpui core 的
+责任链（`on_resize` → `bounds_changed` → `refresh` → `set_dirty`）与
+wayland 后端帧循环（`frame`/`complete_frame`/`schedule_frame`）逐函数读过，
+0.3.13 与 0.3.12 完全相同（已 diff），升级不解决；`bounds_observers` 是
+`pub(crate)`，本仓无公开 API 可在 resize 后强制重绘。上游相邻已知问题：
+zed#56294（交互 resize 1px 偏移）、zed#15311（Linux resize 慢）。已排除的
+本仓环节（勿重查）：ResizeGate 节流（单次零延迟）、命令通道积压（无按键
+Motion 在 worker 是 no-op）、debug reflow 慢（perf 用例实测 ~1ms/次）、
+帧通道积压（容量 1，最新帧语义）。升级依赖后复验；若上游无动作，可提
+upstream issue 附本节时序数据。
+
 ### 拖拽幻影（DragGhost）在 Windows 不渲染（依赖层，本仓无可修之处）
 
 2026-11-11 晚间确证：侧栏行拖拽的落点高亮（drag_over）正常、放置后排序
@@ -140,6 +161,32 @@ Linux（实机，Wayland/X11 各一遍）：
   由系统标题栏承担（顶栏只是应用内容）。
 - 拖拽（xdg_toplevel move）、双击最大化、阴影与圆角观感（首版接受平边，
   `set_client_inset`/圆角精修后置）。
+
+## 应用第一次运行与 Linux Wayland（KDE/KWin，2026-11-20）
+
+环境：Fedora 44 KDE Plasma Wayland（KWin），gpui-pre 0.3.12；隔离实例
+`ZHIMATERM_CONFIG_DIR=/tmp/zhimaterm-acc/config`。日志与截图已验过的项：
+
+- 首次运行（干净配置目录）不报错；自动创建 workspace.json（默认 1080×720
+  窗口态）与 scrollback/1.log，自动建本地会话。
+- 装饰协商（WAYLAND_DEBUG=1 协议级证据）：应用发
+  `zxdg_toplevel_decoration.set_mode(Client)`，KWin 最终 configure(Client)
+  ——CSD 生效；顶栏右端按 KDE 惯例（`linux_default` 布局）渲染 ─ □ ✕
+  三枚控制按钮（KDE portal 不提供 GNOME button-layout，稳定落默认）。
+- 窗口标题与顶栏中区标题跟随终端（`set_title("kazma@fedora:~")`）。
+- CSD 边缘缩放命中带（ADR-057 修订 2026-11-20）：挂载与协议请求可在
+  WAYLAND_DEBUG 日志里核验（拖边时应出现 `xdg_toplevel.resize` 请求，
+  此前为 0 次）。
+
+待真人（指针类）：
+
+- 拖边/拖角缩放生效、方向光标正确（四边双向、四角对角）；最大化与全屏时
+  边缘无命中带，还原后恢复。
+- 顶栏空区拖拽挪窗（xdg_toplevel move）、双击最大化、顶栏右键窗口菜单。
+- 三枚控制按钮点击各自生效（最小化/最大化/关闭，关闭即退出且工作区落盘）。
+- 几何往返：拖动/缩放窗口后退出重启，位置与尺寸不漂移（ADR-037 口径）。
+- 边缘命中带与内容的让位：终端格、侧栏、状态栏贴边 8px 内的交互照常
+  （拖选文本从边缘起手、贴边按钮可点）。
 
 ## 终端搜索条位置（ADR-015 修订，2026-11-16 落地，待验收）
 
