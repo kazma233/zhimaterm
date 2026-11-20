@@ -112,6 +112,31 @@ Shell 的一种，ADR-021），以渲染色区分——WSL 用主题 accent 强�
 fg_secondary（色别代替形别；accent 是全主题推导 token，明暗主题对比度已由
 主题体系保证，不硬编码品牌色）。SSH 保持服务器机架图形。
 
+## 修订（2026-11-20，Linux Wayland 实机暴露：CSD 边缘缩放落应用侧）
+
+Linux（KDE Wayland / KWin）实机首次验收发现：请求 CSD 后窗口完全无法拖边
+调整大小。根因：Wayland 协商出 Client 装饰后，compositor 不再提供缩放边框
+（KWin 对 CSD 窗口不画边，GNOME 无 SSD），拖边缩放只能由应用发起
+`xdg_toplevel.resize`——协议日志证实整个会话该请求 0 次。gpui（0.3.12 与
+0.3.13 同）只提供 `Window::start_window_resize(edge)` 原语、不做边缘命中，
+本仓此前也无调用：顶栏的拖拽/双击/控制按钮都齐了，唯独缺缩放。自绘顶栏
+之前窗口走默认 Server 装饰（KWin 画边框），所以该能力是在 ADR-057 落地时
+才消失的，升级 gpui 不解决。
+
+修复：`views::title_bar::render_resize_edges` 在窗口最顶层（根装配末尾，
+浮层在场时边缘仍可缩放）铺四边 + 四角的 8px 透明命中带，悬停给方向光标、
+按下 `start_window_resize` 把缩放手势交给 compositor；带内按下
+stop_propagation，不与终端选区、顶栏拖拽武装抢事件。挂载条件：
+`Decorations::Client` 且未被 compositor 平铺（tiling）、非最大化/全屏、
+窗口可缩放。macOS/Windows 不协商出 Client 装饰（前者 trait 默认 Server、
+后者边缘由 WM_NCHITTEST 原生命中），命中带保持空转——运行时门控，无 cfg
+分叉（ADR-029）。
+
+`set_client_inset` 与阴影/圆角精修**维持后置**：inset 声明的是「应用自绘
+装饰带的宽度」，必须与真实装饰视觉（阴影、圆角、贴边内容避让）同做——
+单独设置只会把内容区按 inset 收缩、产出一条空带，无用户可感收益。等精修
+批次一并落地。
+
 ## 修订（2026-11-16，同日三次决策：侧栏会话行瘦身，来源标签撤出）
 
 侧栏会话行去掉第二行来源标签（`LOCAL` / `user@host:port` / `WSL · 发行版名`），

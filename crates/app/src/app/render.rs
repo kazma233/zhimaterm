@@ -434,6 +434,8 @@ impl Render for ZhimaTermApp {
     });
 
     div()
+      // relative：全窗覆盖件（边缘缩放命中带等）以根为定位基准
+      .relative()
       .size_full()
       .flex()
       .flex_col()
@@ -525,6 +527,10 @@ impl Render for ZhimaTermApp {
         &theme_picker_actions(cx),
         cx,
       ))
+      // CSD 边缘缩放命中带（ADR-057 修订）：挂根装配末尾保持在最顶层，
+      // 浮层在场时窗口边缘仍可缩放；非 CSD 平台（macOS/Windows/协商回
+      // Server 装饰）内部短路为空壳
+      .child(title_bar::render_resize_edges(window))
   }
 }
 

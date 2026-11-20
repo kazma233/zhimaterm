@@ -1,5 +1,5 @@
 //! 窗口顶栏（ADR-057）：自绘标题栏的平台部分——拖拽状态机、红绿灯留位、
-//! 窗口控制按钮与双击/窗口菜单行为。
+//! 窗口控制按钮、双击/窗口菜单行为与 CSD 边缘缩放命中带。
 //!
 //! 顶栏内容（活动会话标题、主题色板/?/⚙ 按钮）由调用方装配传入：
 //! 入口回调要触达外壳的 `pub(super)` 方法，装配留在 `app/render.rs`（与模态
@@ -9,15 +9,19 @@
 //! 被 gpui 的 WM_NCHITTEST 层映射为 HTCAPTION，鼠标事件由系统原生命中，
 //! 状态机实际只在 macOS/Linux 生效；双击 macOS 走 `titlebar_double_click()`
 //! （读系统「双击标题栏」偏好），Linux 走 `zoom_window()`。
+//! 边缘缩放命中带（`render_resize_edges`）挂在窗口最顶层：请求 CSD 后
+//! compositor 不再提供缩放边框，拖边缩放必须由应用发起（ADR-057 修订）。
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, MouseButton, Window, WindowControlArea, div, px};
-// 装饰查询与按钮枚举只被非 Windows 路径引用（macOS 上运行时短路为 None）
+use gpui::{
+  AnyElement, App, CursorStyle, Decorations, MouseButton, ResizeEdge, Tiling, Window, WindowControlArea, div, px,
+};
+// 按钮枚举只被非 Windows 路径引用（Windows 画自己的 caption 三连）
 #[cfg(not(target_os = "windows"))]
-use gpui::{Decorations, WindowButton};
+use gpui::WindowButton;
 
 use zhimaterm_base::theme::UiTokens;
 use zhimaterm_base::ui::ui_rems;
@@ -25,6 +29,10 @@ use zhimaterm_base::ui::ui_rems;
 /// 顶栏高度：定值像素。红绿灯与窗口控制按钮都不随界面字号缩放，跟随缩放
 /// 只会让三平台高度与按钮命中区失配（与 STATUS_BAR_HEIGHT 同口径）。
 const TITLE_BAR_HEIGHT: f32 = 34.0;
+
+/// CSD 边缘缩放命中带宽度：定值像素（窗口 chrome 不随界面字号缩放，与
+/// TITLE_BAR_HEIGHT 同口径），量级对齐原生窗口的隐形缩放边框。
+const RESIZE_BAND: f32 = 8.0;
 
 /// macOS 红绿灯右侧留白：三枚按钮（挪位到 12,12）右缘约 64px，再留间距；
 /// 红绿灯不随 rem 缩放，故用固定像素。全屏时红绿灯归系统接管，不留位。
@@ -160,6 +168,129 @@ fn title_bar_double_click(window: &mut Window) {
       window.zoom_window();
     }
   }
+}
+
+/// CSD（Client 装饰）下的边缘缩放命中带（ADR-057 修订 2026-11-20）。请求
+/// CSD 后 compositor 不再画缩放边框（KWin 对 CSD 窗口不画边，GNOME 无
+/// SSD），拖边缩放只能由应用发起 `start_window_resize`——Wayland 走
+/// xdg_toplevel.resize，X11 走 _NET_WM_MOVERESIZE。四边与四角铺透明细条：
+/// 悬停给方向光标、按下把手势交给 compositor。调用方挂在窗口最顶层（根
+/// 装配末尾），这样浮层在场时边缘仍可缩放；顶栏拖拽区与终端选区不受影响
+/// （带内按下被 stop_propagation 截住，带外照旧）。
+/// macOS/Windows 不协商出 Client 装饰（前者 trait 默认 Server，后者边缘
+/// 由 WM_NCHITTEST 原生命中），外壳保持空转，不挂子元素。最大化/全屏/
+/// compositor 平铺（tiling）时窗口几何归 compositor 管，一并跳过。
+pub fn render_resize_edges(window: &Window) -> AnyElement {
+  let wrapper = div().absolute().inset_0();
+  let Decorations::Client { tiling } = window.window_decorations() else {
+    return wrapper.into_any_element();
+  };
+  if tiling != Tiling::default() || !window.is_resizable() || window.is_maximized() || window.is_fullscreen() {
+    return wrapper.into_any_element();
+  }
+  let band = px(RESIZE_BAND);
+  let size = window.viewport_size();
+  let mid_w = size.width - band * 2.;
+  let mid_h = size.height - band * 2.;
+  let right_x = size.width - band;
+  let bottom_y = size.height - band;
+  wrapper
+    // 四边：与角带让位（角部归四角细条）
+    .child(
+      resize_band("resize-top", ResizeEdge::Top, CursorStyle::ResizeUpDown)
+        .absolute()
+        .left(band)
+        .top(px(0.))
+        .w(mid_w)
+        .h(band),
+    )
+    .child(
+      resize_band("resize-bottom", ResizeEdge::Bottom, CursorStyle::ResizeUpDown)
+        .absolute()
+        .left(band)
+        .top(bottom_y)
+        .w(mid_w)
+        .h(band),
+    )
+    .child(
+      resize_band("resize-left", ResizeEdge::Left, CursorStyle::ResizeLeftRight)
+        .absolute()
+        .left(px(0.))
+        .top(band)
+        .w(band)
+        .h(mid_h),
+    )
+    .child(
+      resize_band("resize-right", ResizeEdge::Right, CursorStyle::ResizeLeftRight)
+        .absolute()
+        .left(right_x)
+        .top(band)
+        .w(band)
+        .h(mid_h),
+    )
+    // 四角：对角光标与 xdg 方向一一对应
+    .child(
+      resize_band(
+        "resize-top-left",
+        ResizeEdge::TopLeft,
+        CursorStyle::ResizeUpLeftDownRight,
+      )
+      .absolute()
+      .left(px(0.))
+      .top(px(0.))
+      .w(band)
+      .h(band),
+    )
+    .child(
+      resize_band(
+        "resize-top-right",
+        ResizeEdge::TopRight,
+        CursorStyle::ResizeUpRightDownLeft,
+      )
+      .absolute()
+      .left(right_x)
+      .top(px(0.))
+      .w(band)
+      .h(band),
+    )
+    .child(
+      resize_band(
+        "resize-bottom-left",
+        ResizeEdge::BottomLeft,
+        CursorStyle::ResizeUpRightDownLeft,
+      )
+      .absolute()
+      .left(px(0.))
+      .top(bottom_y)
+      .w(band)
+      .h(band),
+    )
+    .child(
+      resize_band(
+        "resize-bottom-right",
+        ResizeEdge::BottomRight,
+        CursorStyle::ResizeUpLeftDownRight,
+      )
+      .absolute()
+      .left(right_x)
+      .top(bottom_y)
+      .w(band)
+      .h(band),
+    )
+    .into_any_element()
+}
+
+/// 一条缩放命中带：透明底、悬停方向光标、按下发起对应方向的交互式缩放。
+/// stop_propagation：缩放手势由 compositor 接管，不得再喂给底下的终端
+/// 选区或顶栏拖拽武装。
+fn resize_band(id: &'static str, edge: ResizeEdge, cursor: CursorStyle) -> gpui::Stateful<gpui::Div> {
+  div()
+    .id(id)
+    .cursor(cursor)
+    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+      cx.stop_propagation();
+      window.start_window_resize(edge);
+    })
 }
 
 /// 右端窗口控制按钮：Windows 画 caption 三连（命中由系统原生处理）；macOS
