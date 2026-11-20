@@ -260,13 +260,24 @@ pub fn list_distros() -> Vec<WslDistro> {
 // （见 [`decode_wsl_output`]）。
 // ---------------------------------------------------------------------------
 
+/// 派生 wsl.exe 一律隐藏子进程控制台：release 是 GUI 子系统
+/// （`windows_subsystem = "windows"`）没有控制台可继承，不加
+/// `CREATE_NO_WINDOW` 时 Windows 为每次派生新开一个控制台窗，即 WSL
+/// 页面每跑一条管理命令闪一个黑框的根因；debug 从终端跑会继承父控制台，
+/// 复现不了，装出来的版本才会暴露。
+fn hide_console(command: &mut std::process::Command) {
+  use std::os::windows::process::CommandExt;
+  // CREATE_NO_WINDOW
+  command.creation_flags(0x0800_0000);
+}
+
 /// 跑一条 wsl.exe 子命令，成功返回 stdout 文本，失败带错误文本或退出码。
 /// 阻塞调用（安装/转换可能数分钟），调用方放后台线程。
 fn run_wsl(args: &[&str]) -> Result<String, String> {
-  let output = std::process::Command::new(system32_wsl())
-    .args(args)
-    .output()
-    .map_err(|error| format!("wsl.exe 启动失败：{error}"))?;
+  let mut command = std::process::Command::new(system32_wsl());
+  command.args(args);
+  hide_console(&mut command);
+  let output = command.output().map_err(|error| format!("wsl.exe 启动失败：{error}"))?;
   finish_wsl(args, output)
 }
 
@@ -277,8 +288,10 @@ fn run_wsl_with_stdin(args: &[&str], stdin: &str) -> Result<String, String> {
   use std::io::Write;
   use std::process::Stdio;
 
-  let mut child = std::process::Command::new(system32_wsl())
-    .args(args)
+  let mut command = std::process::Command::new(system32_wsl());
+  command.args(args);
+  hide_console(&mut command);
+  let mut child = command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
