@@ -9,6 +9,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -41,8 +42,9 @@ pub struct ModalActions {
   pub cancel: WindowAction,
 }
 
-/// 表单里的下拉：两个字体选择、本地 Shell、文本编辑器与终端核心，
-/// 共用一套 select 组件。同一时间最多展开一个。
+/// 表单里的下拉：两个字体选择、本地 Shell 与文本编辑器，
+/// 共用一套 select 组件。同一时间最多展开一个。（终端核心不是下拉：
+/// 图标单选，ADR-060。）
 #[derive(Clone, Copy, PartialEq)]
 pub enum DropdownField {
   Terminal,
@@ -50,8 +52,6 @@ pub enum DropdownField {
   Shell,
   /// 文本编辑器档位（ADR-055）：路径点击的打开目标，立即生效。
   Editor,
-  /// 终端核心后端（ADR-050）：只影响新会话。
-  Backend,
 }
 
 impl DropdownField {
@@ -62,7 +62,6 @@ impl DropdownField {
       Self::Interface => "ui-font-select-popover",
       Self::Shell => "shell-select-popover",
       Self::Editor => "editor-select-popover",
-      Self::Backend => "backend-select-popover",
     }
   }
 }
@@ -172,12 +171,13 @@ pub struct SettingsForm {
   ui_candidates: Vec<String>,
   /// 校验或保存失败的原因：显示在表单底部，不弹窗
   error: Option<String>,
-  /// 五个下拉的选中项与锚点
+  /// 四个下拉的选中项与锚点
   terminal: DropdownState,
   interface: DropdownState,
   shell: DropdownState,
   editor: DropdownState,
-  backend: DropdownState,
+  /// 终端核心：图标单选（ADR-060），点击即改表单值，生效仍由「应用」触发
+  terminal_backend: BackendKind,
   /// 展开着的下拉：单值即互斥（同一时间最多一个）
   open: Option<DropdownField>,
   /// 展开下拉里的键盘高亮下标：打开时落在当前选中项上，Up/Down 移动，
@@ -243,12 +243,7 @@ impl SettingsForm {
     workdir.update(cx, |input, cx| {
       input.set_text(current.local_workdir.as_deref().unwrap_or(""), cx)
     });
-    // 后端候选 = 全部后端；当前值不在候选里（手改了设置文件）时选默认
-    let backends = BackendKind::available();
-    let backend_index = backends
-      .iter()
-      .position(|backend| *backend == current.terminal_backend)
-      .unwrap_or(0);
+    // 后端候选 = 全部后端；图标选择器直接持有值（值域即枚举，无需下标）
     Self {
       size,
       ui_size,
@@ -270,7 +265,7 @@ impl SettingsForm {
       interface: DropdownState::new(ui_font_index),
       shell: DropdownState::new(shell_index),
       editor: DropdownState::new(editor_index),
-      backend: DropdownState::new(backend_index),
+      terminal_backend: current.terminal_backend,
       open: None,
       highlight: None,
       dropdown_scroll: Default::default(),
@@ -315,10 +310,6 @@ impl SettingsForm {
     };
     let text_editor = validate_text_editor(&editor_text)?;
     let local_workdir = validate_local_workdir(self.workdir.read(cx).text())?;
-    let terminal_backend = BackendKind::available()
-      .get(self.backend.selected)
-      .copied()
-      .unwrap_or_default();
     Ok(SettingsValues {
       font_family,
       font_size,
@@ -330,7 +321,7 @@ impl SettingsForm {
       local_shell,
       local_workdir,
       option_as_alt: self.option_as_alt,
-      terminal_backend,
+      terminal_backend: self.terminal_backend,
       text_editor,
     })
   }
@@ -344,6 +335,12 @@ impl SettingsForm {
   /// 切换连字（ADR-059）；生效仍由「应用」触发。
   pub fn toggle_ligatures(&mut self, cx: &mut Context<Self>) {
     self.ligatures = !self.ligatures;
+    cx.notify();
+  }
+
+  /// 选终端核心（图标单选，ADR-060）；生效仍由「应用」触发。
+  pub fn pick_backend(&mut self, backend: BackendKind, cx: &mut Context<Self>) {
+    self.terminal_backend = backend;
     cx.notify();
   }
 
@@ -392,7 +389,6 @@ impl SettingsForm {
       DropdownField::Interface => self.interface.selected,
       DropdownField::Shell => self.shell.selected,
       DropdownField::Editor => self.editor.selected,
-      DropdownField::Backend => self.backend.selected,
     }
   }
 
@@ -404,7 +400,6 @@ impl SettingsForm {
       DropdownField::Interface if self.ui_candidates.len() > 1 => Some(self.ui_candidates.clone()),
       DropdownField::Shell => Some(self.shell_labels()),
       DropdownField::Editor => Some(self.editor_labels()),
-      DropdownField::Backend => Some(self.backend_labels()),
       // 空候选（没有等宽字体/系统字体）时没有浮层可展，也无键可裁
       _ => None,
     }
@@ -449,7 +444,6 @@ impl SettingsForm {
         self.editor.selected = index;
         self.editor_choice = RegistryChoice::from_index(index, self.editors.len());
       }
-      DropdownField::Backend => self.backend.selected = index,
     }
     self.close_dropdowns(cx);
   }
@@ -469,14 +463,6 @@ impl SettingsForm {
   /// 某个下拉是否展开（渲染收起态样式用）。
   pub fn is_open(&self, field: DropdownField) -> bool {
     self.open == Some(field)
-  }
-
-  /// 终端核心下拉的候选显示名。
-  pub fn backend_labels(&self) -> Vec<String> {
-    BackendKind::available()
-      .iter()
-      .map(|backend| backend.display_name().to_owned())
-      .collect()
   }
 
   /// 当前选中的是「自定义…」项（候选表之后的末位）。
@@ -557,7 +543,7 @@ impl SettingsForm {
     self.shell_choice = RegistryChoice::Default;
     self.editor.selected = 0;
     self.editor_choice = RegistryChoice::Default;
-    self.backend.selected = 0;
+    self.terminal_backend = BackendKind::default();
     self.open = None;
     self.custom_shell.update(cx, |input, cx| input.set_text("", cx));
     self.custom_editor.update(cx, |input, cx| input.set_text("", cx));
@@ -703,6 +689,53 @@ fn checkbox_row(
         .child(div().flex_none().w(ui_rems(14.)))
         .child(div().flex_1().min_w(px(0.)).child(card::label(tokens, description))),
     )
+}
+
+/// 终端核心图标单选（ADR-060）：两个后端各一枚大图标按钮并排，点击即改
+/// 表单值（生效由「应用」触发）；选中态走 accent 边框，与连字开关同一套
+/// 高亮语言。
+fn backend_picker(
+  tokens: &zhimaterm_base::theme::UiTokens,
+  current: BackendKind,
+  on_pick: impl Fn(BackendKind, &mut gpui::App) + Clone + 'static,
+) -> gpui::Div {
+  let button = |id: &'static str, icon: Arc<gpui::Image>, name: &'static str, selected: bool, backend: BackendKind| {
+    let on_pick = on_pick.clone();
+    // 全彩官方图标走 img（svg_renderer 栅格化保留原色，ADR-060）；svg()
+    // 的单色染色会把官方 logo 塌成剪影。名称文字仍按选中态换色。
+    let name_color = if selected { tokens.fg } else { tokens.fg_secondary };
+    zhimaterm_base::ui::panel::clickable(id, move |_, _, cx| on_pick(backend, cx))
+      .debug_selector(|| id.into())
+      .flex()
+      .flex_1()
+      .items_center()
+      .justify_center()
+      .gap(px(8.))
+      .py(px(10.))
+      .rounded(px(6.))
+      .border_1()
+      .border_color(gpui::rgb(if selected { tokens.accent } else { tokens.border_default }))
+      .when(selected, |it| it.bg(gpui::rgb(tokens.bg_input)))
+      .child(gpui::img(icon).size(px(20.)).overflow_hidden().rounded(px(4.)))
+      .child(card::title(tokens, name).text_color(gpui::rgb(name_color)))
+  };
+  div()
+    .flex()
+    .gap(px(8.))
+    .child(button(
+      "backend-alacritty",
+      crate::views::icons::alacritty_image(),
+      "Alacritty",
+      current == BackendKind::Alacritty,
+      BackendKind::Alacritty,
+    ))
+    .child(button(
+      "backend-ghostty",
+      crate::views::icons::ghostty_image(),
+      "Ghostty",
+      current == BackendKind::Ghostty,
+      BackendKind::Ghostty,
+    ))
 }
 
 /// 设置模态（ADR-044 接入统一浮层栈）：表单实体与预填由表单自持（ADR-026），
@@ -913,19 +946,12 @@ impl ModalView for SettingsModal {
       .child(field_column(
         tokens,
         "终端核心",
-        plain_select_row(
-          tokens,
-          "select-terminal-backend",
-          &form.backend_labels()[form.backend.selected],
-          form.is_open(DropdownField::Backend),
-          &form.backend.bounds,
-          {
-            let form = self.form.clone();
-            move |_, _, cx| {
-              form.update(cx, |form, cx| form.toggle_dropdown(DropdownField::Backend, cx));
-            }
-          },
-        ),
+        backend_picker(tokens, form.terminal_backend, {
+          let form = self.form.clone();
+          move |backend, cx| {
+            form.update(cx, |form, cx| form.pick_backend(backend, cx));
+          }
+        }),
       ))
       .child(field_column(
         tokens,
@@ -1075,12 +1101,6 @@ impl ModalView for SettingsModal {
         form.editor_labels(),
         form.editor.selected,
         form.editor.bounds.clone(),
-        None,
-      ),
-      DropdownField::Backend => (
-        form.backend_labels(),
-        form.backend.selected,
-        form.backend.bounds.clone(),
         None,
       ),
       // 空候选（没有等宽字体/系统字体）时没有浮层可展
@@ -1429,11 +1449,22 @@ mod tests {
         assert!(!form.is_open(DropdownField::Terminal) && form.is_open(DropdownField::Interface));
         form.toggle_dropdown(DropdownField::Interface, cx);
         assert!(!form.dropdown_open(), "再点自己收起");
-        form.toggle_dropdown(DropdownField::Backend, cx);
-        form.pick(DropdownField::Backend, 0, cx);
-        assert!(!form.dropdown_open());
-        assert_eq!(form.backend.selected, 0);
       });
+    });
+  }
+
+  /// 终端核心图标单选（ADR-060）：点击即改表单值，经 edited_settings 折算。
+  #[gpui::test]
+  fn picking_backend_records_the_choice(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+      let form = cx.new(|cx| SettingsForm::new(lists(), effective(), cx));
+      form.update(cx, |form, cx| {
+        assert_eq!(form.terminal_backend, BackendKind::Alacritty, "预填当前值");
+        form.pick_backend(BackendKind::Ghostty, cx);
+        assert_eq!(form.terminal_backend, BackendKind::Ghostty);
+      });
+      let edited = form.update(cx, |form, cx| form.edited_settings(cx)).unwrap();
+      assert_eq!(edited.terminal_backend, BackendKind::Ghostty);
     });
   }
 

@@ -30,6 +30,40 @@ pub const CLOSE: &str = include_str!("../../assets/icons/close.svg");
 /// 图标元素：14px 见方，颜色由调用方 text_color 指定（继承到 svg 的机制
 /// 不作依赖，显式给色）。
 pub fn icon(data: &'static str) -> gpui::Svg {
+  icon_sized(data, 14.)
+}
+
+/// 指定边长的图标元素（颜色同 [`icon`] 由调用方给）。
+pub fn icon_sized(data: &'static str, size: f32) -> gpui::Svg {
   use gpui::Styled;
-  gpui::svg().data(data.as_bytes()).size(gpui::px(14.))
+  gpui::svg().data(data.as_bytes()).size(gpui::px(size))
+}
+
+// ---------- 终端核心的全彩图标（ADR-060） ----------
+//
+// gpui 的 `svg()` 元素是整图单色染色（只保留 alpha），官方 logo 的渐变与
+// 多层配色会塌成一坨剪影（2026-11-21 实测「看不清」）。全彩要走 `img` +
+// `ImageSource::Image`：`Image::from_bytes(Svg, …)` 经 svg_renderer 正常
+// 栅格化、保留原色（上游测试锁定该行为）。两个资产都是官方矢量图——
+// alacritty = packaging/Alacritty_logo.svg，ghostty = 官方 wordmark 裁出的
+// 幽灵标志（viewBox 0 0 26.73 32；文字段在图标尺寸下不可辨故不取）。
+
+use std::sync::Arc;
+
+use gpui::{Image, ImageFormat};
+
+/// Alacritty 终端核心的彩色图标（官方 logo）。
+pub fn alacritty_image() -> Arc<Image> {
+  Arc::new(Image::from_bytes(
+    ImageFormat::Svg,
+    include_bytes!("../../assets/icons/alacritty.svg").to_vec(),
+  ))
+}
+
+/// Ghostty 终端核心的彩色图标（官方幽灵标志）。
+pub fn ghostty_image() -> Arc<Image> {
+  Arc::new(Image::from_bytes(
+    ImageFormat::Svg,
+    include_bytes!("../../assets/icons/ghostty.svg").to_vec(),
+  ))
 }
