@@ -57,7 +57,7 @@ _Avoid_: 鼠标路由、滚轮转发开关
 _Avoid_: 输入法缓冲区、preedit 状态、组合区状态机（指散落在视图里的旧形态）
 
 **查询应答（query reply）**:
-终端查询（OSC 4/10/11/12 颜色、DA/DSR/CPR、CSI 14t 尺寸）的应答字节由各后端原生产生（ADR-060 步骤 1c）：alacritty 消费上游格式器、ghostty 直通核心自答——两者都按查询结尾镜像（BEL 查询回 BEL，实测含 ghostty 核心）；termwiz 后端自答固定 ST（其 OSC 分发不携带结尾符，无法镜像）。`TermRequest::PtyWrite` 是应答的唯一通道；主题默认色经 `TerminalCore::set_theme_defaults` 推入后端作为应答输入（程序改写槽优先），没推则不应答。CSI 14t 例外：alacritty/termwiz 走 `TextAreaSizeRequest`，由 worker 按 Resize 记账的格像素拼装（`text_area_size_reply`），ghostty 核心自答。
+终端查询（OSC 4/10/11/12 颜色、DA/DSR/CPR、CSI 14t 尺寸）的应答字节由各后端原生产生（ADR-060 步骤 1c）：alacritty 消费上游格式器、ghostty 直通核心自答——两者都按查询结尾镜像（BEL 查询回 BEL，实测含 ghostty 核心）。`TermRequest::PtyWrite` 是应答的唯一通道；主题默认色经 `TerminalCore::set_theme_defaults` 推入后端作为应答输入（程序改写槽优先），没推则不应答。CSI 14t 例外：alacritty 走 `TextAreaSizeRequest`，由 worker 按 Resize 记账的格像素拼装（`text_area_size_reply`），ghostty 核心自答。（termwiz 后端曾自答固定 ST，随 ADR-060 步骤 3 退役。）
 _Avoid_: 共享层格式器、单点格式化、固定 ST 统一（已废除的旧口径）、ColorFormatter 闭包跨 TermRequest 传递（alacritty 的格式器止步其后端内部）
 
 **原样接入（as-is VT integration）**:
