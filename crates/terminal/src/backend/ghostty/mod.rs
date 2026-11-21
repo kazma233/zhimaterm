@@ -76,9 +76,8 @@ impl GhosttyCore {
     terminal
       .set_scrollback_max_lines(Some(history))
       .expect("设置滚动历史上限失败");
-    // DA1 对齐 alacritty 的声明（VT102 无特性）：程序按 DA1 分支能力，
-    // ghostty 默认自报 VT300 级会让同一批 TUI 走不同分支（ADR-051）
-    terminal.set_device_attributes(Some(vt102_device_attributes()));
+    // DA1/DA2/DA3 按核心默认自报（vt.rs ghostty_default_device_attributes），
+    // 不再对齐 alacritty 的 VT102 声明（ADR-060 步骤 1b：上游差异原样暴露）
     // 行数增长时把历史拉回视口（ADR-046/049 的 alacritty 行为口径）
     let _ = terminal.set_resize_pull_scrollback(true);
     // 首版需求不含图像协议：关掉 glyph（kitty graphics）处理，程序发来
@@ -217,14 +216,11 @@ impl GhosttyCore {
     // drain 借用 self.terminal，先收进 Vec 再逐个处理
     for event in self.terminal.events().collect::<Vec<_>>() {
       match event {
-        VtEvent::PtyWrite(bytes) => match color_query_slot(&bytes) {
-          // 核心自答的颜色查询转成纯槽位请求：应答字节由共享层
-          // 单点格式化，与另两个后端同一套（ADR-051 §2.1）
-          Some(slot) => self.requests.push(TermRequest::ColorRequest { slot }),
-          None => self
-            .requests
-            .push(TermRequest::PtyWrite(String::from_utf8_lossy(&bytes).into_owned())),
-        },
+        // 核心自答的查询应答（DA/DSR/OSC 颜色/尺寸/XTVERSION）原样直通：
+        // 应答字节由各后端原生产生（ADR-060 步骤 1c），不拦截不重拼
+        VtEvent::PtyWrite(bytes) => self
+          .requests
+          .push(TermRequest::PtyWrite(String::from_utf8_lossy(&bytes).into_owned())),
         VtEvent::Bell => self.requests.push(TermRequest::Bell),
         VtEvent::TitleChanged(title) => self.requests.push(TermRequest::Title(title)),
         VtEvent::ClipboardWrite(contents) => {
@@ -339,24 +335,6 @@ fn hyperlink_of(grid_ref: &vt::GridRef) -> Option<Arc<str>> {
       Some(lossy(&grown[..len.min(grown.len())]))
     }
     Err(_) => None,
-  }
-}
-
-/// DA1 对齐 alacritty 的声明（VT102 无特性）；DA2/DA3 维持 ghostty 默认值
-/// （ADR-051：契约不锁）。
-fn vt102_device_attributes() -> ffi::DeviceAttributes {
-  ffi::DeviceAttributes {
-    primary: ffi::DeviceAttributesPrimary {
-      conformance_level: ffi::DA_CONFORMANCE_VT102,
-      features: [0; 64],
-      num_features: 0,
-    },
-    secondary: ffi::DeviceAttributesSecondary {
-      device_type: ffi::DA_DEVICE_TYPE_VT220,
-      firmware_version: 10,
-      rom_cartridge: 0,
-    },
-    tertiary: ffi::DeviceAttributesTertiary { unit_id: 0 },
   }
 }
 
@@ -498,23 +476,6 @@ fn split_sync_chunks(bytes: &[u8]) -> Vec<&[u8]> {
     chunks.push(bytes);
   }
   chunks
-}
-
-/// 识别核心发出的 OSC 颜色查询应答（`ESC ] 10/11/12 ; …`、`ESC ] 4 ; n ; …`）。
-/// 多段成对的 OSC 4 应答（一次查询多个索引）不识别，按原始字节透传。
-fn color_query_slot(bytes: &[u8]) -> Option<super::ColorSlot> {
-  let rest = bytes.strip_prefix(b"\x1b]")?;
-  let tail = match rest {
-    [b'1', b'0', b';', ..] => return Some(super::ColorSlot::Foreground),
-    [b'1', b'1', b';', ..] => return Some(super::ColorSlot::Background),
-    [b'1', b'2', b';', ..] => return Some(super::ColorSlot::Cursor),
-    [b'4', b';', tail @ ..] => tail,
-    _ => return None,
-  };
-  // 调色板索引：`4;<idx>;rgb:…`，idx 是十进制数字
-  let semicolon = tail.iter().position(|byte| *byte == b';')?;
-  let index = std::str::from_utf8(&tail[..semicolon]).ok()?.parse::<u8>().ok()?;
-  (tail.get(semicolon + 1..)?.first() == Some(&b'r')).then_some(super::ColorSlot::Indexed(index))
 }
 
 /// 剪贴板写入里的纯文本（OSC 52 的 text/plain）；没有就不产生请求。

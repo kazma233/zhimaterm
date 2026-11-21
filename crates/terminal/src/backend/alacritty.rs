@@ -17,7 +17,10 @@ use alacritty_terminal::{
   vte::ansi::{Color, NamedColor, Rgb as AlacrittyRgb},
 };
 
-use super::{CellColor, ColorPalette, ColorSlot, CursorState, GridCell, GridView, NamedSlot, RowBuffer, pack_rgb};
+use super::{
+  CellColor, ColorPalette, ColorSlot, CursorState, GridCell, GridView, NamedSlot, Rgb, RowBuffer, ThemeDefaults,
+  pack_rgb,
+};
 use super::{TermModes, TerminalCore};
 use crate::{CursorKind, TermRequest, UnderlineKind};
 
@@ -42,27 +45,37 @@ impl Dimensions for TerminalSize {
   }
 }
 
+/// 上游颜色查询应答的格式器：给定 RGB 产出应答字节（结尾符按查询镜像，
+/// 上游 vte 行为）。
+type ColorFormatter = Arc<dyn Fn(AlacrittyRgb) -> String + Sync + Send + 'static>;
+
+/// 适配层内部的待翻译请求：颜色查询要携带上游格式器，等 `take_requests`
+/// 时按核心状态（程序改写槽 + 主题默认色）解析成应答字节（ADR-060 步骤
+/// 1c：应答由各后端原生产生，`PtyWrite` 是应答唯一通道）。
+enum PendingRequest {
+  Color { index: usize, formatter: ColorFormatter },
+  Ready(TermRequest),
+}
+
 /// 上游事件的翻译：查询应答、标题、铃声、剪贴板写入都变成中性请求。
 #[derive(Clone)]
 struct RequestProxy {
-  requests: smol::channel::Sender<TermRequest>,
+  requests: smol::channel::Sender<PendingRequest>,
 }
 
 impl EventListener for RequestProxy {
   fn send_event(&self, event: Event) {
     let request = match event {
-      Event::PtyWrite(text) => TermRequest::PtyWrite(text),
-      Event::Title(title) => TermRequest::Title(title),
-      Event::ResetTitle => TermRequest::ResetTitle,
-      Event::Bell => TermRequest::Bell,
-      Event::ClipboardStore(_, text) => TermRequest::ClipboardStore(text),
-      // 应答字节归共享层单点格式化（GLOSSARY「查询应答」），这里只报
-      // 槽位/意图，不再包装上游格式器。
-      Event::ColorRequest(index, _) => TermRequest::ColorRequest {
-        slot: color_slot(index),
-      },
-      Event::TextAreaSizeRequest(_) => TermRequest::TextAreaSizeRequest,
-      Event::MouseCursorDirty => TermRequest::MouseCursorDirty,
+      Event::PtyWrite(text) => PendingRequest::Ready(TermRequest::PtyWrite(text)),
+      Event::Title(title) => PendingRequest::Ready(TermRequest::Title(title)),
+      Event::ResetTitle => PendingRequest::Ready(TermRequest::ResetTitle),
+      Event::Bell => PendingRequest::Ready(TermRequest::Bell),
+      Event::ClipboardStore(_, text) => PendingRequest::Ready(TermRequest::ClipboardStore(text)),
+      // 颜色查询带上上游格式器：应答字节按有效色由格式器产出，结尾符
+      // 镜像查询（上游原生行为）
+      Event::ColorRequest(index, formatter) => PendingRequest::Color { index, formatter },
+      Event::TextAreaSizeRequest(_) => PendingRequest::Ready(TermRequest::TextAreaSizeRequest),
+      Event::MouseCursorDirty => PendingRequest::Ready(TermRequest::MouseCursorDirty),
       // 剪贴板读取按 ADR-002 的策略在配置层就被拒绝，因此不会到达这里
       Event::ClipboardLoad(..) => return,
       // 光标闪烁与唤醒由帧节流覆盖，退出与子进程退出由会话自己判定
@@ -90,13 +103,15 @@ fn config(scrolling_history: usize) -> Config {
 pub(super) struct AlacrittyCore {
   parser: ansi::Processor,
   term: Term<RequestProxy>,
-  requests: smol::channel::Receiver<TermRequest>,
+  requests: smol::channel::Receiver<PendingRequest>,
   size: TerminalSize,
   /// 当前滚动历史上限：上游 `Term` 没有暴露 `Config` 的访问器，
   /// 以本字段为唯一状态源。
   history: usize,
   /// 程序经 OSC 改写过的颜色槽：随解析结果更新。
   palette: ColorPalette,
+  /// 主题默认色：颜色应答的回落值（程序改写槽优先），模型推入。
+  theme_defaults: Option<ThemeDefaults>,
 }
 
 impl AlacrittyCore {
@@ -111,6 +126,7 @@ impl AlacrittyCore {
       size,
       history,
       palette: ColorPalette::new(),
+      theme_defaults: None,
     }
   }
 
@@ -124,6 +140,16 @@ impl AlacrittyCore {
     self.palette.foreground = colors[256].map(rgb_to_u32);
     self.palette.background = colors[257].map(rgb_to_u32);
     self.palette.cursor = colors[258].map(rgb_to_u32);
+  }
+
+  /// 槽位的主题默认色（上游编号）：应答回落值，没推默认色时 None。
+  fn default_rgb(&self, index: usize) -> Option<AlacrittyRgb> {
+    let rgb = self.theme_defaults.as_ref()?.slot_rgb(color_slot(index));
+    Some(AlacrittyRgb {
+      r: rgb.r,
+      g: rgb.g,
+      b: rgb.b,
+    })
   }
 }
 
@@ -247,11 +273,26 @@ impl TerminalCore for AlacrittyCore {
   }
 
   fn take_requests(&mut self) -> Vec<TermRequest> {
+    let colors = self.term.colors();
     let mut requests = Vec::new();
-    while let Ok(request) = self.requests.try_recv() {
-      requests.push(request);
+    while let Ok(pending) = self.requests.try_recv() {
+      match pending {
+        PendingRequest::Ready(request) => requests.push(request),
+        PendingRequest::Color { index, formatter } => {
+          // 有效色：程序经 OSC 改写的槽优先（上游 Term 的颜色表），否则
+          // 主题默认；没推默认色不应答（与 ghostty 核心同口径）
+          let rgb = colors[index].or_else(|| self.default_rgb(index));
+          if let Some(rgb) = rgb {
+            requests.push(TermRequest::PtyWrite(formatter(rgb)));
+          }
+        }
+      }
     }
     requests
+  }
+
+  fn set_theme_defaults(&mut self, foreground: Rgb, background: Rgb, cursor: Rgb, ansi: &[Rgb; 16]) {
+    self.theme_defaults = Some(ThemeDefaults::new(foreground, background, cursor, ansi));
   }
 
   fn sync_deadline(&self) -> Option<Instant> {

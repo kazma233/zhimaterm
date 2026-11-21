@@ -80,6 +80,7 @@
 - [ADR-057：窗口顶栏——自绘标题栏统一承载全局入口](decisions/057-window-title-bar.md)：appears_transparent + app_owns_titlebar_drag（macOS）/ Client 装饰请求（Linux），会话入口、活动会话标题与设置/快捷键/主题色板收编进 34px 顶栏，拖拽状态机对齐 Zed，侧栏瘦身为纯会话列表（取代 ADR-041 §1/§2 位置约定）。
 - [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。
 - [ADR-059：连字开关与手输字体特性](decisions/059-font-ligatures-and-features.md)：两个设置项只作用终端网格字体，calt 唯一所有者是连字开关，表单严格校验、手改文件跳坏项留好项，测量与渲染同源。
+- [ADR-060：VT 后端原样接入与双后端收敛](decisions/060-as-is-vt-backend-convergence.md)：适配层只做「字节→网格」契约桥接，上游差异原样暴露、分歧表记账不修齐；终态 alacritty + ghostty 双后端（termwiz 退役），分三步——砍兼容层（簇回写/DA1 对齐/应答统一）→ ghostty 过 Windows/Linux 真实使用验证 → 切默认并退役 termwiz。
 
 ## 背景与调研（`context/`）
 
@@ -90,6 +91,7 @@
 - [叠放模态滚动失效排障](context/overlay-stack-scroll-troubleshooting.md)：同名 id 滚动容器共用元素状态槽导致上层滚不动的根因、取证路径与叠层组件树的唯一 id 要求（ADR-044 修订）。
 - [⌥+方向键按词跳转调研](context/alt-arrow-word-motion.md)：各终端让裸 shell 开箱即用的两条路线（kitty 集成绑定 vs Ghostty 终端层翻译）与口径选择依据。
 - [libghostty-vt C API 机制笔记](context/libghostty-vt-api-notes.md)：tagged get/set、sized 结构、两段式缓冲、回调协议等扩展 ghostty 后端前的依据（探索快照，用前二次确认）。
+- [三个 VT 核心的上游动态与社区口径](context/vt-upstream-landscape.md)：alacritty/termwiz/libghostty-vt 的社区评价、alacritty #3975 立场性不修、wezterm #4223 簇口径碰撞与 mode 2027 谱系、libghostty-vt 1.0——ADR-060 的调研依据（2026-11 快照）。
 
 ## 运行手册（`runbooks/`）
 

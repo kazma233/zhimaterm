@@ -3,7 +3,7 @@
 //! 只做纯映射，不依赖终端状态；`ColorPalette` 里被程序改写过的颜色（OSC 4/10/11/12）
 //! 优先于当前主题的配色方案。
 
-use super::backend::{CellColor, ColorPalette, ColorSlot, NamedSlot, Rgb};
+use super::backend::{CellColor, ColorPalette, NamedSlot, Rgb};
 use zhimaterm_base::theme::ColorScheme;
 
 /// 解析单元格颜色。`scheme` 是当前主题：程序未改写的槽位都按它回答。
@@ -56,51 +56,6 @@ pub(super) fn default_background(palette: &ColorPalette, scheme: &ColorScheme) -
   palette.background.unwrap_or(scheme.background)
 }
 
-/// 颜色查询（OSC 4/10/11/12）要回的有效颜色：程序改写过的优先，否则用当前主题。
-/// 索引 0..16 是 ANSI 色、16..256 是色立方与灰阶；命名槽只有前景/背景/光标。
-pub(super) fn query(slot: ColorSlot, palette: &ColorPalette, scheme: &ColorScheme) -> Rgb {
-  match slot {
-    ColorSlot::Indexed(index) => match palette.indexed[index as usize] {
-      Some(rgb) => u32_to_rgb(rgb),
-      None => u32_to_rgb(indexed_color(index, scheme)),
-    },
-    ColorSlot::Foreground => match palette.foreground {
-      Some(rgb) => u32_to_rgb(rgb),
-      None => u32_to_rgb(scheme.foreground),
-    },
-    ColorSlot::Background => match palette.background {
-      Some(rgb) => u32_to_rgb(rgb),
-      None => u32_to_rgb(scheme.background),
-    },
-    // 光标槽位回答有效光标色（ADR-022 决策 7）
-    ColorSlot::Cursor => u32_to_rgb(cursor_color(palette, scheme)),
-  }
-}
-
-/// 颜色查询（OSC 4/10/11/12）的应答字节：`ESC ] <prefix> ; rgb:… ST`，每通道
-/// 双写两位十六进制，结尾固定 ST——kitty/ghostty 口径，不镜像查询结尾（分歧
-/// 记录见 ADR-050 §4、ADR-051 §2.1）。三后端的应答都从这一份格式化器产出，
-/// adapter 不得自带格式（GLOSSARY「查询应答」）。
-pub fn reply(slot: ColorSlot, rgb: Rgb) -> String {
-  format!(
-    "\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\",
-    prefix = slot_prefix(slot),
-    r = rgb.r,
-    g = rgb.g,
-    b = rgb.b
-  )
-}
-
-/// 查询槽位 → 应答里的 OSC 前缀。
-fn slot_prefix(slot: ColorSlot) -> String {
-  match slot {
-    ColorSlot::Indexed(index) => format!("4;{index}"),
-    ColorSlot::Foreground => "10".to_owned(),
-    ColorSlot::Background => "11".to_owned(),
-    ColorSlot::Cursor => "12".to_owned(),
-  }
-}
-
 /// SGR 2（dim）比照终端惯例压到 2/3 亮度。
 pub(super) fn dim(rgb: u32) -> u32 {
   let r = ((rgb >> 16) & 0xff) * 2 / 3;
@@ -125,6 +80,12 @@ fn indexed_color(index: u8, scheme: &ColorScheme) -> u32 {
   if index < 16 {
     return scheme.ansi[index as usize];
   }
+  indexed_color_tail(index)
+}
+
+/// 256 色的 16..256 段：6×6×6 色立方与灰阶，与主题无关。后端自答颜色查询
+/// 时按主题默认色的索引槽复用这一段（ADR-060 步骤 1c）。
+pub(super) fn indexed_color_tail(index: u8) -> u32 {
   if index < 232 {
     let index = index - 16;
     let levels: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -165,50 +126,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod query_tests {
-  use super::{cursor_color, default_background, default_foreground, query, reply};
-  use crate::backend::{ColorPalette, ColorSlot, Rgb};
+mod palette_tests {
+  use super::{cursor_color, default_background, default_foreground};
+  use crate::backend::ColorPalette;
   use zhimaterm_base::theme::default_theme;
-
-  #[test]
-  fn answers_named_and_indexed_slots_from_the_palette() {
-    let scheme = default_theme().scheme;
-    let palette = ColorPalette::new();
-
-    assert_eq!(
-      query(ColorSlot::Foreground, &palette, &scheme).r,
-      (scheme.foreground >> 16) as u8
-    );
-    assert_eq!(
-      query(ColorSlot::Background, &palette, &scheme).r,
-      (scheme.background >> 16) as u8
-    );
-    // 索引色沿用 ANSI 前缀：索引 1 与命名红一致
-    assert_eq!(query(ColorSlot::Indexed(1), &palette, &scheme).r, 0xe0);
-    assert_eq!(query(ColorSlot::Indexed(1), &palette, &scheme).g, 0x6c);
-  }
-
-  #[test]
-  fn program_overrides_win_over_the_builtin_palette() {
-    let scheme = default_theme().scheme;
-    let mut palette = ColorPalette::new();
-    palette.foreground = Some(0x000000);
-
-    let slot = ColorSlot::Foreground;
-    assert_eq!(query(slot, &palette, &scheme).r, 0);
-    assert_eq!(query(slot, &palette, &scheme).g, 0);
-    assert_eq!(query(slot, &palette, &scheme).b, 0);
-  }
-
-  #[test]
-  fn cursor_query_answers_the_scheme_cursor_color() {
-    let scheme = default_theme().scheme;
-    let palette = ColorPalette::new();
-    assert_eq!(
-      query(ColorSlot::Cursor, &palette, &scheme).r,
-      (scheme.cursor >> 16) as u8
-    );
-  }
 
   /// 光标有效色：程序 OSC 12 改写优先，否则主题光标色——绘制与应答同口径。
   #[test]
@@ -240,19 +161,5 @@ mod query_tests {
     palette.background = Some(0x778899);
     assert_eq!(default_background(&palette, &scheme), 0x778899);
     assert_eq!(default_background(&ColorPalette::new(), &scheme), scheme.background);
-  }
-
-  #[test]
-  fn reply_formats_doubled_hex_with_a_fixed_st_terminator() {
-    let rgb = Rgb {
-      r: 0xd9,
-      g: 0xe2,
-      b: 0xea,
-    };
-    assert_eq!(reply(ColorSlot::Foreground, rgb), "\x1b]10;rgb:d9d9/e2e2/eaea\x1b\\");
-    assert_eq!(
-      reply(ColorSlot::Indexed(4), Rgb { r: 0, g: 0xab, b: 0xff }),
-      "\x1b]4;4;rgb:0000/abab/ffff\x1b\\"
-    );
   }
 }

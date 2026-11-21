@@ -301,10 +301,6 @@ impl Terminal {
     self.set(Opt::GLYPH_PROTOCOL, &enabled)
   }
 
-  pub(super) fn set_device_attributes(&mut self, attrs: Option<ffi::DeviceAttributes>) {
-    self.shared_mut().device_attributes = attrs;
-  }
-
   // ---------- 事件 ----------
 
   /// 取走回调攒下的事件（按 VT 流产生的顺序）。

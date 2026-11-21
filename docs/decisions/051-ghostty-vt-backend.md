@@ -55,10 +55,12 @@ XTGETTCAP 等查询应答全部由核心内部生成。ADR-050 的后端契约
   就没有应答；ANSI 16 色一并推入调色板。
 - **颜色查询应答转共享层**：核心自答走 `PtyWrite`，后端识别 OSC 4/10/11/12
   应答字节转成 `TermRequest::ColorRequest`，由共享层按主题色格式化——
-  应答字节与另两个后端同一套。
+  应答字节与另两个后端同一套。（2026-11-21：ADR-060 步骤 1c 已执行——
+  拦截删除，核心自答直通。）
 - **DA1 对齐 alacritty 声明**（VT102 无特性）：程序按 DA1 分支能力，
   ghostty 默认自报 VT300 级会让同一批 TUI 走不同分支。DA2/DA3 仍为
-  ghostty 默认值（契约不锁）。
+  ghostty 默认值（契约不锁）。（2026-11-21：ADR-060 步骤 1b 已执行——
+  对齐删除，核心默认自报 `\x1b[?62;22c`，DA1 差异显形。）
 - 契约另两个小扩展：`set_cell_pixels`（核心自答 CSI 14/16/18t 需要格像素，
   worker 随 Resize 命令传入）。
 
@@ -82,6 +84,14 @@ XTGETTCAP 等查询应答全部由核心内部生成。ADR-050 的后端契约
   前者除触发核心自答外，还是 ghostty 调色板 effective/default 差分的
   基线（不推默认色则程序对 fg/bg/cursor 的 OSC 改写全部被判未改写）；
   后者是核心自答 CSI 14/16/18t 的几何输入。二者 doc 改写为机制表述。
+
+> 2026-11-21：ADR-060 步骤 1c 已执行——「单点格式化 + 固定 ST 统一」废除，
+> 应答字节回归各后端原样（alacritty 消费上游格式器、ghostty 直通核心
+> 应答、termwiz 后端自答），路由保留；`set_theme_defaults` /
+> `set_cell_pixels` 保留。实测修正：ghostty 核心的颜色应答**同样按查询
+> 结尾镜像**（BEL 查询回 BEL），上文「kitty/ghostty 固定 ST」是本仓共享
+> 格式器的选择而非核心行为——三后端中仅 termwiz（解析器不外露结尾符）
+> 固定 ST。
 
 ### 2.2 修订（2026-11）：视口批量物化替代懒刷新缓存
 
@@ -111,7 +121,7 @@ XTGETTCAP 等查询应答全部由核心内部生成。ADR-050 的后端契约
 | resize 重排锚定 | 内容锚定光标：缩放时溢出行进历史，光标位置稳定 | 内容锚定顶部：全部内容留在屏上，光标随内容移动（kitty 同向）；diff 差分对这 3 个场景只断言结构不变量（行占格不超列数、光标在界内），不做整帧对比 |
 | 滚动历史上限 | 精确按行数 | 页粒度修剪（约 400 KiB/页），实际保留行数略高；上报值钳回配置上限，多出的内容不可达 |
 | 制表位表 | alacritty 不外露按 8 列近似；termwiz 跟踪真实 HTS/TSD | 核心不外露，按 8 列近似 |
-| OSC 应答色 | 共享层按主题色格式化 | 拦截核心应答转 `ColorRequest`，同主题色口径；DA2/DA3/XTVERSION 为 ghostty 默认值 |
+| OSC 应答色 | 共享层按主题色格式化 | 拦截核心应答转 `ColorRequest`，同主题色口径；DA2/DA3/XTVERSION 为 ghostty 默认值（ADR-060 步骤 1c 后：三后端各自原生应答，`ColorRequest` 已删） |
 | 标题 reset | alacritty 有 `ResetTitle` 事件 | 核心无对应事件，丢弃 |
 | 2026 同块定格 | vte 内部缓冲，天然正确 | 预切块覆盖；「BSU 序列跨字节块断裂 + 内容跟在同一块」的边缘仍会早显一帧（150 ms 上限内） |
 
@@ -127,7 +137,9 @@ XTGETTCAP 等查询应答全部由核心内部生成。ADR-050 的后端契约
   好消息是依赖面更小：不再有第三方封装 crate，绑定的 allowlist 就是
   本后端对 C API 的全部触面。
 - Linux/Windows 未实测：libghostty-vt 官方仅承诺 macOS runtime，三平台
-  运行验证列入后续工作。
+  运行验证列入后续工作。（2026-11 修订：上游 1.0 发布后 CI 实测矩阵已含
+  Windows/FreeBSD/Android/wasm32，macOS-only 承诺作废；真实使用验证
+  仍欠，转为 ADR-060 步骤 2 的闸门。）
 
 ## 验证
 

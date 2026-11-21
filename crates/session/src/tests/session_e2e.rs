@@ -1097,16 +1097,16 @@ fn mouse_reporting_reaches_the_program_instead_of_selecting() {
 #[test]
 #[cfg_attr(
   windows,
-  ignore = "ConPTY 的 conhost 会把 OSC 10 查询从输出流吃掉，宿主模型收不到（ADR-025 实测）；应答行为由 colors::query_tests 单测覆盖"
+  ignore = "ConPTY 的 conhost 会把 OSC 10 查询从输出流吃掉，宿主模型收不到（ADR-025 实测）；应答行为由 contract.rs 的 color_queries 契约测试覆盖"
 )]
 fn color_queries_are_answered_with_the_effective_palette() {
   let (session, events) = spawn(80, 24);
-  // 期望值：DEFAULT_FOREGROUND = 0xd9e2ea，每个分量写两遍；结尾固定 ST
-  // （kitty/ghostty 口径，ADR-051 §2.1），整条应答 25 字节
+  // 期望值：DEFAULT_FOREGROUND = 0xd9e2ea，每个分量写两遍；结尾镜像查询的
+  // BEL（alacritty 上游 vte 行为，ADR-060 步骤 1c），整条应答 24 字节
   let probe = concat!(
     "stty raw -echo; ",
-    r#"printf '\033]10;?\007'; reply=$(head -c 25); stty sane; "#,
-    r#"if [ "$reply" = "$(printf '\033]10;rgb:d9d9/e2e2/eaea\033\\')" ]; then "#,
+    r#"printf '\033]10;?\007'; reply=$(head -c 24); stty sane; "#,
+    r#"if [ "$reply" = "$(printf '\033]10;rgb:d9d9/e2e2/eaea\007')" ]; then "#,
     r#"printf 'COLOR-%s\n' FG-OK; else printf 'COLOR-%s\n' FG-WRONG; fi"#,
   );
   type_line(&session, probe);

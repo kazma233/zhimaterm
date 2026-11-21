@@ -57,8 +57,12 @@ _Avoid_: 鼠标路由、滚轮转发开关
 _Avoid_: 输入法缓冲区、preedit 状态、组合区状态机（指散落在视图里的旧形态）
 
 **查询应答（query reply）**:
-终端查询（OSC 4/10/11/12 颜色、CSI 14t 尺寸）的应答字节归共享层单点格式化（`terminal/colors.rs` 的 `reply`：双写十六进制、固定 ST 结尾——kitty/ghostty 口径）；`TermRequest` 只携带语义载荷（槽位/尺寸查询意图），不携带格式。核心自答的后端（ghostty）把应答字节拦截翻译成同一语义载荷，不得自带格式器。请求分派（TermRequest → 写回 PTY / 交给 UI）单点在 worker 的请求应答策略，CSI 14t 的字节拼装（`text_area_size_reply`）同处，颜色应答仍调共享层。
-_Avoid_: ColorFormatter/SizeFormatter 闭包、逐后端应答格式器、上游格式器包装、镜像查询结尾符
+终端查询（OSC 4/10/11/12 颜色、DA/DSR/CPR、CSI 14t 尺寸）的应答字节由各后端原生产生（ADR-060 步骤 1c）：alacritty 消费上游格式器、ghostty 直通核心自答——两者都按查询结尾镜像（BEL 查询回 BEL，实测含 ghostty 核心）；termwiz 后端自答固定 ST（其 OSC 分发不携带结尾符，无法镜像）。`TermRequest::PtyWrite` 是应答的唯一通道；主题默认色经 `TerminalCore::set_theme_defaults` 推入后端作为应答输入（程序改写槽优先），没推则不应答。CSI 14t 例外：alacritty/termwiz 走 `TextAreaSizeRequest`，由 worker 按 Resize 记账的格像素拼装（`text_area_size_reply`），ghostty 核心自答。
+_Avoid_: 共享层格式器、单点格式化、固定 ST 统一（已废除的旧口径）、ColorFormatter 闭包跨 TermRequest 传递（alacritty 的格式器止步其后端内部）
+
+**原样接入（as-is VT integration）**:
+VT 后端适配层的职责边界（ADR-060）：核心按上游原样接入，适配层只做「字节 → 网格」的契约桥接（FFI 绑定、快照/物化形状对接、查询应答路由）；后端间的上游差异（宽度口径、DA1 声明、应答结尾符等）原样暴露并在分歧表记账，不在适配层抹平。有真实契约支持的机制（如 mode 2026 渲染端定格）不算兜底，保留。
+_Avoid_: 零适配（桥接仍然存在）、行为对齐层、兼容修复（指被本原则禁止的抹平逻辑）
 
 **会话视图归约（SessionViewState）**:
 每个终端格的事件状态机，两种输入物种：控制事件（`ControlEvent`，worker 侧报告的事）与**视图信号（SessionSignal）**（视图侧发生的事——时钟到点、用户取消连接、看过响铃、搜索开关、操作回执、手动/取消重连）× 视图状态（结束态、状态文案、标题、指针、密码询问、LANG、日志警告、工作目录、重连计划……）经 `views::session_state` 折进状态，产出 `SessionEffect`（写剪贴板、建密码框、答复会话、启动时钟、通知落盘）由视图执行。折算器是状态（含重连计划）的唯一写者，「会话结束焦点必离输入网格——落到格内非输入容器，不是无焦点（无焦点时按键派发不经过应用层，死会话裸键全部失灵）」是被测试锁定的不变量；钥匙串查找以闭包传入；面板句柄与状态流等资源事件留在视图适配。无头可测：输入 × 状态 → 状态 + 效果。按键裁决同族：`views::terminal_keys` 的 keydown 守卫链与死会话裸键只有一份纯决策（视图 keydown / IME 文本管道 / 应用层根节点共用）。

@@ -32,28 +32,24 @@ use zhimaterm_base::theme::ColorScheme;
 /// 归这里，settings 的同名设置项缺省时引用它（依赖方向 settings → terminal）。
 pub const DEFAULT_SCROLLING_HISTORY: usize = 10_000;
 
-use self::backend::{ColorSlot, GridCell, GridPoint, Rgb, RowBuffer, TerminalCore};
-use colors::{cursor_color, default_background, default_foreground, dim, query, resolve};
+use self::backend::{GridCell, GridPoint, RowBuffer, TerminalCore};
+use colors::{cursor_color, default_background, default_foreground, dim, resolve};
 use search::SearchMatch;
 use selection::{Selection, SelectionType};
 
 /// 窗口尺寸：查询应答（CSI 14t）要用的字符与像素尺寸。
 pub use self::backend::WindowSize;
 
-/// 颜色查询应答的单点格式化（GLOSSARY「查询应答」）：worker 拿 `query_color`
-/// 的有效色来这里拼 OSC 4/10/11/12 应答字节。
-pub use colors::reply;
-
 /// 回滚转录的持久化格式：编解码与逻辑行装配住 `terminal::transcript`
 /// （文件格式与 VT 模型是两条变更轴，ADR-039/040）。
 pub use transcript::{StoredLine, StoredRun, StoredStyle};
 
 /// 终端核心提出的请求：核心只管语义，跨到 PTY 或 UI 的动作必须由外面执行。
-/// 请求只携带语义载荷（槽位、意图），不携带格式——应答字节归共享层单点
-/// 格式化（见 GLOSSARY「查询应答」）。
+/// 查询应答字节由各后端原生产生（ADR-060 步骤 1c，见 GLOSSARY「查询应答」），
+/// `PtyWrite` 是应答的唯一通道；CSI 14t 由 worker 拼装（`TextAreaSizeRequest`）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum TermRequest {
-  /// 终端查询的应答（设备属性、状态、模式、尺寸）。必须写回 PTY，
+  /// 终端查询的应答（设备属性、状态、模式、颜色、尺寸）。必须写回 PTY，
   /// 否则前台程序收不到应答，会降级功能或等在超时上。
   PtyWrite(String),
   Title(String),
@@ -61,11 +57,6 @@ pub enum TermRequest {
   Bell,
   /// 前台程序请求把文本写入系统剪贴板（OSC 52）。读取请求由配置直接拒绝。
   ClipboardStore(String),
-  /// 颜色查询（OSC 4/10/11/12）：只报槽位，worker 用 `query_color` 取
-  /// 有效色后经共享格式器拼应答。
-  ColorRequest {
-    slot: ColorSlot,
-  },
   /// 文本区像素尺寸查询（CSI 14t）：格像素尺寸由 worker 随 Resize 记账，
   /// 应答同样由 worker 侧拼。
   TextAreaSizeRequest,
@@ -644,8 +635,9 @@ impl TerminalModel {
     self.push_theme_defaults();
   }
 
-  /// 把主题默认色推给后端：颜色查询由核心自答的后端（ghostty）需要，
-  /// 其余后端无操作。语义色 → RGB 的换算与快照解析同一套。
+  /// 把主题默认色推给后端：颜色查询应答的输入（ADR-060 步骤 1c）——ghostty
+  /// 推给核心自答，alacritty/termwiz 存 `ThemeDefaults`。语义色 → RGB 的
+  /// 换算与快照解析同一套。
   fn push_theme_defaults(&mut self) {
     let scheme = Arc::clone(&self.scheme);
     let mut ansi = [backend::Rgb { r: 0, g: 0, b: 0 }; 16];
@@ -866,11 +858,6 @@ impl TerminalModel {
     }
     self.core.read_row(line, &mut self.buffer);
     self.buffer.cells.get(column).is_some_and(|cell| cell.spacer)
-  }
-
-  /// 颜色查询的有效颜色：程序改写过的优先，否则用当前主题。
-  pub fn query_color(&self, slot: ColorSlot) -> Rgb {
-    query(slot, self.core.palette(), &self.scheme)
   }
 
   /// 当前终端尺寸（列、行），尺寸应答需要。

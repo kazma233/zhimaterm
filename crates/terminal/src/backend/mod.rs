@@ -134,6 +134,40 @@ pub enum ColorSlot {
   Cursor,
 }
 
+/// 主题默认色（ADR-060 步骤 1c）：颜色查询应答的输入，模型经
+/// [`TerminalCore::set_theme_defaults`] 推入。后端自答颜色查询时程序改写槽
+/// 优先，其余槽位按它回答；没推入则不应答（与 ghostty 核心同口径）。
+#[derive(Clone, Copy)]
+pub(super) struct ThemeDefaults {
+  foreground: Rgb,
+  background: Rgb,
+  cursor: Rgb,
+  ansi: [Rgb; 16],
+}
+
+impl ThemeDefaults {
+  pub(super) fn new(foreground: Rgb, background: Rgb, cursor: Rgb, ansi: &[Rgb; 16]) -> Self {
+    Self {
+      foreground,
+      background,
+      cursor,
+      ansi: *ansi,
+    }
+  }
+
+  /// 槽位的主题默认色：索引 0..16 是 ANSI 调色板，16..256 是与主题无关的
+  /// 色立方与灰阶。
+  fn slot_rgb(&self, slot: ColorSlot) -> Rgb {
+    match slot {
+      ColorSlot::Indexed(index @ 0..=15) => self.ansi[index as usize],
+      ColorSlot::Indexed(index) => crate::colors::u32_to_rgb(crate::colors::indexed_color_tail(index)),
+      ColorSlot::Foreground => self.foreground,
+      ColorSlot::Background => self.background,
+      ColorSlot::Cursor => self.cursor,
+    }
+  }
+}
+
 /// 程序经 OSC 4/10/11/12 改写过的颜色槽。
 ///
 /// 改写优先于主题：程序说「前景色是 #112233」，主题换色不应盖掉它。
@@ -552,14 +586,14 @@ pub(super) trait TerminalCore: GridView {
   fn stop_sync(&mut self);
 
   /// 同步单元格像素尺寸：核心自答几何查询（CSI 14/16/18t）的后端需要它
-  /// 作为应答输入，由 worker 随 Resize 命令传入；应答经共享层格式化的
+  /// 作为应答输入，由 worker 随 Resize 命令传入；应答走 worker 拼装的
   /// 后端用不到，默认无操作。
   fn set_cell_pixels(&mut self, _width: u16, _height: u16) {}
 
-  /// 推送主题默认色。颜色查询由核心自答的后端需要它：既是核心对
-  /// OSC 10/11/12 查询产生应答的前提，也是其调色板「程序改写槽」差分
-  /// （effective vs default）的基线——不推则改写全部被判未改写。应答经
-  /// 共享层格式化的后端用不到，默认无操作。
+  /// 推送主题默认色：颜色查询自答的后端拿它当应答输入（ghostty 推给核心
+  /// 自答，alacritty/termwiz 存 `ThemeDefaults`），没推则不应答；对 ghostty
+  /// 还是调色板「程序改写槽」差分（effective vs default）的基线——不推则
+  /// 改写全部被判未改写。
   fn set_theme_defaults(&mut self, _foreground: Rgb, _background: Rgb, _cursor: Rgb, _ansi: &[Rgb; 16]) {}
 }
 

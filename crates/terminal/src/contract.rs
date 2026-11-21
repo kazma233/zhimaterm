@@ -275,10 +275,13 @@ contract!(sgr_mouse_reporting_uses_decimal_coordinates, |model, label| {
 });
 
 contract!(device_queries_are_answered, |model, label| {
+  // DA1 分后端原样断言（ADR-060 步骤 1b）：alacritty/termwiz 报 VT102，
+  // ghostty 核心默认自报 VT220 级 + ANSI 色特性——不再对齐
   model.advance(b"\x1b[c");
+  let expected_da1 = if label == "ghostty" { "\x1b[?62;22c" } else { "\x1b[?6c" };
   assert_eq!(
     model.take_requests(),
-    [super::TermRequest::PtyWrite("\x1b[?6c".into())],
+    [super::TermRequest::PtyWrite(expected_da1.into())],
     "{label}"
   );
   model.advance(b"\x1b[5n");
@@ -404,12 +407,52 @@ contract!(color_queries_report_the_active_slot, |model, label| {
   model.advance(b"\x1b]10;rgb:11/22/33\x07");
   model.advance(b"\x1b]11;?\x07");
   let requests = model.take_requests();
-  let [super::TermRequest::ColorRequest { slot }] = requests.as_slice() else {
-    panic!("{label}: OSC 11 查询应产生一个颜色请求，得到 {requests:?}");
+  // 应答分后端原样（ADR-060 步骤 1c）：字节由各后端自己产生，PtyWrite
+  // 是应答唯一通道
+  let [super::TermRequest::PtyWrite(reply)] = requests.as_slice() else {
+    panic!("{label}: OSC 11 查询应产生一个应答，得到 {requests:?}");
   };
-  assert_eq!(*slot, crate::backend::ColorSlot::Background, "{label}");
+  let terminator = match label {
+    // alacritty（上游 vte）与 ghostty（核心）都按查询结尾镜像：BEL 查询
+    // 回 BEL
+    "alacritty" | "ghostty" => "\x07",
+    // termwiz 的 OSC 分发不携带查询结尾符，后端自答固定 ST
+    _ => "\x1b\\",
+  };
+  assert!(reply.starts_with("\x1b]11;rgb:"), "{label}: {reply:?}");
+  assert!(reply.ends_with(terminator), "{label}: {reply:?}");
   assert_eq!(model.snapshot().default_foreground, 0x112233, "{label}");
+  // 程序改写槽优先于主题默认：改写后再查，应答回改写值
+  model.advance(b"\x1b]11;rgb:44/55/66\x07");
+  model.advance(b"\x1b]11;?\x07");
+  let requests = model.take_requests();
+  let [super::TermRequest::PtyWrite(reply)] = requests.as_slice() else {
+    panic!("{label}: 改写后的 OSC 11 查询应产生一个应答，得到 {requests:?}");
+  };
+  assert!(reply.contains("rgb:4444/5555/6666"), "{label}: {reply:?}");
+  // 索引槽（OSC 4）也自答
+  model.advance(b"\x1b]4;1;?\x07");
+  let requests = model.take_requests();
+  let [super::TermRequest::PtyWrite(reply)] = requests.as_slice() else {
+    panic!("{label}: OSC 4 查询应产生一个应答，得到 {requests:?}");
+  };
+  assert!(reply.starts_with("\x1b]4;1;rgb:"), "{label}: {reply:?}");
+  assert!(reply.ends_with(terminator), "{label}: {reply:?}");
 });
+
+/// alacritty 的颜色应答镜像查询结尾符（上游 vte 行为）：ST 结尾的查询
+/// 回 ST（ADR-060 步骤 1c，另两个后端固定 ST）。
+#[test]
+fn alacritty_color_reply_mirrors_the_st_terminated_query() {
+  let mut model = TerminalModel::with_backend(backend::BackendKind::Alacritty, 40, 3, 30);
+  model.advance(b"\x1b]11;?\x1b\\");
+  let requests = model.take_requests();
+  let [super::TermRequest::PtyWrite(reply)] = requests.as_slice() else {
+    panic!("ST 结尾的 OSC 11 查询应产生一个应答，得到 {requests:?}");
+  };
+  assert!(reply.starts_with("\x1b]11;rgb:"), "{reply:?}");
+  assert!(reply.ends_with("\x1b\\"), "{reply:?}");
+}
 
 contract!(alt_screen_and_clear_operations, |model, label| {
   model.advance(b"visible\r\n\x1b[?1049halt only\x1b[?1049l");
@@ -683,26 +726,6 @@ fn ghostty_cluster_width_reaches_the_snapshot() {
   let row = &snapshot.rows[0];
   assert_eq!(row[0].text, "⚠️");
   assert_eq!(row[0].columns, 2, "⚠️ 按簇占 2 格（核心原生口径）");
-  let total: usize = row.iter().map(|run| run.columns).sum();
-  assert_eq!(total, 34, "整行占格与其他终端一致（逐码点是 33）");
-}
-
-/// termwiz 后端的簇宽度直达快照（ADR-050 有意分歧）：共享层只认 GridCell
-/// 的占格数，回写加宽的簇在画面上占 2 格，总占格与生成方的簇口径一致。
-/// alacritty 后端逐码点定宽（⚠️ 占 1 格），不参与本断言。
-#[test]
-fn termwiz_cluster_width_reaches_the_snapshot() {
-  let mut model = TerminalModel::with_backend(backend::BackendKind::Termwiz, 40, 3, 30);
-  model.advance("⚠️ 原：✅ 无关联 → 现：❌ 结果冲突".as_bytes());
-  // 光标所在列的空白格不算默认尾部空白（is_default_style 对 cursor 返回
-  // false），先移开光标再快照，行尾裁剪才到内容末
-  model.advance(b"\x1b[1;1H");
-  let snapshot = model.snapshot();
-  let row = &snapshot.rows[0];
-  assert_eq!(row[0].text, "⚠️");
-  assert_eq!(row[0].columns, 2, "⚠️ 按簇占 2 格");
-  assert_eq!(row[1].text, " ");
-  assert_eq!(row[2].text, "原", "宽字符独立成段（既有口径）");
   let total: usize = row.iter().map(|run| run.columns).sum();
   assert_eq!(total, 34, "整行占格与其他终端一致（逐码点是 33）");
 }

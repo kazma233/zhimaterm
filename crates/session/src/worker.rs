@@ -1059,7 +1059,7 @@ fn write_bytes(writer: &mut Option<Box<dyn Write + Send>>, bytes: &[u8]) -> Resu
 
 /// CSI 14t（文本区像素尺寸）的应答：`\x1b[4;{height};{width}t`，高在前、
 /// 按格×行列（xterm 规格）。格像素由 Resize 命令记账，应答字节在此单点
-/// 拼装（颜色应答同归共享层，见 GLOSSARY「查询应答」）。
+/// 拼装（颜色应答已归各后端原生产生，ADR-060 步骤 1c）。
 fn text_area_size_reply(size: WindowSize) -> String {
   let height = u32::from(size.cell_height) * size.lines as u32;
   let width = u32::from(size.cell_width) * size.columns as u32;
@@ -1074,10 +1074,10 @@ enum RequestAction {
 }
 
 /// 核心请求的分派（GLOSSARY「查询应答」）：纯决策无头可测——喂 `TermRequest`
-/// 变体断言动作。查询应答按请求序产出，颜色走共享层格式化，CSI 14t 在
-/// [`text_area_size_reply`] 单点拼装；鼠标指针形状按程序是否接管鼠标折算。
-/// `boot_title` 是 ConPTY 的开机标题（见 transport::local），等值的 OSC 标题
-/// 降级为重置。
+/// 变体断言动作。查询应答按请求序产出：应答字节由各后端原生产生、经
+/// `PtyWrite` 直写，CSI 14t 在 [`text_area_size_reply`] 单点拼装；鼠标指针
+/// 形状按程序是否接管鼠标折算。`boot_title` 是 ConPTY 的开机标题（见
+/// transport::local），等值的 OSC 标题降级为重置。
 fn plan_requests(
   requests: Vec<TermRequest>,
   terminal: &TerminalModel,
@@ -1102,9 +1102,6 @@ fn plan_requests(
       TermRequest::ResetTitle => RequestAction::Control(ControlEvent::Title(String::new())),
       TermRequest::Bell => RequestAction::Control(ControlEvent::Bell),
       TermRequest::ClipboardStore(text) => RequestAction::Control(ControlEvent::ClipboardStore(text)),
-      TermRequest::ColorRequest { slot } => {
-        RequestAction::Pty(zhimaterm_terminal::reply(slot, terminal.query_color(slot)))
-      }
       TermRequest::TextAreaSizeRequest => {
         let (columns, lines) = terminal.size();
         RequestAction::Pty(text_area_size_reply(WindowSize {
@@ -1295,7 +1292,7 @@ mod tests {
   use smol::channel::bounded;
   use std::sync::mpsc;
   use std::time::{Duration, Instant};
-  use zhimaterm_terminal::backend::{BackendKind, ColorSlot};
+  use zhimaterm_terminal::backend::BackendKind;
   use zhimaterm_terminal::{StoredLine, StoredRun, StoredStyle, TermRequest, TerminalModel, WindowSize};
 
   fn resize(columns: usize, lines: usize) -> SessionCommand {
@@ -1385,8 +1382,8 @@ mod tests {
   }
 
   /// 请求分派矩阵（GLOSSARY「查询应答」）：应答进 Pty（含直通），界面事件
-  /// 进 Control；CSI 14t 高在前，颜色走共享层双写十六进制格式，鼠标形状按
-  /// 程序是否接管鼠标折算。
+  /// 进 Control；CSI 14t 高在前；颜色应答不走 worker（各后端原生直写 PTY，
+  /// ADR-060 步骤 1c）；鼠标形状按程序是否接管鼠标折算。
   #[test]
   fn plan_requests_routes_each_variant_in_order() {
     let mut terminal = TerminalModel::with_backend(BackendKind::default(), 80, 24, 200);
@@ -1398,9 +1395,6 @@ mod tests {
         TermRequest::ResetTitle,
         TermRequest::Bell,
         TermRequest::ClipboardStore("copied".into()),
-        TermRequest::ColorRequest {
-          slot: ColorSlot::Background,
-        },
         TermRequest::TextAreaSizeRequest,
         TermRequest::MouseCursorDirty,
       ],
@@ -1418,10 +1412,6 @@ mod tests {
     ));
     assert!(
       matches!(actions.next(), Some(RequestAction::Control(ControlEvent::ClipboardStore(text))) if text == "copied")
-    );
-    // OSC 11 应答：共享层格式（双写十六进制 + ST 结尾）
-    assert!(
-      matches!(actions.next(), Some(RequestAction::Pty(reply)) if reply.starts_with("\x1b]11;rgb:") && reply.ends_with("\x1b\\"))
     );
     // CSI 14t：80 列 × 8 宽、24 行 × 16 高
     assert!(matches!(actions.next(), Some(RequestAction::Pty(reply)) if reply == "\x1b[4;384;640t"));
