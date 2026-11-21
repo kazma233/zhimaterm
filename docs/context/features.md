@@ -385,18 +385,18 @@
 
 ## 终端核心事件
 
-终端核心（`alacritty_terminal`）只处理语义，跨到 PTY 或 UI 的动作通过 `EventListener` 交出来。
-`TerminalModel` 用 `TermRequestProxy` 把事件收进队列，worker 每轮排空一次：
+终端核心（双后端：alacritty / ghostty，ADR-060）只处理语义，跨到 PTY 或 UI 的动作经
+`TermRequest` 交出来，worker 每轮排空一次：
 
-- `PtyWrite`：终端查询的应答（DA1 `CSI c`、DSR 5/6、DECRQM、键盘模式、`CSI 18t`），
-  由 worker 按前台程序输出的顺序写回 PTY。不写回会让程序降级功能或等在超时上。
+- `PtyWrite`：终端查询的应答（DA1 `CSI c`、DSR 5/6、DECRQM、键盘模式、OSC 4/10/11/12
+  颜色、`CSI 18t`）——应答字节由各后端原生产生（alacritty 消费上游格式器、ghostty
+  核心自答直通，结尾符镜像查询；主题默认色经 `set_theme_defaults` 推入），worker
+  按前台程序输出的顺序写回 PTY。不写回会让程序降级功能或等在超时上。
 - `Title`/`ResetTitle`：OSC 0/2 标题 → 控制事件 → 窗口标题与侧栏会话行；空标题按核心语义回到默认标题。
 - `Bell`：BEL → 控制事件 → 该会话的侧栏行点亮「🔔 响铃」标记（切到该标签或点进该格即清除）；
   底栏不显示响铃——底栏是常驻信息区，不是通知区。
 
 - `ClipboardStore`（OSC 52 写剪贴板）按 ADR-002 的策略放行：程序可以写本地剪贴板，
   读取请求在核心配置层就被拒绝。
-- `ColorRequest`：颜色查询（OSC 4/10/11/12）按索引回**有效颜色**——程序改写过的优先，
-  否则用内置调色板（0..256 索引色、256 前景、257 背景、258 光标、259..267 dim 系列）。
 - `TextAreaSizeRequest`：`CSI 14t` 用 UI 上报的格子像素尺寸回答；PTY 的像素尺寸也用同一份数据。
 - `MouseCursorDirty`：程序开关鼠标上报时切换指针形状（接管 → 箭头，交还 → 文本光标）。

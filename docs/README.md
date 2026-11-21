@@ -80,7 +80,7 @@
 - [ADR-057：窗口顶栏——自绘标题栏统一承载全局入口](decisions/057-window-title-bar.md)：appears_transparent + app_owns_titlebar_drag（macOS）/ Client 装饰请求（Linux），会话入口、活动会话标题与设置/快捷键/主题色板收编进 34px 顶栏，拖拽状态机对齐 Zed，侧栏瘦身为纯会话列表（取代 ADR-041 §1/§2 位置约定）。
 - [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。
 - [ADR-059：连字开关与手输字体特性](decisions/059-font-ligatures-and-features.md)：两个设置项只作用终端网格字体，calt 唯一所有者是连字开关，表单严格校验、手改文件跳坏项留好项，测量与渲染同源。
-- [ADR-060：VT 后端原样接入与双后端收敛](decisions/060-as-is-vt-backend-convergence.md)：适配层只做「字节→网格」契约桥接，上游差异原样暴露、分歧表记账不修齐；终态 alacritty + ghostty 双后端（termwiz 退役），分三步——砍兼容层（簇回写/DA1 对齐/应答统一）→ ghostty 过 Windows/Linux 真实使用验证 → 切默认并退役 termwiz。
+- [ADR-060：VT 后端原样接入与双后端收敛](decisions/060-as-is-vt-backend-convergence.md)：适配层只做「字节→网格」契约桥接，上游差异原样暴露、分歧表记账不修齐；终态 alacritty + ghostty 双后端。进度：步骤 1（砍兼容层）与步骤 3 删除部分（termwiz 退役、枚举收窄）已执行（2026-11-21）；剩余步骤 2（ghostty Linux 真实使用验证）与切默认。
 
 ## 背景与调研（`context/`）
 

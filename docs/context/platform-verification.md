@@ -42,6 +42,19 @@
     sshd 的 SSH e2e），`cargo check --all-targets`、`cargo fmt --check` 通过；
     覆盖 ADR-035~040（布局持久化、重启恢复、全彩回滚）。
 
+### 2026-11-21（Windows）：ghostty 后端实机验证 + 三内核探针对照
+
+- 重建后实机跑 `scripts/term-style-probe.ps1`（Windows 探针），computer-use
+  截图逐节验证三内核：alacritty / termwiz（退役前最后构建）逐码点漂移
+  一致，ghostty 簇口径表 B 全对齐、标尺落格 vs16/skin/zwj = 3/3/3，
+  SGR 21 分歧（alacritty 取消粗体 vs termwiz 双下划线 vs ghostty 双下划线）
+  活体确认；SGR 4:0–4:5、256 色、真彩渐变、DEC 图形三内核全过。
+- 退役 termwiz 后（枚举收窄 alacritty/ghostty），Windows 实机
+  `cargo build` + 全量 `cargo test --workspace` 全绿；带 BOM 的
+  settings.json 实机复验（设置不再回退，ghostty 簇口径正常加载）。
+- 口径：这是 ghostty 后端 **Windows 真实使用验证的第一批记录**（ADR-060
+  步骤 2 的 Windows 半边）；Linux 半边与「切默认」决策仍待办（todo.md）。
+
 ### 2026-10-23 之后的批次（2026-10-30 补记，证据为提交记录）
 
 - **2026-10-24（Windows + WSL tester）**：SSH 转发/跳板/认证叠加 e2e 全量复验，

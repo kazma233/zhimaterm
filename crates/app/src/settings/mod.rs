@@ -621,7 +621,7 @@ mod tests {
       local_shell: Some("/bin/zsh".into()),
       local_workdir: Some("/tmp".into()),
       option_as_alt: true,
-      terminal_backend: zhimaterm_terminal::backend::BackendKind::Termwiz,
+      terminal_backend: zhimaterm_terminal::backend::BackendKind::Ghostty,
       text_editor: Some("vscode".into()),
     };
     assert_eq!(
@@ -638,7 +638,7 @@ mod tests {
         scrolling_history: Some(2_000),
         local_shell: Some("/bin/zsh".into()),
         local_workdir: Some("/tmp".into()),
-        terminal_backend: Some("termwiz".into()),
+        terminal_backend: Some("ghostty".into()),
         text_editor: Some("vscode".into()),
       },
       "12 个编辑字段全部落盘，theme 从现有设置抄回；特性串裁剪存储"

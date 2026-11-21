@@ -155,8 +155,8 @@ impl GhosttyCore {
   /// 滚动历史行数。备用屏没有历史。
   ///
   /// libghostty 按页粒度修剪历史，实际保留行数几乎总是略高于配置上限
-  /// （ADR-051）：上报值钳回配置上限，可观察行为与 alacritty/termwiz
-  /// 的「精确上限」口径一致，多出的内容不可达。
+  /// （ADR-051）：上报值钳回配置上限，可观察行为与 alacritty 的「精确
+  /// 上限」口径一致，多出的内容不可达。
   fn history_value(&self) -> usize {
     if self.mode_flag(Mode::ALT_SCREEN) {
       return 0;

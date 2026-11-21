@@ -18,28 +18,25 @@ use super::UnderlineKind;
 
 pub(super) mod alacritty;
 pub(super) mod ghostty;
-pub(super) mod termwiz;
 
 /// 终端核心后端。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendKind {
   #[default]
   Alacritty,
-  Termwiz,
   Ghostty,
 }
 
 impl BackendKind {
   /// 设置项的候选：即全部后端。
   pub fn available() -> &'static [BackendKind] {
-    &[BackendKind::Alacritty, BackendKind::Termwiz, BackendKind::Ghostty]
+    &[BackendKind::Alacritty, BackendKind::Ghostty]
   }
 
   /// 设置文件里的名字。
   pub fn name(self) -> &'static str {
     match self {
       BackendKind::Alacritty => "alacritty",
-      BackendKind::Termwiz => "termwiz",
       BackendKind::Ghostty => "ghostty",
     }
   }
@@ -48,16 +45,15 @@ impl BackendKind {
   pub fn display_name(self) -> &'static str {
     match self {
       BackendKind::Alacritty => "Alacritty",
-      BackendKind::Termwiz => "Termwiz",
       BackendKind::Ghostty => "Ghostty",
     }
   }
 
   /// 按设置文件的名字解析。名字不存在时回落默认——与主题的回落纪律
-  /// 一致，不报错。
+  /// 一致，不报错。termwiz 曾是候选（ADR-060 步骤 3 退役），存量设置里
+  /// 的 "termwiz" 由此落回 alacritty。
   pub fn parse(name: &str) -> BackendKind {
     match name {
-      "termwiz" => BackendKind::Termwiz,
       "ghostty" => BackendKind::Ghostty,
       _ => BackendKind::Alacritty,
     }
@@ -68,7 +64,6 @@ impl BackendKind {
 pub(super) fn create_backend(kind: BackendKind, columns: usize, lines: usize, history: usize) -> Box<dyn TerminalCore> {
   match kind {
     BackendKind::Alacritty => Box::new(alacritty::AlacrittyCore::new(columns, lines, history)),
-    BackendKind::Termwiz => Box::new(termwiz::TermwizCore::new(columns, lines, history)),
     BackendKind::Ghostty => Box::new(ghostty::GhosttyCore::new(columns, lines, history)),
   }
 }
@@ -591,7 +586,7 @@ pub(super) trait TerminalCore: GridView {
   fn set_cell_pixels(&mut self, _width: u16, _height: u16) {}
 
   /// 推送主题默认色：颜色查询自答的后端拿它当应答输入（ghostty 推给核心
-  /// 自答，alacritty/termwiz 存 `ThemeDefaults`），没推则不应答；对 ghostty
+  /// 自答，alacritty 存 `ThemeDefaults`），没推则不应答；对 ghostty
   /// 还是调色板「程序改写槽」差分（effective vs default）的基线——不推则
   /// 改写全部被判未改写。
   fn set_theme_defaults(&mut self, _foreground: Rgb, _background: Rgb, _cursor: Rgb, _ansi: &[Rgb; 16]) {}

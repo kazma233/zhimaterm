@@ -78,6 +78,10 @@ perf-acceptance §5、mobaxterm-gap-and-priorities，现以本文件为唯一入
   dead_code 警告已随本次补 `#[cfg(windows)]` 门。两个失败用例需要 WSL
   批次的作者在 Windows 上复核门控或修断言。
 - CI 三平台 matrix：暂缓（见「明确不管/后置」）。
+- ADR-060 步骤 2/3 剩余（2026-11-21）：ghostty 后端在 **Linux** 的真实使用
+  验证（表格对齐、TUI、IME、SSH 长尾；Windows 已于同日实机过探针三内核
+  对照，见 platform-verification）；验证通过后把默认后端从 alacritty 切到
+  ghostty（切默认是单独决策，需先更新 ADR-060 再动行为）。
 
 ## 功能池 P2 剩余
 
@@ -89,8 +93,16 @@ APP_KEYPAD 编码（GPUI 不区分小键盘按键，缺能力；自 alacritty-le
 
 ## 技术债
 
-（空。2026-10-22 的两条——known_hosts 并发写丢失更新、settings 测试 fixture 的
-Unix 绝对路径——已修，见 ADR-002 落盘串行化段与 `settings::test_paths`。）
+- **字体覆盖与 fallback**（2026-11-21 探针实测发现，决策单独处理）：主字体
+  （JetBrains Mono）缺字形时无 fallback 链——块元素 `▔`(U+2594) `▁`(U+2581)
+  `▏`(U+258F) 与双线制表符 `═║╔╗╚╝` 显示异常，键帽 `1️⃣`（VS16 序列）无
+  emoji 字形回落、`⚠️` 呈文本样式。方向：调研 kitty/wezterm/ghostty 的
+  字体 fallback 做法，给终端网格加可配置的 fallback 字体链（emoji 至少
+  落 Segoe UI Emoji/平台等价物）；块元素/制表线先核对 ADR-034 几何表是否
+  全覆盖（`▔▁▏` 理论上在 U+2580–259F 内，实测行为待查证是几何缺口还是
+  字形路径）。关联 unverified：彩色 emoji 三平台字体回退表现。
+- （2026-10-22 的两条——known_hosts 并发写丢失更新、settings 测试 fixture 的
+  Unix 绝对路径——已修，见 ADR-002 落盘串行化段与 `settings::test_paths`。）
 
 ## unverified
 
@@ -115,8 +127,9 @@ Unix 绝对路径——已修，见 ADR-002 落盘串行化段与 `settings::tes
   `Cargo.toml` 的 `rust-version`）——原「不管」条目已按可复现构建的要求补上，
   CI matrix 部分仍按上面的口径不排期。
 - **明确不做（2026-11-17 讨论）**：滚动历史上限按字节/内存设限。维持行数口径
-  （ADR-035）：三后端语义无法统一——alacritty 上游只有行数 API，ghostty 原生
-  `SCROLLBACK_MAX_BYTES` 被有意留空（行数才是口径），termwiz 需自算估算；用户可见
+  （ADR-035）：后端语义无法统一——alacritty 上游只有行数 API，ghostty 原生
+  `SCROLLBACK_MAX_BYTES` 被有意留空（行数才是口径；讨论时的第三后端 termwiz
+  已随 ADR-060 步骤 3 退役，结论不变）；用户可见
   单位与主流终端一致；性能验收也按行数断言。内存最坏 100k 行 150–200 MB 已写入
   设置注释。若将来真实痛点是宽窗口内存放大（内存 ≈ 列数 × 行数 × ≤72B/格），
   备选是内部派生守卫（按列数收紧有效行数上限），对用户不可见。

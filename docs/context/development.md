@@ -14,7 +14,9 @@
   （PATH 或 `ZIG` 环境变量，自行安装）；首次构建联网下载 `GHOSTTY.lock` 固定的源码包
   （sha256 校验），离线构建设 `GHOSTTY_SOURCE_DIR` 指向本地 Ghostty 源码树。FFI 绑定
   预生成提交，构建只需要 Zig；再生成与更新 pin 见
-  [runbooks/ghostty-bindings](../runbooks/ghostty-bindings.md)。该后端目前只在 macOS 实测过运行时。
+  [runbooks/ghostty-bindings](../runbooks/ghostty-bindings.md)。运行时验证：
+  macOS 实测（ADR-051 时代）+ Windows 实机（2026-11-21，探针三内核对照 +
+  日常使用，见 platform-verification）；Linux 待验证（ADR-060 步骤 2）。
 
 ## 依赖选择与构建约束
 
@@ -44,15 +46,12 @@ manifest 保持纯声明，不写选型说明；新增或更换依赖时同步�
     `unicode-segmentation`：ui 的文本边界处理。
   - Unix `libc`：唤醒管道的自管道。
 - `zhimaterm-terminal`
-  - `alacritty_terminal`：VT 状态与序列解析（ADR-001）。
-  - `termwiz`：流式解析器后端（ADR-050）；屏幕模型仍在本仓
-    （`backend/termwiz.rs`），换后端不改变终端语义。
-  - `ghostty-vt-sys`：vendored libghostty-vt 的仓内薄绑定（ADR-051）。构建需要
-    Zig 0.17.x（PATH 或 `ZIG`），首次联网下载 `GHOSTTY.lock` 固定的源码包
-    （sha256 校验），离线构建用 `GHOSTTY_SOURCE_DIR`；绑定预生成提交，日常
-    构建不需要 bindgen/libclang。
-  - `regex`：搜索；`serde`/`serde_json`：转录格式；`smol`：回放与异步等待；
-    `unicode-width`：组合文本按 wcwidth 折算占格。
+  - `alacritty_terminal`：VT 状态与序列解析（ADR-001），默认后端。
+  - `ghostty-vt-sys`：vendored libghostty-vt 的仓内薄绑定（ADR-051），簇宽度
+    口径的后端（ADR-060）。构建需要 Zig 0.17.x（PATH 或 `ZIG`），首次联网下载
+    `GHOSTTY.lock` 固定的源码包（sha256 校验），离线构建用 `GHOSTTY_SOURCE_DIR`；
+    绑定预生成提交，日常构建不需要 bindgen/libclang。
+  - `regex`：搜索；`serde`/`serde_json`：转录格式；`smol`：回放与异步等待。
 - `zhimaterm-local`
   - `gpui`：本地探针面板；`anyhow`：错误链；`smol`：探针的事件通道。
   - Unix `libc`：PTY 与 cwd 采集。

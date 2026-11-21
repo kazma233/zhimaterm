@@ -1369,7 +1369,7 @@ mod tests {
 
   #[test]
   fn text_area_size_reply_is_height_first_in_cells_times_extent() {
-    // 与三个后端替换前的格式逐位一致（xterm 规格：高在前、格×行列）
+    // 与替换前（单 alacritty 核心时代）的格式逐位一致（xterm 规格：高在前、格×行列）
     assert_eq!(
       text_area_size_reply(WindowSize {
         lines: 24,

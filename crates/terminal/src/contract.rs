@@ -11,7 +11,6 @@ use super::{TerminalLink, TerminalModel, backend};
 fn backends() -> Vec<(&'static str, backend::BackendKind)> {
   vec![
     ("alacritty", backend::BackendKind::Alacritty),
-    ("termwiz", backend::BackendKind::Termwiz),
     ("ghostty", backend::BackendKind::Ghostty),
   ]
 }
@@ -275,8 +274,8 @@ contract!(sgr_mouse_reporting_uses_decimal_coordinates, |model, label| {
 });
 
 contract!(device_queries_are_answered, |model, label| {
-  // DA1 分后端原样断言（ADR-060 步骤 1b）：alacritty/termwiz 报 VT102，
-  // ghostty 核心默认自报 VT220 级 + ANSI 色特性——不再对齐
+  // DA1 分后端原样断言（ADR-060 步骤 1b）：alacritty 报 VT102，ghostty
+  // 核心默认自报 VT220 级 + ANSI 色特性——不再对齐
   model.advance(b"\x1b[c");
   let expected_da1 = if label == "ghostty" { "\x1b[?62;22c" } else { "\x1b[?6c" };
   assert_eq!(
@@ -412,13 +411,9 @@ contract!(color_queries_report_the_active_slot, |model, label| {
   let [super::TermRequest::PtyWrite(reply)] = requests.as_slice() else {
     panic!("{label}: OSC 11 查询应产生一个应答，得到 {requests:?}");
   };
-  let terminator = match label {
-    // alacritty（上游 vte）与 ghostty（核心）都按查询结尾镜像：BEL 查询
-    // 回 BEL
-    "alacritty" | "ghostty" => "\x07",
-    // termwiz 的 OSC 分发不携带查询结尾符，后端自答固定 ST
-    _ => "\x1b\\",
-  };
+  // 两后端都按查询结尾镜像（alacritty 上游 vte、ghostty 核心）：BEL 查询
+  // 回 BEL
+  let terminator = "\x07";
   assert!(reply.starts_with("\x1b]11;rgb:"), "{label}: {reply:?}");
   assert!(reply.ends_with(terminator), "{label}: {reply:?}");
   assert_eq!(model.snapshot().default_foreground, 0x112233, "{label}");
@@ -441,7 +436,7 @@ contract!(color_queries_report_the_active_slot, |model, label| {
 });
 
 /// alacritty 的颜色应答镜像查询结尾符（上游 vte 行为）：ST 结尾的查询
-/// 回 ST（ADR-060 步骤 1c，另两个后端固定 ST）。
+/// 回 ST（ADR-060 步骤 1c，ghostty 核心同镜像）。
 #[test]
 fn alacritty_color_reply_mirrors_the_st_terminated_query() {
   let mut model = TerminalModel::with_backend(backend::BackendKind::Alacritty, 40, 3, 30);
@@ -694,27 +689,6 @@ diff_content_anchored!(diff_odd_width_splits_wide_chars_with_spacer, |model| {
   checkpoints
 });
 
-/// 增宽回程的内容完整性：占位格摘掉、字符接回原行、无内容丢失。
-/// 不做差分——alacritty 在「跨列占位后增宽」路径会丢内容（上游
-/// resize 算法的边缘缺陷），本仓后端保证不丢。
-#[test]
-fn grow_after_straddle_keeps_all_content() {
-  let mut model = TerminalModel::with_backend(backend::BackendKind::Termwiz, 40, 3, 30);
-  let text = "甲乙丙丁戊己庚辛壬癸".repeat(2);
-  model.advance(text.as_bytes());
-  model.advance(b"\x1b[1;1H");
-  model.resize(21, 3);
-  model.resize(40, 3);
-  let snapshot = model.snapshot();
-  let visible: String = snapshot
-    .rows
-    .iter()
-    .flat_map(|row| row.iter().flat_map(|run| run.text.chars()))
-    .collect();
-  assert_eq!(visible.chars().count(), 20, "增宽回程后全部字符仍在视口：{visible}");
-  assert_eq!(snapshot.history_size, 0, "内容完整时不需要历史");
-}
-
 /// ghostty 后端的簇宽度直达快照（ADR-051）：核心原生 mode 2027 字形簇
 /// 定宽，本仓接表格对齐的立项目用例——整行占格与生成方口径一致。
 #[test]
@@ -732,14 +706,13 @@ fn ghostty_cluster_width_reaches_the_snapshot() {
 
 // ---------- 随机脚本 fuzz（全后端） ----------
 //
-// termwiz 后端的确定性 fuzz 骨架提升到模型层：同一份随机脚本（文本输出、
-// 光标移动、擦除、滚区、插删行、备用屏、同步输出冻结、resize、回看滚动）
-// 对全部已编译后端跑一遍，断言共享层不变量（快照自洽、稳定、滚动界内）。
-// rng 只被测试骨架消费，同一 seed 流对每个后端产生相同动作序列——差分口径
-// 的随机暴露。termwiz 自家的 core 级 fuzz 仍保留（内部网格状态断言是其
-// 专属深度）；ghostty 的视口缓存/冻结/回看慢路径由此获得与其风险匹配的覆盖。
+// 确定性随机脚本（文本输出、光标移动、擦除、滚区、插删行、备用屏、同步
+// 输出冻结、resize、回看滚动）对全部已编译后端跑一遍，断言共享层不变量
+// （快照自洽、稳定、滚动界内）。rng 只被测试骨架消费，同一 seed 流对每个
+// 后端产生相同动作序列——差分口径的随机暴露；ghostty 的视口缓存/冻结/
+// 回看慢路径由此获得与其风险匹配的覆盖。
 
-/// xorshift64（与 termwiz 后端 fuzz 同型）：确定性，失败可按 seed 复现。
+/// xorshift64：确定性，失败可按 seed 复现。
 struct Rng(u64);
 
 impl Rng {

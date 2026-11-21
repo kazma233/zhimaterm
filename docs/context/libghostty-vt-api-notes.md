@@ -125,7 +125,7 @@ render_state / render_state_row / render_state_row_cells / cell / row 各有一�
 2. `gen_bindings.rs` 的 FUNCTIONS / TYPES / VARS 加条目 → 再生成（[runbook
    §2](../runbooks/ghostty-bindings.md)）；
 3. `vt.rs` 加安全封装（unsafe 止步于此）→ `mod.rs` 消费；
-4. 契约测试补场景（`crates/terminal/src/contract.rs`，三后端口径）；
+4. 契约测试补场景（`crates/terminal/src/contract.rs`，全部后端口径）；
 5. 语义拿不准时对照上游封装同版本实现（§10）。
 
 ## 10. 对照源与快照声明

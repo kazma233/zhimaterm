@@ -636,7 +636,7 @@ impl TerminalModel {
   }
 
   /// 把主题默认色推给后端：颜色查询应答的输入（ADR-060 步骤 1c）——ghostty
-  /// 推给核心自答，alacritty/termwiz 存 `ThemeDefaults`。语义色 → RGB 的
+  /// 推给核心自答，alacritty 存 `ThemeDefaults`。语义色 → RGB 的
   /// 换算与快照解析同一套。
   fn push_theme_defaults(&mut self) {
     let scheme = Arc::clone(&self.scheme);
