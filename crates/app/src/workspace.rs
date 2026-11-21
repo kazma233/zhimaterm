@@ -295,8 +295,8 @@ impl Workspace {
         return Err(error).with_context(|| format!("读取工作区失败：{}", path.display()));
       }
     };
-    let workspace: Self =
-      serde_json::from_slice(&bytes).with_context(|| format!("解析工作区失败：{}", path.display()))?;
+    let workspace: Self = zhimaterm_base::config_paths::parse_json(&bytes)
+      .with_context(|| format!("解析工作区失败：{}", path.display()))?;
     if workspace.version > WORKSPACE_VERSION {
       anyhow::bail!(
         "工作区文件版本 {} 高于当前支持的 {}：{}",

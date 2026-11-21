@@ -8377,6 +8377,8 @@ dependencies = [
  "anyhow",
  "gpui-pre",
  "libc",
+ "serde",
+ "serde_json",
  "smol",
  "unicode-segmentation",
 ]

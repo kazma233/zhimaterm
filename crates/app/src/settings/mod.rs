@@ -209,7 +209,9 @@ impl Settings {
   /// 冻结裁决在 [`Store::load`]。
   pub fn load_at(path: PathBuf) -> Result<Self> {
     let settings = match std::fs::read(&path) {
-      Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("解析设置失败：{}", path.display()))?,
+      Ok(bytes) => {
+        zhimaterm_base::config_paths::parse_json(&bytes).with_context(|| format!("解析设置失败：{}", path.display()))?
+      }
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
       Err(error) => {
         return Err(error).with_context(|| format!("读取设置失败：{}", path.display()));

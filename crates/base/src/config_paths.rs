@@ -56,6 +56,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
   std::fs::rename(&temp, path)
 }
 
+/// 解析用户可手编的配置 JSON（设置/保存的连接）：剥掉 UTF-8 BOM 再解析。
+/// JSON 规范不允许 BOM，但 Windows 上记事本旧版与 PowerShell 5.1 写 UTF-8
+/// 都会带 BOM；serde_json 不接受它，不剥的话用户手编一次就整体读失败、
+/// 设置全部回默认还冻结写入（2026-11-21 实测）。应用自己写盘永远无 BOM。
+pub fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+  let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+  serde_json::from_slice(bytes)
+}
+
 #[cfg(test)]
 mod tests {
   use super::write_atomic;
@@ -98,6 +107,20 @@ mod tests {
     let path = temp_dir("parents").join("nested/deeper/connections.json");
     write_atomic(&path, b"items").expect("父目录自动创建");
     assert_eq!(std::fs::read(&path).unwrap(), b"items");
+  }
+
+  /// 带 BOM 的手编文件（记事本/PowerShell 5.1 的 UTF-8 产物）要能解析。
+  #[test]
+  fn parse_json_strips_a_leading_utf8_bom() {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+      value: u32,
+    }
+    let plain = b"{\"value\": 7}";
+    assert_eq!(super::parse_json::<Probe>(plain).unwrap().value, 7);
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend_from_slice(plain);
+    assert_eq!(super::parse_json::<Probe>(&bom).unwrap().value, 7);
   }
 
   /// Windows 路径必须全程反斜杠：混合分隔符在文件系统层无碍，但原样传给

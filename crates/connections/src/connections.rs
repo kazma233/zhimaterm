@@ -358,7 +358,8 @@ impl SavedConnections {
 
   pub fn load_at(path: PathBuf) -> Result<Self> {
     let items = match std::fs::read(&path) {
-      Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("解析保存的连接失败：{}", path.display()))?,
+      Ok(bytes) => zhimaterm_base::config_paths::parse_json(&bytes)
+        .with_context(|| format!("解析保存的连接失败：{}", path.display()))?,
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
       Err(error) => {
         return Err(error).with_context(|| format!("读取保存的连接失败：{}", path.display()));
