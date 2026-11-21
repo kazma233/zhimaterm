@@ -969,12 +969,9 @@ impl ModalView for SettingsModal {
             }
           },
         ),
-      ))
-      .child(field_column(
-        tokens,
-        "默认工作目录（留空 = home；新会话优先沿用当前会话目录）",
-        form.workdir.clone(),
       ));
+    // 自定义路径是「自定义…」项的补全输入，紧跟 Shell 行（与自定义编辑器
+    // 路径跟其下拉的位置同构）；焦点环顺序（focus_ring）按同一次序维护
     if form.shell_custom() {
       content = content.child(input::field(
         tokens,
@@ -983,6 +980,11 @@ impl ModalView for SettingsModal {
         &form.custom_shell,
       ));
     }
+    content = content.child(field_column(
+      tokens,
+      "默认工作目录（留空 = home；新会话优先沿用当前会话目录）",
+      form.workdir.clone(),
+    ));
     // 内容区自滚（卡片走 full_content，不套内边距）：padding 与字段间距由
     // 滚动容器自带（与卡片默认内边距同源），字段整体超过内容区高度时在区
     // 内滚动，弹窗 header 与动作区保持可见
