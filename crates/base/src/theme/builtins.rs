@@ -40,9 +40,10 @@ const DEFAULT_UI: UiTokens = UiTokens {
   bg_warn: 0x362a1f,
   bg_danger: 0x5a2a2a,
   border_default: 0x2a3742,
+  border_control: 0x526679,
   border_subtle: 0x28333d,
   border_divider: 0x243039,
-  border_hover: 0x46596a,
+  border_hover: 0x5e7387,
   border_focus: 0x8bd5ca,
   border_warn: 0x4a3a2a,
   border_danger: 0x5a2e30,
@@ -52,16 +53,15 @@ const DEFAULT_UI: UiTokens = UiTokens {
   fg_secondary: 0x9fb0be,
   fg_status: 0x91a4b5,
   fg_badge: 0x8b9aa8,
-  fg_muted: 0x6b7c8c,
-  fg_faint: 0x5c6b7a,
-  fg_dim: 0x51616f,
-  fg_on_accent: 0x0c1014,
+  fg_muted: 0x8293a3,
+  fg_faint: 0x7f909f,
+  fg_dim: 0x728394,
   accent: 0x8bd5ca,
   success: 0x98c379,
   warn: 0xe5c07b,
   warn_strong: 0xe0a05a,
   danger: 0xe06c75,
-  danger_soft: 0xe07a5f,
+  danger_text: 0xe06c75,
   overlay: 0x000000a8,
   shadow_popover: 0x0000008c,
   search_highlight: 0xf5c45173,
@@ -563,8 +563,36 @@ pub const ALL: &[Theme] = &[
 
 #[cfg(test)]
 mod tests {
-  use super::ALL;
+  use super::{ALL, DEFAULT_UI};
   use crate::theme::DEFAULT_THEME_NAME;
+
+  fn channel(rgb: u32, shift: u32) -> f32 {
+    let value = ((rgb >> shift) & 0xff) as f32 / 255.;
+    if value <= 0.04045 {
+      value / 12.92
+    } else {
+      ((value + 0.055) / 1.055).powf(2.4)
+    }
+  }
+
+  /// WCAG 2.x 相对亮度：与 `derive::luminance` 的近似值不同，对比度断言必须用它。
+  fn relative_luminance(rgb: u32) -> f32 {
+    0.2126 * channel(rgb, 16) + 0.7152 * channel(rgb, 8) + 0.0722 * channel(rgb, 0)
+  }
+
+  fn contrast(a: u32, b: u32) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+  }
+
+  fn assert_contrast(fg: u32, bg: u32, min: f32, label: &str) {
+    let ratio = contrast(fg, bg);
+    assert!(
+      ratio >= min,
+      "{label}：{fg:#08x} on {bg:#08x} = {ratio:.2}:1，要求 {min}:1"
+    );
+  }
 
   /// 主题名是设置持久化与下拉选择的键：重名会让两个名字指向同一主题。
   #[test]
@@ -587,5 +615,84 @@ mod tests {
   #[test]
   fn third_party_themes_rely_on_derivation() {
     assert!(ALL.iter().skip(1).all(|theme| theme.ui.is_none()));
+  }
+
+  /// 静音文字是 10–12px 的正文：所有实际承载它的面都要过 AA 4.5:1。
+  #[test]
+  fn secondary_text_meets_wcag_aa() {
+    let ui = DEFAULT_UI;
+    let surfaces = [
+      ("bg_root", ui.bg_root),
+      ("bg_input", ui.bg_input),
+      ("bg_panel", ui.bg_panel),
+      ("bg_row", ui.bg_row),
+      ("bg_hover", ui.bg_hover),
+    ];
+    for (fg_name, fg) in [("fg_muted", ui.fg_muted), ("fg_faint", ui.fg_faint)] {
+      for (bg_name, bg) in surfaces {
+        assert_contrast(fg, bg, 4.5, &format!("{fg_name} on {bg_name}"));
+      }
+    }
+    // fg_dim 只用于结构面与卡片；行/选中底上的元数据改用 fg_muted。
+    for (bg_name, bg) in [
+      ("bg_root", ui.bg_root),
+      ("bg_input", ui.bg_input),
+      ("bg_panel", ui.bg_panel),
+    ] {
+      assert_contrast(ui.fg_dim, bg, 4.5, &format!("fg_dim on {bg_name}"));
+    }
+  }
+
+  /// 控件边界不是装饰：输入框/下拉/描边按钮的边界要过 1.4.11 的 3:1。
+  #[test]
+  fn control_borders_meet_non_text_contrast() {
+    assert_contrast(DEFAULT_UI.border_control, DEFAULT_UI.bg_input, 3.0, "border_control");
+    assert_contrast(DEFAULT_UI.border_hover, DEFAULT_UI.bg_input, 3.0, "border_hover");
+  }
+
+  /// 错误/状态文字走 `danger_text`：每套主题在根/输入/面板/终端底上都要可读。
+  /// 原始 ANSI red 在部分浅色主题（如 Ayu Light）只有约 3:1，所以正文用
+  /// 按背景亮度调过的语义色，`danger` 仍保留给彩底与边框。
+  #[test]
+  fn danger_text_meets_wcag_aa_across_themes() {
+    for theme in ALL {
+      let ui = theme.tokens();
+      for (name, bg) in [
+        ("bg_root", ui.bg_root),
+        ("bg_input", ui.bg_input),
+        ("bg_panel", ui.bg_panel),
+        ("bg_terminal", ui.bg_terminal),
+      ] {
+        assert_contrast(
+          ui.danger_text,
+          bg,
+          4.5,
+          &format!("{} 的 danger_text on {name}", theme.name),
+        );
+      }
+    }
+  }
+
+  /// 彩底上的合成文字色必须随主题 accent 走：浅色主题的 accent 可能是
+  /// 浅珊瑚，固定用 accent/fg 都会失守；`readable_on` 对每套主题逐一验证。
+  #[test]
+  fn accent_filled_controls_keep_text_contrast_across_themes() {
+    for theme in ALL {
+      let ui = theme.tokens();
+      for (name, fill) in [
+        ("bg_accent", ui.bg_accent),
+        ("accent", ui.accent),
+        ("success", ui.success),
+        ("danger", ui.danger),
+        ("bg_danger", ui.bg_danger),
+      ] {
+        assert_contrast(
+          crate::theme::readable_on(fill),
+          fill,
+          4.5,
+          &format!("{} 的 {name}", theme.name),
+        );
+      }
+    }
   }
 }

@@ -30,6 +30,8 @@ pub struct TextInput {
   /// 校验错误（业务方经 `set_error` 定义有没有、错什么）：`input::field` 渲染
   /// 时读到就贴在标签右侧
   error: Option<SharedString>,
+  /// 无障碍名称：表单的可见标签由 `input::field` 注入；None 时回落占位文案。
+  accessible_label: Option<SharedString>,
 }
 
 impl TextInput {
@@ -41,6 +43,7 @@ impl TextInput {
       reveal_toggle: false,
       reveal_source: None,
       error: None,
+      accessible_label: None,
     }
   }
 
@@ -53,7 +56,19 @@ impl TextInput {
       reveal_toggle: false,
       reveal_source: None,
       error: None,
+      accessible_label: None,
     }
+  }
+
+  /// 无障碍名称（建造期设置）：表单字段用，避免渲染期再改实体。
+  pub fn with_accessible_label(mut self, label: impl Into<SharedString>) -> Self {
+    self.accessible_label = Some(label.into());
+    self
+  }
+
+  /// 无障碍名称（运行期设置）：`input::field` 用可见标签注入。
+  pub fn set_accessible_label(&mut self, label: impl Into<SharedString>) {
+    self.accessible_label = Some(label.into());
   }
 
   pub fn text(&self) -> &str {
@@ -153,6 +168,14 @@ impl TextWidget for TextInput {
 
   fn core_mut(&mut self) -> &mut TextCore {
     &mut self.core
+  }
+
+  fn accessible_label(&self) -> Option<SharedString> {
+    self.accessible_label.clone()
+  }
+
+  fn accessible_description(&self) -> Option<SharedString> {
+    self.error.clone()
   }
 }
 
@@ -265,5 +288,28 @@ impl EntityInputHandler for TextInput {
     _cx: &mut Context<Self>,
   ) -> Option<usize> {
     self.core.character_index_for_point(position)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::TextInput;
+  use crate::ui::input::core::TextWidget;
+  use gpui::AppContext;
+
+  /// 无障碍名称与校验错误同源：可见标签注入名称，错误注入描述。
+  #[gpui::test]
+  fn accessible_label_and_error_are_exposed(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+      let input = cx.new(|cx| {
+        TextInput::new(cx, "host", false, crate::font::terminal_font("monospace")).with_accessible_label("主机")
+      });
+      input.update(cx, |input, cx| input.set_error(Some("必填".into()), cx));
+      let (label, description) = input.read_with(cx, |input, _| {
+        (input.accessible_label(), input.accessible_description())
+      });
+      assert_eq!(label.as_deref(), Some("主机"));
+      assert_eq!(description.as_deref(), Some("必填"));
+    });
   }
 }

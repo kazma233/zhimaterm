@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 
-pub use derive::{UiTokens, derive_tokens};
+pub use derive::{UiTokens, derive_tokens, readable_on};
 
 /// 未选择主题时生效的名字。
 pub const DEFAULT_THEME_NAME: &str = "Default";

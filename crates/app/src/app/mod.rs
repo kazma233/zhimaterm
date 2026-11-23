@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Pixels, Point, Window, px};
+use gpui::{App, Context, Entity, FocusHandle, Pixels, Point, Window, px};
 
 use crate::settings;
 use crate::views::panes::{self, PaneTree};
@@ -103,6 +103,8 @@ pub struct ZhimaTermApp {
   sidebar_width: f32,
   /// 会话栏宽度拖拽中：（按下时指针 x，按下时宽度）
   sidebar_resizing: Option<(f32, f32)>,
+  /// 侧栏会话列表的键盘焦点：⌘⇧E 聚焦，↑↓ 切换会话，Enter/Esc 回终端
+  sidebar_focus: FocusHandle,
   /// 侧栏会话行的右键菜单（ADR-023/047）：（标签下标，指针的窗口坐标）。
   /// 遮罩与浮层挂在应用根部盖住全窗；不入浮层栈——它不持有焦点，与主题
   /// 下拉同为锚定浮层，任何层入栈即收起
@@ -203,6 +205,7 @@ impl ZhimaTermApp {
         false,
         font::ui_font(ui_font_family.as_deref().unwrap_or(font::SYSTEM_UI_FONT)),
       )
+      .with_accessible_label("搜索会话")
     });
     // 搜索文本存在输入框实体里（单一来源），观察者只负责唤醒侧栏重算过滤
     cx.observe(&session_search, |_, _, cx| cx.notify()).detach();
@@ -228,6 +231,7 @@ impl ZhimaTermApp {
       created: 0,
       sidebar_width: shell::SIDEBAR_DEFAULT_WIDTH,
       sidebar_resizing: None,
+      sidebar_focus: cx.focus_handle(),
       sidebar_menu: None,
       sidebar_menu_cursor: Default::default(),
       title_bar_move_armed: Rc::new(Cell::new(false)),

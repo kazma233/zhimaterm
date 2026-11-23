@@ -442,7 +442,7 @@ impl ZhimaTermApp {
   /// 选定主题：立即应用并落盘；下拉保持展开——连续点几项比对观感是主要
   /// 用法，收起只由点击下拉之外触发。与字体设置同一口径：落盘失败不回滚
   /// 界面，只把后果讲清楚（重启后会回到上次保存的主题）。
-  fn pick_theme(&mut self, name: &'static str, cx: &mut Context<Self>) {
+  pub(super) fn pick_theme(&mut self, name: &'static str, cx: &mut Context<Self>) {
     self.apply_theme(name, cx);
     // 冻结与落盘在 Store 域内裁决；前缀是本动作的语境（主题已经切上了）
     if let Err(message) = self.settings.set_theme(name) {
@@ -830,14 +830,23 @@ fn connect_modal_actions(cx: &Context<ZhimaTermApp>) -> connect::ModalActions {
 /// `views::theme_picker::ThemePicker`。
 pub(super) fn theme_picker_actions(cx: &Context<ZhimaTermApp>) -> theme_picker::PickerActions {
   let app = cx.entity();
+  // 字母序不变；当前主题只作为打开时的键盘高亮与居中目标。
+  let current = zhimaterm_base::theme::current(cx).name;
+  let current_index = zhimaterm_base::theme::builtin_names_sorted()
+    .iter()
+    .position(|name| *name == current);
   theme_picker::PickerActions {
     toggle: {
       let app = app.clone();
-      Rc::new(move |cx| {
-        app.update(cx, |this, cx| {
-          this.theme_picker.toggle();
+      Rc::new(move |window, cx| {
+        let open = app.update(cx, |this, cx| {
+          let open = this.theme_picker.toggle(current_index);
           cx.notify();
-        })
+          open
+        });
+        if open {
+          center_theme_picker(app.clone(), window, 3);
+        }
       })
     },
     pick: {
@@ -854,6 +863,22 @@ pub(super) fn theme_picker_actions(cx: &Context<ZhimaTermApp>) -> theme_picker::
       })
     },
   }
+}
+
+/// 打开主题浮层后把当前项滚到中部：item bounds 要等布局，首帧拿不到就
+/// 在下一帧重试，最多 3 帧；居中后 notify 一次把偏移画出来。
+fn center_theme_picker(app: Entity<ZhimaTermApp>, window: &mut Window, attempts: u8) {
+  if attempts == 0 {
+    return;
+  }
+  window.on_next_frame(move |window, cx| {
+    let applied = app.update(cx, |this, _| this.theme_picker.reveal_highlight());
+    if applied {
+      app.update(cx, |_, cx| cx.notify());
+    } else {
+      center_theme_picker(app.clone(), window, attempts - 1);
+    }
+  });
 }
 
 /// 运行中规则 → 保存连接的形态（ADR-038 回写）。

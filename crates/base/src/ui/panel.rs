@@ -11,9 +11,9 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{ClickEvent, ElementId, FocusHandle, MouseButton, Window, div, px};
+use gpui::{ClickEvent, ElementId, FocusHandle, MouseButton, Role, SharedString, Window, div, px};
 
-use crate::theme::UiTokens;
+use crate::theme::{UiTokens, readable_on};
 use crate::ui::{CLICKABLE, ui_rems};
 
 /// 按钮基座：点击语义与小手光标在这里统一（按下后拖出去松开不触发，按下在
@@ -23,6 +23,16 @@ pub fn clickable(
   on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
   div().id(id).cursor(CLICKABLE).on_click(on_click)
+}
+
+/// 带无障碍名称的按钮基座：图标按钮、行内小动作这类没有可见文字的控件用它，
+/// 名称是动作而不是图形（例如「刷新」而不是「↻」）。
+pub fn clickable_named(
+  id: impl Into<ElementId>,
+  label: impl Into<SharedString>,
+  on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+  clickable(id, on_click).role(Role::Button).aria_label(label)
 }
 
 /// 弹窗底部动作区的统一布局：操作按钮（确定/提交/开关这类）靠左成组，
@@ -83,9 +93,19 @@ pub fn primary_button(
   on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
   button(tokens, id, label, shortcut, on_click)
+    .role(Role::Button)
+    .aria_label(label.to_owned())
     .bg(gpui::rgb(tokens.bg_accent))
     .border_color(gpui::rgb(tokens.bg_accent))
-    .text_color(gpui::rgb(tokens.accent))
+    // 彩底文字按填充色亮度选绝对深/浅端：主题 accent 从亮青到浅珊瑚都有，
+    // 固定用 accent 或 fg 都会在某套主题上失守
+    .text_color(gpui::rgb(readable_on(tokens.bg_accent)))
+    .hover(|style| {
+      style
+        .border_color(gpui::rgb(tokens.accent))
+        .text_color(gpui::rgb(readable_on(tokens.bg_accent)))
+    })
+    .active(|style| style.border_color(gpui::rgb(tokens.fg_bright)))
 }
 
 /// 次按钮：描边不填底，与输入框、下拉共用同一控件语言（`border_default`
@@ -98,11 +118,18 @@ pub fn secondary_button(
   on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
   button(tokens, id, label, shortcut, on_click)
-    .border_color(gpui::rgb(tokens.border_default))
+    .role(Role::Button)
+    .aria_label(label.to_owned())
+    .border_color(gpui::rgb(tokens.border_control))
     .text_color(gpui::rgb(tokens.fg_secondary))
     .hover(|style| {
       style
         .border_color(gpui::rgb(tokens.border_hover))
+        .text_color(gpui::rgb(tokens.fg))
+    })
+    .active(|style| {
+      style
+        .border_color(gpui::rgb(tokens.border_focus))
         .text_color(gpui::rgb(tokens.fg))
     })
 }
@@ -116,9 +143,18 @@ pub fn danger_button(
   on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
   button(tokens, id, label, shortcut, on_click)
+    .role(Role::Button)
+    .aria_label(label.to_owned())
     .bg(gpui::rgb(tokens.bg_danger))
     .border_color(gpui::rgb(tokens.bg_danger))
-    .text_color(gpui::rgb(tokens.danger_soft))
+    // 与主按钮同一口径：红底在浅色主题里是浅红，固定中间调会失守
+    .text_color(gpui::rgb(readable_on(tokens.bg_danger)))
+    .hover(|style| {
+      style
+        .border_color(gpui::rgb(tokens.danger_text))
+        .text_color(gpui::rgb(readable_on(tokens.bg_danger)))
+    })
+    .active(|style| style.border_color(gpui::rgb(tokens.fg_bright)))
 }
 
 /// 键位标记：灰底小方块，一眼能看出"按哪个键"。按钮与快捷键参考模态共用。
@@ -159,6 +195,9 @@ pub fn segmented(
       clickable((base.clone(), index.to_string()), move |_, window, cx| {
         on_select(index, window, cx)
       })
+      .role(Role::RadioButton)
+      .aria_label((*label).to_owned())
+      .aria_selected(selected)
       .px(px(8.))
       .py(px(3.))
       .rounded(px(4.))
@@ -166,7 +205,7 @@ pub fn segmented(
       .when(selected, |segment| {
         segment
           .bg(gpui::rgb(tokens.bg_accent))
-          .text_color(gpui::rgb(tokens.accent))
+          .text_color(gpui::rgb(readable_on(tokens.bg_accent)))
       })
       .when(!selected, |segment| {
         segment
@@ -190,15 +229,21 @@ pub fn checkbox(
 ) -> gpui::Stateful<gpui::Div> {
   let box_style = |box_div: gpui::Div| {
     if checked {
-      box_div.bg(gpui::rgb(tokens.accent))
+      box_div.bg(gpui::rgb(tokens.bg_accent))
     } else {
       box_div
         .bg(gpui::rgb(tokens.bg_input))
         .border_1()
-        .border_color(gpui::rgb(tokens.border_default))
+        .border_color(gpui::rgb(tokens.border_control))
     }
   };
   clickable(id, on_toggle)
+    .role(Role::CheckBox)
+    .aria_label(title.to_owned())
+    .aria_toggled(checked.into())
+    .when(!description.is_empty(), |row| {
+      row.aria_description(description.to_owned())
+    })
     .flex()
     .flex_col()
     .gap(px(3.))
@@ -220,7 +265,7 @@ pub fn checkbox(
               it.child(
                 div()
                   .text_size(ui_rems(10.))
-                  .text_color(gpui::rgb(tokens.fg_on_accent))
+                  .text_color(gpui::rgb(readable_on(tokens.bg_accent)))
                   .child("✓"),
               )
             }),
@@ -287,7 +332,7 @@ fn button(
 pub fn error_line(tokens: &UiTokens, message: &str) -> gpui::Div {
   div()
     .text_size(ui_rems(11.))
-    .text_color(gpui::rgb(tokens.danger))
+    .text_color(gpui::rgb(tokens.danger_text))
     .child(message.to_owned())
 }
 

@@ -212,10 +212,10 @@ impl ConnectForm {
   /// 组装一张空白新建表单：输入实体与占位文案由表单自建（占位是表单领域的
   /// 一部分），编辑态只在本模块内维护。
   pub fn new(font: Font, cx: &mut Context<Self>) -> Self {
-    let make = |placeholder: &str, masked: bool, cx: &mut Context<Self>| {
-      cx.new(|cx| TextInput::new(cx, placeholder, masked, font.clone()))
+    let make = |label: &'static str, placeholder: &str, masked: bool, cx: &mut Context<Self>| {
+      cx.new(|cx| TextInput::new(cx, placeholder, masked, font.clone()).with_accessible_label(label))
     };
-    let password = make("密码", true, cx);
+    let password = make("密码", "密码", true, cx);
     // 框内右缘的「显示 / 隐藏」：显示时框是空的、而这条记住了密码，才从钥匙串
     // 取回（ADR-018 修订）。来源读表单字段，经 Weak 引用不延长表单生命周期
     let form = cx.entity().downgrade();
@@ -226,13 +226,13 @@ impl ConnectForm {
       }));
     });
     let mut form = Self {
-      name: make("可选，留空显示 用户@主机:端口", false, cx),
-      host: make("example.com（或粘贴 user@example.com）", false, cx),
-      port: make("22", false, cx),
-      user: make("用户名", false, cx),
+      name: make("名称", "可选，留空显示 用户@主机:端口", false, cx),
+      host: make("主机", "example.com（或粘贴 user@example.com）", false, cx),
+      port: make("端口", "22", false, cx),
+      user: make("用户", "用户名", false, cx),
       password,
-      key_path: make("~/.ssh/id_ed25519", false, cx),
-      key_passphrase: make("私钥口令", true, cx),
+      key_path: make("私钥文件", "~/.ssh/id_ed25519", false, cx),
+      key_passphrase: make("私钥口令", "私钥口令", true, cx),
       use_agent: true,
       forward_agent: false,
       remember_password: false,
@@ -242,11 +242,11 @@ impl ConnectForm {
       jump_enabled: false,
       jump_use_agent: true,
       jump: JumpInputs {
-        target: make("bastion.example.com:22", false, cx),
-        user: make("跳板用户名", false, cx),
-        key_path: make("~/.ssh/id_ed25519", false, cx),
-        key_passphrase: make("跳板私钥口令", true, cx),
-        password: make("跳板密码", true, cx),
+        target: make("跳板主机[:端口]", "bastion.example.com:22", false, cx),
+        user: make("跳板用户", "跳板用户名", false, cx),
+        key_path: make("跳板私钥文件", "~/.ssh/id_ed25519", false, cx),
+        key_passphrase: make("跳板私钥口令", "跳板私钥口令", true, cx),
+        password: make("跳板密码", "跳板密码", true, cx),
       },
       forwards: Vec::new(),
       editing_id: None,

@@ -27,6 +27,7 @@ use zhimaterm_base::input::{
   CopySelection, GestureModifiers, MouseAction, MouseGesture, OpenSearch, PasteClipboard, SplitDown, SplitRight,
   WheelDirection, horizontal_delta_lines, is_link_modifier, key_input, mouse_button, scroll_delta_lines,
 };
+use zhimaterm_base::ui::dialog::{self, Dialog};
 use zhimaterm_base::ui::input::{ImeComposition, TextInput};
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::ui_rems;
@@ -924,8 +925,10 @@ impl TerminalView {
           // 注入（ADR-045 修订）：面板是唯一写入方，直接写视图持有的实体
           let font = font::terminal_font(&self.font.family);
           let history = self.history.clone().expect("SSH 格必有历史实体");
-          self.sftp_panel =
-            Some(cx.new(|cx| crate::views::sftp_panel::SftpPanelView::new(handle, events, font, history, cx)));
+          let return_focus = self.focus.clone();
+          self.sftp_panel = Some(
+            cx.new(|cx| crate::views::sftp_panel::SftpPanelView::new(handle, events, font, history, return_focus, cx)),
+          );
         }
         ControlEvent::ProbeReady(handle) => {
           // 探针面板实体自己持有句柄：开面板起采样、收面板停采样，
@@ -999,7 +1002,8 @@ impl TerminalView {
         }
         SessionEffect::ShowPasswordPrompt => {
           let font = font::terminal_font(&self.font.family);
-          self.password_prompt = Some(cx.new(|cx| TextInput::new(cx, "密码", true, font)));
+          self.password_prompt =
+            Some(cx.new(|cx| TextInput::new(cx, "密码", true, font).with_accessible_label("密码")));
         }
         SessionEffect::ClearPasswordPrompt => self.password_prompt = None,
         SessionEffect::CloseSftpPanel => {
@@ -1184,7 +1188,7 @@ impl TerminalView {
       return;
     }
     let font = font::terminal_font(&self.font.family);
-    let input = cx.new(|cx| TextInput::new(cx, "搜索滚动历史", false, font));
+    let input = cx.new(|cx| TextInput::new(cx, "搜索滚动历史", false, font).with_accessible_label("终端内搜索"));
     // 每次编辑增量搜：读到文本就发给 worker，结果与高亮随后到达
     cx.observe(&input, |view, _, cx| view.run_incremental_search(cx))
       .detach();
@@ -1872,10 +1876,23 @@ fn render_confirm_open(
   }
   let open_path = confirm.path.clone();
   let (open_line, open_column) = (confirm.line, confirm.column);
-  let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
+  let open = cx.listener(move |this, _: &ClickEvent, window, cx| {
     this.confirm_open = None;
-    // 失败不回执：见本函数文档（ADR-055 的静默取舍）
-    editor::open(&this.editor, &open_path, open_line, open_column);
+    // 失败必须可见：档位编辑器可能已被卸载，静默会让「点了没反应」无法归因
+    //（ADR-055 修订 2026-11-23）。
+    if !editor::open(&this.editor, &open_path, open_line, open_column) {
+      let message = format!(
+        "无法用「{}」打开：{}\n请检查设置中的文本编辑器档位是否仍可用。",
+        this.editor.label(),
+        open_path.display()
+      );
+      dialog::open(
+        Dialog::alert("打开文件失败", message),
+        Rc::new(|_: zhimaterm_base::ui::dialog::DialogAnswer, _: &mut Window, _: &mut gpui::App| {}),
+        window,
+        cx,
+      );
+    }
     cx.notify();
   });
   let cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1979,7 +1996,7 @@ fn render_forward_overlay(
     let status = if let Some(reason) = &state.failed {
       div()
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.danger_soft))
+        .text_color(gpui::rgb(tokens.danger_text))
         .child(format!("监听失败：{reason}"))
     } else if let Some(port) = state.listening {
       div()
@@ -2047,7 +2064,7 @@ fn render_forward_overlay(
     )
     .children((agent_enabled || states.is_empty()).then(|| {
       let status = if let Some(reason) = agent_error {
-        (gpui::rgb(tokens.danger_soft), format!("不可用：{reason}"))
+        (gpui::rgb(tokens.danger_text), format!("不可用：{reason}"))
       } else if agent_enabled {
         (gpui::rgb(tokens.accent), "远端可使用本地 agent 签名".to_owned())
       } else {
@@ -2479,6 +2496,37 @@ impl TerminalView {
     cards
   }
 
+  /// 键盘入口（⌘⇧S）：面板已开则只把焦点交给它；未开则走 toggle 打开并聚焦。
+  /// 与底栏 chip 的纯开关分开，避免键盘用户想进面板时反而把它关掉。
+  pub(crate) fn focus_sftp_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(panel) = self.sftp_panel.clone() else {
+      return;
+    };
+    if panel.read(cx).is_open() {
+      let focus = panel.read(cx).focus_handle();
+      window.focus(&focus, cx);
+    } else {
+      self.toggle_sftp_panel(window, cx);
+    }
+  }
+
+  /// 底栏 chip：纯开关 SFTP 面板；打开时焦点交给它，关闭时还给终端。
+  pub(crate) fn toggle_sftp_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(panel) = self.sftp_panel.clone() else {
+      return;
+    };
+    let open = panel.update(cx, |panel, cx| {
+      panel.toggle(cx);
+      panel.is_open()
+    });
+    let focus = if open {
+      panel.read(cx).focus_handle()
+    } else {
+      self.focus.clone()
+    };
+    window.focus(&focus, cx);
+  }
+
   /// 底栏：远端格是统一状态栏（信息区 + 右端入口 chips），本地默认 Shell
   /// 格是探针底栏（只承载「进程」开关）；WSL 格无底栏（ADR-016/028）。
   /// 入口 chips 的样式单点在 shell::status_chip，点击语义各归各处。
@@ -2491,7 +2539,6 @@ impl TerminalView {
     if !self.local {
       // SSH 会话才有 SFTP 面板：底栏右侧放一个开关
       let sftp_toggle = self.sftp_panel.as_ref().map(|panel| {
-        let entity = panel.clone();
         let open = panel.read(cx).is_open();
         shell::status_chip(
           tokens,
@@ -2504,9 +2551,7 @@ impl TerminalView {
             shell::ChipState::Off
           },
         )
-        .on_click(move |_, _, cx| {
-          entity.update(cx, |panel, cx| panel.toggle(cx));
-        })
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_sftp_panel(window, cx)))
         .into_any_element()
       });
       // 「历史」入口（右下角）：SFTP 已结束的操作汇成的操作记录，全屏模态

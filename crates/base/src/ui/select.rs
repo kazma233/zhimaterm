@@ -11,11 +11,12 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-  Anchor, App, Bounds, ClickEvent, Edges, ElementId, MouseButton, MouseDownEvent, Pixels, Size, Window, anchored, div,
-  point, px,
+  Anchor, App, Bounds, ClickEvent, Edges, ElementId, MouseButton, MouseDownEvent, Pixels, Role, Size, Window, anchored,
+  div, point, px,
 };
 
 use crate::theme::UiTokens;
+use crate::ui::scrollbar::Scrollbar;
 use crate::ui::{CLICKABLE, CONTROL_HEIGHT, popover_shadow, ui_rems};
 
 /// 选择框 bounds 槽位：渲染帧写入，展开的浮层按它定位。
@@ -90,9 +91,12 @@ fn select_row_with(
     .py(ui_rems(3.))
     .rounded(px(5.))
     .border_1()
-    .border_color(gpui::rgb(tokens.border_default))
+    .border_color(gpui::rgb(tokens.border_control))
     .bg(gpui::rgb(tokens.bg_input))
     .cursor(CLICKABLE)
+    .role(Role::ComboBox)
+    .aria_label(label.to_owned())
+    .aria_expanded(open)
     .on_click(on_toggle)
     .child(style_text(
       div()
@@ -150,32 +154,44 @@ pub fn anchored_popover<Row: IntoElement>(
   side: PopoverSide,
   min_width: Pixels,
   max_height: Pixels,
-  scroll: Option<&gpui::ScrollHandle>,
+  scroll: Option<(&gpui::ScrollHandle, &Scrollbar)>,
   rows: Vec<Row>,
 ) -> gpui::AnyElement {
   let element_id = id.into();
+  let debug_id = element_id.clone();
+  // 浮层本体就是滚动容器：max_h + overflow 的原生行为是「内容多高就多高，
+  // 超过上限才滚」。不要再套一层 max_h 子容器——子容器会按完整内容高度撑开，
+  // 不产生 max_offset，滚动条/滚轮都失效。
   let popover = div()
     .id(element_id.clone())
     // 元素 id 兼作测试锚点：外层由 anchored() 包装，调用方够不到浮层本体，
     // 布局断言按 debug_bounds(id) 查（非 test 构建是无开销的空操作）
-    .debug_selector(move || element_id.to_string())
+    .debug_selector(move || debug_id.to_string())
     .min_w(min_width)
     .max_h(max_height)
     .overflow_y_scroll()
     .p(px(4.))
     .rounded(px(6.))
     .border_1()
-    .border_color(gpui::rgb(tokens.border_default))
+    .border_color(gpui::rgb(tokens.border_control))
     .bg(gpui::rgb(tokens.bg_focus))
     .shadow(popover_shadow(tokens))
     .flex()
     .flex_col()
     .gap(px(2.))
     .occlude()
+    // 内容右侧留 gutter，滚动条 thumb 不压住行文字
+    .when(scroll.is_some(), |d| d.pr(px(8.)))
+    .when_some(scroll, |d, (handle, _)| d.track_scroll(handle))
     // 浮层截住点击：不冒泡到遮罩（那里点击是收起下拉/关表单）
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-    .when_some(scroll, |popover, scroll| popover.track_scroll(scroll))
     .children(rows);
+  // 滚动条必须挂在滚动容器之外：作为 sibling 覆盖右缘，否则它会跟着内容
+  // 一起滚。shell 与 popover 同尺寸，absolute 右带贴着 popover 右缘。
+  let mut shell = div().relative().child(popover);
+  if let Some((handle, bar)) = scroll {
+    shell = shell.child(bar.overlay((element_id, "scrollbar"), tokens, handle));
+  }
   // 左缘对齐锚点（下拉的正下/正上方口径不变），2px 间隙与旧口径一致；
   // 贴边回弹全权交给 anchored——它按布局后的实际尺寸回弹，无需按 min_width 预判。
   let (corner, offset) = match side {
@@ -187,7 +203,7 @@ pub fn anchored_popover<Row: IntoElement>(
     .anchor(Anchor::TopLeft)
     .offset(offset)
     .snap_to_window_with_margin(Edges::all(px(8.)))
-    .child(popover)
+    .child(shell)
     .into_any_element()
 }
 
@@ -206,6 +222,7 @@ pub fn select_popover(
   preview_font: fn(&str) -> gpui::Font,
   display_name: fn(&str) -> &str,
   scroll: &gpui::ScrollHandle,
+  scrollbar: &Scrollbar,
   on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
@@ -218,6 +235,7 @@ pub fn select_popover(
     bounds_slot,
     viewport,
     scroll,
+    scrollbar,
     move |name| display_name(name).to_owned(),
     move |text, name| text.font(preview_font(name)),
     on_press,
@@ -236,6 +254,7 @@ pub fn plain_select_popover(
   bounds_slot: &BoundsSlot,
   viewport: Size<Pixels>,
   scroll: &gpui::ScrollHandle,
+  scrollbar: &Scrollbar,
   on_press: PressHandler,
   on_pick: PickHandler,
 ) -> gpui::AnyElement {
@@ -248,6 +267,7 @@ pub fn plain_select_popover(
     bounds_slot,
     viewport,
     scroll,
+    scrollbar,
     str::to_owned,
     |text, _| text,
     on_press,
@@ -265,6 +285,7 @@ fn select_popover_with(
   bounds_slot: &BoundsSlot,
   viewport: Size<Pixels>,
   scroll: &gpui::ScrollHandle,
+  scrollbar: &Scrollbar,
   display: impl Fn(&str) -> String,
   style_text: impl Fn(gpui::Div, &str) -> gpui::Div,
   on_press: PressHandler,
@@ -294,7 +315,7 @@ fn select_popover_with(
     popover_side(anchor, viewport.height, px(200.)),
     anchor.size.width,
     px(200.),
-    Some(scroll),
+    Some((scroll, scrollbar)),
     rows,
   )
   .into_any_element()

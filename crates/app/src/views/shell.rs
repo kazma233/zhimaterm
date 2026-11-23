@@ -11,7 +11,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, ElementId, Entity, Keystroke, MouseButton, Window, div, px};
 
 use crate::workspace::PaneId;
-use zhimaterm_base::theme::UiTokens;
+use zhimaterm_base::theme::{UiTokens, readable_on};
 use zhimaterm_base::ui::WindowAction;
 use zhimaterm_base::ui::input::TextInput;
 use zhimaterm_base::ui::overlay::KeyHandling;
@@ -128,7 +128,7 @@ pub fn status_chip_plain(tokens: &UiTokens, label: &str) -> gpui::Div {
     .rounded(px(4.))
     .text_size(ui_rems(10.))
     .bg(gpui::rgb(tokens.bg_row))
-    .text_color(gpui::rgb(tokens.fg_dim))
+    .text_color(gpui::rgb(tokens.fg_muted))
     .child(label.to_owned())
 }
 
@@ -291,7 +291,7 @@ fn lang_chip(tokens: &UiTokens, status: &LangStatus) -> gpui::Div {
 
 /// 角标档位色：远端接受为青绿（与正向指标一致），被拒/失败为红（用户口径）。
 fn lang_status_color(tokens: &UiTokens, applied: bool) -> u32 {
-  if applied { tokens.accent } else { tokens.danger }
+  if applied { tokens.accent } else { tokens.danger_text }
 }
 
 /// 占用率的档位色（CPU/内存共用）：<60% 正常（青）、<90% 偏高（黄）、其余告急（红）。
@@ -301,7 +301,7 @@ fn load_color(tokens: &UiTokens, percent: f32) -> u32 {
   } else if percent < 90. {
     tokens.warn
   } else {
-    tokens.danger
+    tokens.danger_text
   }
 }
 
@@ -527,7 +527,7 @@ pub fn render_trust_prompt(
       .py(px(4.))
       .rounded(px(4.))
       .bg(gpui::rgb(color))
-      .text_color(gpui::rgb(tokens.fg_on_accent))
+      .text_color(gpui::rgb(readable_on(color)))
       .text_size(ui_rems(11.))
       .child(label.to_owned())
   };
@@ -563,7 +563,11 @@ pub fn render_trust_prompt(
     .text_size(ui_rems(12.))
     .child(
       div()
-        .text_color(gpui::rgb(if request.changed { tokens.danger } else { tokens.warn }))
+        .text_color(gpui::rgb(if request.changed {
+          tokens.danger_text
+        } else {
+          tokens.warn
+        }))
         .child(title),
     )
     .children(request.changed.then(|| {
@@ -620,7 +624,7 @@ pub fn render_password_prompt(
       .py(px(4.))
       .rounded(px(4.))
       .bg(gpui::rgb(color))
-      .text_color(gpui::rgb(tokens.fg_on_accent))
+      .text_color(gpui::rgb(readable_on(color)))
       .text_size(ui_rems(11.))
       .child(label.to_owned())
   };
@@ -686,6 +690,7 @@ pub fn render_sidebar(
   // 工作区读写失败提示（ADR-037）：显示在动作行下方，不弹窗
   error: Option<&str>,
   width: f32,
+  focus: &gpui::FocusHandle,
   on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Div {
   div()
@@ -720,6 +725,13 @@ pub fn render_sidebar(
         .child(
           div()
             .id("session-list")
+            .role(gpui::Role::List)
+            .track_focus(focus)
+            // 常驻 1px 透明边框，聚焦时染成强调色：键盘浏览会话时有明确的
+            // 焦点落点，且不因边框出现/消失抖动布局
+            .border_1()
+            .border_color(gpui::rgba(0x00000000))
+            .focus(|style| style.border_color(gpui::rgb(tokens.border_focus)))
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
@@ -739,9 +751,10 @@ pub fn render_sidebar(
 pub fn header_button(
   tokens: &UiTokens,
   id: impl Into<gpui::ElementId>,
+  label: &'static str,
   on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-  panel::clickable(id, on_click)
+  panel::clickable_named(id, label, on_click)
     .w(px(26.))
     .h(px(22.))
     .flex()
@@ -798,7 +811,7 @@ pub fn render_sidebar_row(
       div()
         .flex_none()
         .text_size(ui_rems(11.))
-        .text_color(gpui::rgb(tokens.danger))
+        .text_color(gpui::rgb(tokens.danger_text))
         .child("⚠")
     }))
     .child(
@@ -939,7 +952,7 @@ mod tests {
     assert_eq!(load_color(&tokens, 59.9), tokens.accent);
     assert_eq!(load_color(&tokens, 60.), tokens.warn);
     assert_eq!(load_color(&tokens, 89.9), tokens.warn);
-    assert_eq!(load_color(&tokens, 90.), tokens.danger);
+    assert_eq!(load_color(&tokens, 90.), tokens.danger_text);
   }
 
   /// LANG 角标（ADR-019）：生效青绿、失败红——失败必须用红色（用户口径）。
@@ -947,7 +960,7 @@ mod tests {
   fn lang_status_color_marks_applied_and_failed() {
     let tokens = default_theme().tokens();
     assert_eq!(super::lang_status_color(&tokens, true), tokens.accent);
-    assert_eq!(super::lang_status_color(&tokens, false), tokens.danger);
+    assert_eq!(super::lang_status_color(&tokens, false), tokens.danger_text);
   }
 
   #[test]

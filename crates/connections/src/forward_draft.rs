@@ -100,9 +100,9 @@ impl ForwardRuleDraft {
     target_port: DraftInput<'_>,
     cx: &mut App,
   ) -> Self {
-    let make = |(placeholder, text): DraftInput<'_>, cx: &mut App| {
+    let make = |label: &'static str, (placeholder, text): DraftInput<'_>, cx: &mut App| {
       cx.new(|cx| {
-        let mut input = TextInput::new(cx, placeholder, false, font.clone());
+        let mut input = TextInput::new(cx, placeholder, false, font.clone()).with_accessible_label(label);
         input.set_text(text, cx);
         input
       })
@@ -110,9 +110,9 @@ impl ForwardRuleDraft {
     Self {
       kind,
       all_interfaces,
-      listen_port: make(listen, cx),
-      target_host: make(target_host, cx),
-      target_port: make(target_port, cx),
+      listen_port: make("监听端口", listen, cx),
+      target_host: make("目标主机", target_host, cx),
+      target_port: make("目标端口", target_port, cx),
       error: None,
     }
   }

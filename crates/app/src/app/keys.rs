@@ -99,4 +99,90 @@ impl ZhimaTermApp {
       menu::MenuKeyOutcome::None => {}
     }
   }
+
+  /// 主题下拉展开时的键（捕获阶段，先于终端）：↑↓/Home/End 移动高亮，
+  /// Enter 应用但保持展开（ADR-022 连点比对），Esc 收起。行序始终字母序。
+  pub(super) fn capture_theme_picker_key(
+    &mut self,
+    event: &KeyDownEvent,
+    _window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    if !self.theme_picker.is_open() {
+      return;
+    }
+    let key = &event.keystroke;
+    if key.modifiers.platform || key.modifiers.control || key.modifiers.alt {
+      return;
+    }
+    match key.key.as_str() {
+      "up" => {
+        self.theme_picker.move_highlight(-1);
+        cx.stop_propagation();
+        cx.notify();
+      }
+      "down" => {
+        self.theme_picker.move_highlight(1);
+        cx.stop_propagation();
+        cx.notify();
+      }
+      "home" => {
+        self.theme_picker.select_highlight_edge(false);
+        cx.stop_propagation();
+        cx.notify();
+      }
+      "end" => {
+        self.theme_picker.select_highlight_edge(true);
+        cx.stop_propagation();
+        cx.notify();
+      }
+      "enter" | "return" => {
+        if let Some(name) = self.theme_picker.highlighted_name() {
+          self.pick_theme(name, cx);
+        }
+        cx.stop_propagation();
+      }
+      "escape" => {
+        self.theme_picker.close();
+        cx.stop_propagation();
+        cx.notify();
+      }
+      _ => {}
+    }
+  }
+
+  /// 侧栏列表持焦时的键：↑↓ 循环切换会话、Home/End 跳首尾，Enter/Esc 回终端。
+  /// 焦点全程留在侧栏，方向键不会漏进 shell。
+  pub(super) fn handle_sidebar_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    if !self.sidebar_focus.is_focused(window) {
+      return;
+    }
+    let keystroke = &event.keystroke;
+    if keystroke.modifiers.platform || keystroke.modifiers.control || keystroke.modifiers.alt {
+      return;
+    }
+    match keystroke.key.as_str() {
+      "up" => {
+        self.cycle_sidebar(false, window, cx);
+        cx.stop_propagation();
+      }
+      "down" => {
+        self.cycle_sidebar(true, window, cx);
+        cx.stop_propagation();
+      }
+      "home" => {
+        self.select_sidebar_edge(false, window, cx);
+        cx.stop_propagation();
+      }
+      "end" => {
+        self.select_sidebar_edge(true, window, cx);
+        cx.stop_propagation();
+      }
+      "enter" | "return" | "escape" => {
+        self.activate(self.active, window, cx);
+        cx.stop_propagation();
+      }
+      _ => {}
+    }
+  }
 }

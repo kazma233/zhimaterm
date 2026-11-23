@@ -81,6 +81,8 @@
 - [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。
 - [ADR-059：连字开关与手输字体特性](decisions/059-font-ligatures-and-features.md)：两个设置项只作用终端网格字体，calt 唯一所有者是连字开关，表单严格校验、手改文件跳坏项留好项，测量与渲染同源。
 - [ADR-060：VT 后端原样接入与双后端收敛](decisions/060-as-is-vt-backend-convergence.md)：适配层只做「字节→网格」契约桥接，上游差异原样暴露、分歧表记账不修齐；终态 alacritty + ghostty 双后端。进度：步骤 1（砍兼容层）与步骤 3 删除部分（termwiz 退役、枚举收窄）已执行（2026-11-21）；剩余步骤 2（ghostty Linux 真实使用验证）与切默认。
+- [ADR-061：侧栏与 SFTP 文件列表的键盘导航](decisions/061-list-keyboard-navigation.md)：`⌘⇧E` 聚焦会话列表、↑↓/Home/End 切会话、Enter/Esc 回终端；`⌘⇧S` 打开/聚焦 SFTP，列表 ↑↓ 选择、Enter/→ 进目录、Backspace/← 上级、Delete 删除；焦点边框与返回路径明确。
+- [ADR-062：锚定浮层的常驻滚动条](decisions/062-anchored-popover-scrollbar.md)：滚动条状态归浮层所有者，track/thumb 画在滚动容器外；`max_offset` 是正的可滚距离，拖动/轨道跳转/滚轮同一 offset 口径；字体/主题/Shell/镜像下拉统一获得位置感。
 
 ## 背景与调研（`context/`）
 

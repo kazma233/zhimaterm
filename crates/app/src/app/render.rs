@@ -3,7 +3,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Context, MouseButton, MouseDownEvent, Pixels, Point, Render, Size, Window, div, px};
+use gpui::{
+  App, ClickEvent, Context, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Size, Window, div,
+  px,
+};
 
 use crate::views::icons;
 use crate::views::panes;
@@ -12,7 +15,9 @@ use crate::views::theme_picker;
 use crate::views::title_bar;
 use crate::workspace::SplitAxis;
 use zhimaterm_base::font;
-use zhimaterm_base::input::{CloseSession, NewSession, SplitDown, SplitRight};
+use zhimaterm_base::input::{
+  CloseSession, FocusSidebar, NewSession, NextSession, OpenSettings, PrevSession, SplitDown, SplitRight, ToggleSftp,
+};
 use zhimaterm_base::ui::menu;
 use zhimaterm_base::ui::overlay::{KeyHandling, overlay_host};
 use zhimaterm_base::ui::{panel, ui_rems};
@@ -65,6 +70,7 @@ impl ZhimaTermApp {
     shell::header_button(
       &tokens,
       id,
+      tip,
       cx.listener(move |this, _, window, cx| {
         cx.stop_propagation();
         open(this, window, cx)
@@ -260,10 +266,17 @@ impl Render for ZhimaTermApp {
         Some(
           shell::render_sidebar_row(&tokens, &label, index == self.active, exited, bell, log_warning)
             .id(("session-row", index))
+            .role(Role::ListItem)
+            .aria_label(label.clone())
+            .aria_selected(index == self.active)
+            .tooltip(zhimaterm_base::ui::tooltip::tip(label.clone()))
             .on_mouse_down(
               MouseButton::Left,
               cx.listener(move |this, _, window, cx| {
-                // 按下即选中该标签；拖拽排序由 gpui 在指针移过阈值后接管
+                // 按下即选中该标签；拖拽排序由 gpui 在指针移过阈值后接管。
+                // prevent_default 挡住列表 track_focus 的点击聚焦：鼠标点行
+                // 应进终端，不能把焦点留在侧栏。
+                window.prevent_default();
                 this.activate(index, window, cx);
               }),
             )
@@ -317,15 +330,33 @@ impl Render for ZhimaTermApp {
         )
       })
       .collect();
-    // 过滤后一行不剩：列表位给占位提示（滚动容器的元素 id 不变，滚动状态不丢）
+    // 过滤后一行不剩：列表位给占位提示与清空入口（滚动容器的元素 id 不变，
+    // 滚动状态不丢）。清空动作只动搜索框，不碰会话。
     let rows = if rows.is_empty() && !filter.is_empty() {
+      let clear = cx.listener(|this, _: &ClickEvent, _, cx| {
+        this.session_search.update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+      });
       vec![
         div()
           .px(px(6.))
           .py(px(10.))
-          .text_size(ui_rems(11.))
-          .text_color(gpui::rgb(tokens.fg_muted))
-          .child("无匹配会话")
+          .flex()
+          .items_center()
+          .gap(px(6.))
+          .child(
+            div()
+              .text_size(ui_rems(11.))
+              .text_color(gpui::rgb(tokens.fg_muted))
+              .child("无匹配会话"),
+          )
+          .child(
+            panel::clickable_named("clear-session-filter", "清空搜索", clear)
+              .text_size(ui_rems(11.))
+              .text_color(gpui::rgb(tokens.accent))
+              .hover(|style| style.text_color(gpui::rgb(tokens.fg_bright)))
+              .child("清空搜索"),
+          )
           .into_any_element(),
       ]
     } else {
@@ -446,8 +477,9 @@ impl Render for ZhimaTermApp {
         self.ui_font_family.as_deref().unwrap_or(font::SYSTEM_UI_FONT),
       ))
       .on_key_down(cx.listener(|this, event, window, cx| this.handle_key_down(event, window, cx)))
-      // 捕获阶段先于终端：侧栏菜单的 Esc 不能先被终端写进 PTY
+      // 捕获阶段先于终端：侧栏菜单/主题下拉的 Esc 不能先被终端写进 PTY
       .capture_key_down(cx.listener(|this, event, window, cx| this.capture_sidebar_menu_key(event, window, cx)))
+      .capture_key_down(cx.listener(|this, event, window, cx| this.capture_theme_picker_key(event, window, cx)))
       // 会话级快捷键由 keymap 绑定派发到这里（绑定见 input::app_key_bindings）；
       // 应用根总是位于焦点路径上，任何非模态焦点（搜索条、SFTP 面板）都能开/关会话。
       // 浮层栈非空时不响应：`Scope::App` 绑定无上下文、且绑定匹配先于裸键派发，
@@ -473,6 +505,34 @@ impl Render for ZhimaTermApp {
           _ => this.request_close_session(this.active, window, cx),
         }
       }))
+      .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
+        if overlay_host(cx).read(cx).is_empty() {
+          window.focus(&this.sidebar_focus, cx);
+        }
+      }))
+      .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+        if overlay_host(cx).read(cx).is_empty() {
+          this.open_settings_form(window, cx);
+        }
+      }))
+      .on_action(cx.listener(|this, _: &ToggleSftp, window, cx| {
+        if !overlay_host(cx).read(cx).is_empty() {
+          return;
+        }
+        if let Some(view) = this.tabs.get(this.active).and_then(Tab::focused_view) {
+          view.update(cx, |view, cx| view.focus_sftp_panel(window, cx));
+        }
+      }))
+      .on_action(cx.listener(|this, _: &NextSession, window, cx| {
+        if overlay_host(cx).read(cx).is_empty() {
+          this.cycle_session(true, window, cx);
+        }
+      }))
+      .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
+        if overlay_host(cx).read(cx).is_empty() {
+          this.cycle_session(false, window, cx);
+        }
+      }))
       .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
         this.split_focused(SplitAxis::SideBySide, window, cx);
       }))
@@ -493,10 +553,14 @@ impl Render for ZhimaTermApp {
               rows,
               self.workspace_error.as_deref(),
               self.sidebar_width,
+              &self.sidebar_focus,
               cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.sidebar_resizing = Some((f32::from(event.position.x), this.sidebar_width));
               }),
+            )
+            .on_key_down(
+              cx.listener(|this, event: &KeyDownEvent, window, cx| this.handle_sidebar_key(event, window, cx)),
             )
             .children(sidebar_resize_listeners)
           })

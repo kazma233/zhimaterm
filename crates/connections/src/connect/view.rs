@@ -688,7 +688,7 @@ fn saved_row(
       .text_size(ui_rems(11.))
       .text_color(gpui::rgb(tokens.fg_muted))
       // 销毁动作：悬停转危险色，按下前先有预告
-      .hover(|style| style.text_color(gpui::rgb(tokens.danger)))
+      .hover(|style| style.text_color(gpui::rgb(tokens.danger_text)))
       .child("删除"),
     )
 }

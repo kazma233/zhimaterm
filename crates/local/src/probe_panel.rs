@@ -246,7 +246,7 @@ impl ProbePanelView {
           .text_ellipsis()
           .text_size(ui_rems(11.))
           .text_color(gpui::rgb(if matches!(self.state, ProbeState::Failed(_)) {
-            palette.danger
+            palette.danger_text
           } else {
             palette.fg_muted
           }))
@@ -510,7 +510,7 @@ impl ProbePanelView {
       .child(
         div()
           .text_size(ui_rems(10.))
-          .text_color(gpui::rgb(palette.danger))
+          .text_color(gpui::rgb(palette.danger_text))
           .child("此操作不可恢复"),
       );
 
@@ -686,7 +686,7 @@ fn render_process_row(
         .overflow_hidden()
         .text_ellipsis()
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(palette.fg_dim))
+        .text_color(gpui::rgb(palette.fg_muted))
         .font(font.clone())
         .child(command.to_owned()),
     );

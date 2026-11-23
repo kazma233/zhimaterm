@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-  AnyElement, App, Bounds, Context, Entity, FocusHandle, Keystroke, MouseDownEvent, Pixels, Window, div, px, relative,
+  AnyElement, App, Bounds, Context, Entity, FocusHandle, Keystroke, MouseDownEvent, Pixels, Role, Window, div, px,
+  relative,
 };
 
 use crate::settings::{
@@ -26,6 +27,7 @@ use zhimaterm_base::ui::card;
 use zhimaterm_base::ui::input::{self, TextInput};
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView, Species};
 use zhimaterm_base::ui::panel;
+use zhimaterm_base::ui::scrollbar::Scrollbar;
 use zhimaterm_base::ui::select;
 use zhimaterm_base::ui::select::{plain_select_popover, plain_select_row, select_backdrop, select_popover, select_row};
 use zhimaterm_base::ui::{DEFAULT_UI_FONT_SIZE, WindowAction, ui_rems};
@@ -185,6 +187,8 @@ pub struct SettingsForm {
   highlight: Option<usize>,
   /// 展开下拉的滚动控制：打开周期内第一帧布局后把选中项滚到浮层中部
   dropdown_scroll: gpui::ScrollHandle,
+  /// 展开下拉的滚动条拖拽状态（与上面的 ScrollHandle 配对）
+  dropdown_scrollbar: Scrollbar,
   /// 本打开周期是否已做过「选中项居中」定位：项 bounds 布局后才有，
   /// 只能下一帧做，标记防止每帧重复定位
   scroll_centered: bool,
@@ -221,17 +225,17 @@ impl SettingsForm {
     let (editor_choice, custom_editor_text) = resolve_editor_choice(&editors, current.text_editor.as_deref());
     let editor_index = editor_choice.index(editors.len());
     let input_font = font::terminal_font(&current.font_family);
-    let make = |placeholder: &str, cx: &mut Context<Self>| {
-      cx.new(|cx| TextInput::new(cx, placeholder, false, input_font.clone()))
+    let make = |label: &'static str, placeholder: &str, cx: &mut Context<Self>| {
+      cx.new(|cx| TextInput::new(cx, placeholder, false, input_font.clone()).with_accessible_label(label))
     };
     // 占位只写默认值作提示；当前值靠 set_text 预填回显
-    let size = make(&font::DEFAULT_FONT_SIZE.to_string(), cx);
-    let ui_size = make(&DEFAULT_UI_FONT_SIZE.to_string(), cx);
-    let history = make(&DEFAULT_SCROLLING_HISTORY.to_string(), cx);
-    let features = make(FONT_FEATURES_PLACEHOLDER, cx);
-    let custom_shell = make(CUSTOM_SHELL_PLACEHOLDER, cx);
-    let custom_editor = make(CUSTOM_EDITOR_PLACEHOLDER, cx);
-    let workdir = make("", cx);
+    let size = make("终端字号", &font::DEFAULT_FONT_SIZE.to_string(), cx);
+    let ui_size = make("界面字号", &DEFAULT_UI_FONT_SIZE.to_string(), cx);
+    let history = make("滚动历史行数", &DEFAULT_SCROLLING_HISTORY.to_string(), cx);
+    let features = make("字体特性", FONT_FEATURES_PLACEHOLDER, cx);
+    let custom_shell = make("自定义 Shell 路径", CUSTOM_SHELL_PLACEHOLDER, cx);
+    let custom_editor = make("自定义编辑器路径", CUSTOM_EDITOR_PLACEHOLDER, cx);
+    let workdir = make("默认工作目录", "", cx);
     size.update(cx, |input, cx| input.set_text(&current.font_size.to_string(), cx));
     ui_size.update(cx, |input, cx| input.set_text(&current.ui_font_size.to_string(), cx));
     history.update(cx, |input, cx| {
@@ -269,6 +273,7 @@ impl SettingsForm {
       open: None,
       highlight: None,
       dropdown_scroll: Default::default(),
+      dropdown_scrollbar: Scrollbar::new(),
       scroll_centered: false,
       dropdown_dragging: false,
       drag_pos: Default::default(),
@@ -380,6 +385,9 @@ impl SettingsForm {
     self.open = if self.open == Some(field) { None } else { Some(field) };
     self.highlight = self.open.map(|field| self.selected_of(field));
     self.scroll_centered = false;
+    if self.open.is_none() {
+      self.dropdown_scrollbar.cancel_drag();
+    }
     cx.notify();
   }
 
@@ -452,6 +460,7 @@ impl SettingsForm {
   pub fn close_dropdowns(&mut self, cx: &mut Context<Self>) {
     self.open = None;
     self.dropdown_dragging = false;
+    self.dropdown_scrollbar.cancel_drag();
     cx.notify();
   }
 
@@ -640,15 +649,21 @@ fn checkbox_row(
 ) -> gpui::Stateful<gpui::Div> {
   let box_style = |box_div: gpui::Div| {
     if checked {
-      box_div.bg(gpui::rgb(tokens.accent))
+      box_div.bg(gpui::rgb(tokens.bg_accent))
     } else {
       box_div
         .bg(gpui::rgb(tokens.bg_input))
         .border_1()
-        .border_color(gpui::rgb(tokens.border_default))
+        .border_color(gpui::rgb(tokens.border_control))
     }
   };
   zhimaterm_base::ui::panel::clickable(id, move |event, window, cx| on_toggle(event, window, cx))
+    .role(Role::CheckBox)
+    .aria_label(title.to_owned())
+    .aria_toggled(checked.into())
+    .when(!description.is_empty(), |row| {
+      row.aria_description(description.to_owned())
+    })
     .debug_selector(|| id.into())
     .flex()
     .flex_col()
@@ -671,7 +686,7 @@ fn checkbox_row(
               it.child(
                 div()
                   .text_size(ui_rems(10.))
-                  .text_color(gpui::rgb(tokens.fg_on_accent))
+                  .text_color(gpui::rgb(zhimaterm_base::theme::readable_on(tokens.bg_accent)))
                   .child("✓"),
               )
             }),
@@ -705,6 +720,9 @@ fn backend_picker(
     // 的单色染色会把官方 logo 塌成剪影。名称文字仍按选中态换色。
     let name_color = if selected { tokens.fg } else { tokens.fg_secondary };
     zhimaterm_base::ui::panel::clickable(id, move |_, _, cx| on_pick(backend, cx))
+      .role(Role::RadioButton)
+      .aria_label(name)
+      .aria_selected(selected)
       .debug_selector(|| id.into())
       .flex()
       .flex_1()
@@ -714,7 +732,7 @@ fn backend_picker(
       .py(px(10.))
       .rounded(px(6.))
       .border_1()
-      .border_color(gpui::rgb(if selected { tokens.accent } else { tokens.border_default }))
+      .border_color(gpui::rgb(if selected { tokens.accent } else { tokens.border_control }))
       .when(selected, |it| it.bg(gpui::rgb(tokens.bg_input)))
       .child(gpui::img(icon).size(px(20.)).overflow_hidden().rounded(px(4.)))
       .child(card::title(tokens, name).text_color(gpui::rgb(name_color)))
@@ -1170,6 +1188,7 @@ impl ModalView for SettingsModal {
         preview_font,
         font_display_name,
         &scroll,
+        &form.dropdown_scrollbar,
         press,
         pick,
       ),
@@ -1182,6 +1201,7 @@ impl ModalView for SettingsModal {
         &bounds,
         viewport,
         &scroll,
+        &form.dropdown_scrollbar,
         press,
         pick,
       ),

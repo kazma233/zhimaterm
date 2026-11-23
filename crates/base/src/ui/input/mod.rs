@@ -61,6 +61,8 @@ pub fn field_with_hint(
   hint: Option<gpui::AnyElement>,
   input: &gpui::Entity<TextInput>,
 ) -> gpui::Div {
+  // 无障碍名称在输入框构造期由表单域设置（与字段标签同一文案）；这里只负责
+  // 可见标签与错误行，渲染期不改实体。
   let mut head = div().flex().items_center().gap(px(6.)).child(
     div()
       .text_size(ui_rems(10.))
@@ -74,7 +76,7 @@ pub fn field_with_hint(
         .flex_1()
         .min_w(px(0.))
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.danger))
+        .text_color(gpui::rgb(tokens.danger_text))
         .child(error.to_owned()),
     );
   } else if let Some(hint) = hint {

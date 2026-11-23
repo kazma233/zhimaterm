@@ -102,7 +102,9 @@ impl Dialog {
     font: gpui::Font,
     cx: &mut App,
   ) -> Self {
-    let input = cx.new(|cx| TextInput::new(cx, placeholder, masked, font));
+    let title = title.into();
+    let label = title.clone();
+    let input = cx.new(|cx| TextInput::new(cx, placeholder, masked, font).with_accessible_label(label));
     Self {
       input: Some(input),
       ..Self::confirm(title, message)
@@ -191,7 +193,7 @@ impl ModalView for DialogModal {
     let tokens = crate::theme::tokens(cx);
     // 危险确认的正文用红字承载分量（皮肤不再变色）；普通确认用次级灰
     let message_color = if self.dialog.danger {
-      tokens.danger
+      tokens.danger_text
     } else {
       tokens.fg_secondary
     };

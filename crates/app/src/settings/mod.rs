@@ -18,8 +18,8 @@ use zhimaterm_terminal::backend::BackendKind;
 pub const MIN_FONT_SIZE: f32 = 6.0;
 /// 终端字号上限：再大一个格子占掉小半个窗口，行列表格全被撑破。
 pub const MAX_FONT_SIZE: f32 = 72.0;
-/// 界面字号下限：标签类小字（10px 设计值）再小就没法读。
-pub const MIN_UI_FONT_SIZE: f32 = 10.0;
+/// 界面字号下限：标签类小字（10px 设计值）在 11px 根下约 9.2px，再小就没法读。
+pub const MIN_UI_FONT_SIZE: f32 = 11.0;
 /// 界面字号上限：界面文字太多层级，放大到两倍多后布局基本没法看。
 pub const MAX_UI_FONT_SIZE: f32 = 20.0;
 /// 滚动历史上限的下限：0 = 完全不留历史。

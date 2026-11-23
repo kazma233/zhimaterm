@@ -110,19 +110,24 @@ pub fn render(
 
   // 左端控制按钮（GNOME 的 macOS 风格布局把关闭放左边）
   let bar = bar.children(left_controls);
-  // 中区活动会话标题：与侧栏行同一字符串，挤压时截断不换行；空列表不显示
-  let bar = bar.child(
-    div()
-      .flex_1()
-      .min_w(px(0.))
-      .overflow_hidden()
-      .whitespace_nowrap()
-      .text_ellipsis()
-      .px(px(6.))
-      .text_size(ui_rems(12.))
-      .text_color(gpui::rgb(tokens.fg_secondary))
-      .children(title.map(str::to_owned)),
-  );
+  // 中区活动会话标题：与侧栏行同一字符串，挤压时截断不换行；空列表不显示。
+  // 截断后靠 tooltip 找回完整名字（侧栏行同样处理）。
+  let title_tip = title.map(str::to_owned);
+  let mut title_el = div()
+    .id("title-bar-title")
+    .flex_1()
+    .min_w(px(0.))
+    .overflow_hidden()
+    .whitespace_nowrap()
+    .text_ellipsis()
+    .px(px(6.))
+    .text_size(ui_rems(12.))
+    .text_color(gpui::rgb(tokens.fg_secondary))
+    .children(title_tip.clone());
+  if let Some(tip) = title_tip {
+    title_el = title_el.tooltip(zhimaterm_base::ui::tooltip::tip(tip));
+  }
+  let bar = bar.child(title_el);
   let bar = bar.child(
     div()
       .flex_none()

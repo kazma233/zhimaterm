@@ -20,6 +20,7 @@ use zhimaterm_base::ui::human_bytes;
 use zhimaterm_base::ui::input::{TextInput, field as input_field, field_with_hint as input_field_with_hint};
 use zhimaterm_base::ui::overlay::{KeyHandling, ModalView, Species, bare_key};
 use zhimaterm_base::ui::panel;
+use zhimaterm_base::ui::scrollbar::Scrollbar;
 use zhimaterm_base::ui::select::{plain_select_popover, plain_select_row, select_backdrop};
 use zhimaterm_base::ui::ui_rems;
 
@@ -275,6 +276,8 @@ pub struct WslManagerPage {
   install_highlight: Option<usize>,
   /// 镜像下拉候选滚动
   install_scroll: gpui::ScrollHandle,
+  /// 镜像下拉滚动条拖拽状态
+  install_scrollbar: Scrollbar,
   /// 新增模态内的校验错误（用户名非法这类）：页面头部状态行在模态遮罩后
   /// 看不见，错误只在模态说明区显示
   install_notice: Option<String>,
@@ -303,8 +306,9 @@ pub struct WslManagerPage {
 
 impl WslManagerPage {
   pub fn new(font: gpui::Font, on_pick: PickAction, cx: &mut Context<Self>) -> Self {
-    let form_input =
-      |placeholder: &str, cx: &mut Context<Self>| cx.new(|cx| TextInput::new(cx, placeholder, false, font.clone()));
+    let form_input = |label: &'static str, placeholder: &str, cx: &mut Context<Self>| {
+      cx.new(|cx| TextInput::new(cx, placeholder, false, font.clone()).with_accessible_label(label))
+    };
     let mut page = Self {
       distros: Vec::new(),
       busy: None,
@@ -314,11 +318,12 @@ impl WslManagerPage {
       install_bounds: Rc::new(Cell::new(Bounds::default())),
       install_highlight: None,
       install_scroll: gpui::ScrollHandle::new(),
+      install_scrollbar: Scrollbar::new(),
       install_notice: None,
-      install_location: form_input("默认（用户目录）", cx),
-      install_name: form_input("与 Distribution 同名", cx),
-      install_user: form_input("Distribution 默认（首次启动引导创建）", cx),
-      install_vhd_size: form_input("默认大小", cx),
+      install_location: form_input("安装位置", "默认（用户目录）", cx),
+      install_name: form_input("Distribution 名称", "与 Distribution 同名", cx),
+      install_user: form_input("默认用户名", "Distribution 默认（首次启动引导创建）", cx),
+      install_vhd_size: form_input("磁盘大小", "默认大小", cx),
       install_no_launch: true,
       install_web_download: false,
       install_fixed_vhd: false,
@@ -526,6 +531,7 @@ impl WslManagerPage {
   /// 收起镜像下拉（backdrop 点击与 Esc 共用入口）。
   fn close_install_dropdown(&mut self, cx: &mut Context<Self>) {
     self.install_open = false;
+    self.install_scrollbar.cancel_drag();
     cx.notify();
   }
 
@@ -541,6 +547,8 @@ impl WslManagerPage {
     self.install_highlight = self.install_selected;
     if self.install_open {
       self.install_scroll.set_offset(gpui::point(px(0.), px(0.)));
+    } else {
+      self.install_scrollbar.cancel_drag();
     }
     cx.notify();
   }
@@ -963,11 +971,15 @@ impl WslManagerPage {
     .text_color(gpui::rgb(match (enabled, danger) {
       (false, _) => tokens.fg_muted,
       (true, false) => tokens.fg_secondary,
-      (true, true) => tokens.danger,
+      (true, true) => tokens.danger_text,
     }))
     .hover(|style| {
       if enabled {
-        style.border_color(gpui::rgb(if danger { tokens.danger } else { tokens.border_hover }))
+        style.border_color(gpui::rgb(if danger {
+          tokens.danger_text
+        } else {
+          tokens.border_hover
+        }))
       } else {
         style
       }
@@ -1212,14 +1224,14 @@ impl WslManagerPage {
                     .py(px(1.))
                     .rounded(px(3.))
                     .bg(gpui::rgb(tokens.bg_success))
-                    .text_color(gpui::rgb(tokens.accent))
-                    .text_size(ui_rems(9.))
+                    .text_color(gpui::rgb(theme::readable_on(tokens.bg_success)))
+                    .text_size(ui_rems(10.))
                     .child("默认")
                 }))
                 // 运行状态 chip：一眼可辨（运行中绿 / 已停止灰）
                 .child({
                   let (label, bg, fg) = if distro.running {
-                    ("运行中", tokens.bg_success, tokens.accent)
+                    ("运行中", tokens.bg_success, theme::readable_on(tokens.bg_success))
                   } else {
                     ("已停止", tokens.bg_row, tokens.fg_muted)
                   };
@@ -1230,7 +1242,7 @@ impl WslManagerPage {
                     .rounded(px(3.))
                     .bg(gpui::rgb(bg))
                     .text_color(gpui::rgb(fg))
-                    .text_size(ui_rems(9.))
+                    .text_size(ui_rems(10.))
                     .child(label)
                 }),
             )
@@ -1421,7 +1433,7 @@ impl WslSettingsModal {
       .bg(gpui::rgb(tokens.bg_row))
       .border_1()
       .border_color(gpui::rgb(tokens.border_subtle))
-      .text_size(ui_rems(9.))
+      .text_size(ui_rems(10.))
       .text_color(gpui::rgb(tokens.fg_muted))
       .child("默认")
   }
@@ -1440,7 +1452,7 @@ impl WslSettingsModal {
       .border_color(gpui::rgb(if active {
         tokens.bg_accent
       } else {
-        tokens.border_default
+        tokens.border_control
       }))
       .flex()
       .flex_none()
@@ -1450,7 +1462,11 @@ impl WslSettingsModal {
           .mx(px(2.))
           .size(px(10.))
           .rounded_full()
-          .bg(gpui::rgb(if active { tokens.accent } else { tokens.fg_muted }))
+          .bg(gpui::rgb(if active {
+            theme::readable_on(tokens.bg_accent)
+          } else {
+            tokens.fg_muted
+          }))
           .when(active, |dot| dot.ml_auto()),
       )
   }
@@ -2188,6 +2204,7 @@ impl zhimaterm_base::ui::overlay::ModalView for WslInstallModal {
       &bounds,
       window.viewport_size(),
       &scroll,
+      &page.install_scrollbar,
       press,
       pick,
     );

@@ -66,3 +66,16 @@
 验收：重构前后按平台展开的 `(keystroke → action)` 集合逐一相等（macOS 33 条、
 其余平台 35 条，diff 为空）；新增 `bindings_have_no_duplicate_keystroke` 护栏
 （重复拼写几乎总是配对写错的症状）。
+
+## 修订（2026-11-23）：无障碍语义与标签关联
+
+输入框此前只有自绘画面，AccessKit 树里没有名称/角色/值。现补：
+
+- 渲染节点挂 `Role::TextInput`、`aria_label`、`aria_placeholder`；非掩码时
+  挂当前文本 `aria_value`，掩码框不暴露 value；校验错误进 `aria_description`。
+- 无障碍名称在**构造期**由表单域写入（`with_accessible_label`），无名称时
+  回落占位文案；不在渲染期改实体，避免渲染循环。连接/转发/设置/WSL 表单、
+  会话搜索、终端搜索、密码框与通用 Dialog prompt 都走这一条。
+- `input::field` 只渲染可见标签与错误行，不再写实体；可见标签与无障碍名称
+  的文案由同一个表单域常量给出。
+- 单测：`accessible_label` / `accessible_description` 暴露。

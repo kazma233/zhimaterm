@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px};
+use gpui::{
+  Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Role, Window, div, point, px,
+};
 
 use zhimaterm_base::theme::{UiTokens, tokens};
 use zhimaterm_base::ui::CLICKABLE;
@@ -39,6 +41,8 @@ const DIRECT_DELETE_ID: TaskId = u64::MAX;
 
 pub struct SftpPanelView {
   focus: FocusHandle,
+  /// 面板里 Esc 归还焦点：终端格的焦点句柄
+  return_focus: FocusHandle,
   handle: SftpHandle,
   /// 面板是否展开；关闭只是不渲染，事件循环继续（空转代价可忽略）
   open: bool,
@@ -49,6 +53,8 @@ pub struct SftpPanelView {
   entries: Vec<RemoteEntry>,
   /// 在当前列表里选中的条目（完整远端路径）
   selected: Option<PathBuf>,
+  /// 文件列表滚动句柄：键盘选中项滚入视口
+  list_scroll: gpui::ScrollHandle,
   loading: bool,
   error: Option<String>,
   tasks: Vec<TaskItem>,
@@ -105,6 +111,7 @@ impl SftpPanelView {
     task_events: SftpEvents,
     font: gpui::Font,
     history: Entity<SessionHistory>,
+    return_focus: FocusHandle,
     cx: &mut Context<Self>,
   ) -> Self {
     // 任务事件循环跟着面板走：进度与终态直接更新任务列表
@@ -125,12 +132,14 @@ impl SftpPanelView {
 
     let mut panel = Self {
       focus: cx.focus_handle(),
+      return_focus,
       handle,
       open: false,
       closed: false,
       path: PathBuf::from("."),
       entries: Vec::new(),
       selected: None,
+      list_scroll: gpui::ScrollHandle::new(),
       loading: false,
       error: None,
       tasks: Vec::new(),
@@ -149,6 +158,11 @@ impl SftpPanelView {
 
   pub fn is_open(&self) -> bool {
     self.open
+  }
+
+  /// 面板焦点句柄：外壳打开面板后把焦点交给列表。
+  pub fn focus_handle(&self) -> FocusHandle {
+    self.focus.clone()
   }
 
   /// 应用层换终端字体时同步：面板存字体是为了之后创建的输入框
@@ -202,8 +216,10 @@ impl SftpPanelView {
         sort_entries(&mut entries);
         self.path = path;
         self.entries = entries;
-        // 列表刷新后旧选中多半已不存在：清掉，避免对着幽灵条目操作
+        // 列表刷新后旧选中多半已不存在：清掉，避免对着幽灵条目操作；
+        // 目录切换后滚动回到顶部
         self.selected = None;
+        self.list_scroll.set_offset(point(px(0.), px(0.)));
       }
       Err(error) => self.fail(format!("读取 {} 失败：{error}", path.display()), cx),
     }
@@ -231,6 +247,81 @@ impl SftpPanelView {
     self.entries.clear();
     self.selected = None;
     self.refresh(cx);
+  }
+
+  fn selected_index(&self) -> Option<usize> {
+    let selected = self.selected.as_ref()?;
+    self.entries.iter().position(|entry| &entry.path == selected)
+  }
+
+  fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    let Some(index) = next_selection(self.selected_index(), self.entries.len(), delta) else {
+      return;
+    };
+    self.selected = Some(self.entries[index].path.clone());
+    self.list_scroll.scroll_to_item(index);
+    cx.notify();
+  }
+
+  fn select_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+    if self.entries.is_empty() {
+      return;
+    }
+    let index = if last { self.entries.len() - 1 } else { 0 };
+    self.selected = Some(self.entries[index].path.clone());
+    self.list_scroll.scroll_to_item(index);
+    cx.notify();
+  }
+
+  /// 文件列表持焦时的键：↑↓/Home/End 选择，Enter/→ 进目录，Backspace/← 上级，
+  /// Delete 删除（走既有确认），Esc 把焦点还给终端格。
+  fn handle_list_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    let key = &event.keystroke;
+    if key.modifiers.platform || key.modifiers.control || key.modifiers.alt {
+      return;
+    }
+    match key.key.as_str() {
+      "up" => {
+        self.move_selection(-1, cx);
+        cx.stop_propagation();
+      }
+      "down" => {
+        self.move_selection(1, cx);
+        cx.stop_propagation();
+      }
+      "home" => {
+        self.select_edge(false, cx);
+        cx.stop_propagation();
+      }
+      "end" => {
+        self.select_edge(true, cx);
+        cx.stop_propagation();
+      }
+      "enter" | "return" | "right" => {
+        if let Some(entry) = self.selected_entry().cloned()
+          && entry.file_type == RemoteFileType::Dir
+        {
+          self.navigate(&entry, cx);
+        }
+        cx.stop_propagation();
+      }
+      "backspace" | "left" => {
+        self.go_up(cx);
+        cx.stop_propagation();
+      }
+      "delete" => {
+        self.start_remove(cx);
+        cx.stop_propagation();
+      }
+      "escape" => {
+        // 侧面板的 Esc 语义：关闭面板并把焦点还给终端格
+        self.open = false;
+        window.focus(&self.return_focus, cx);
+        cx.notify();
+        cx.stop_propagation();
+      }
+      _ => {}
+    }
   }
 
   // ---------- 操作入口 ----------
@@ -792,6 +883,10 @@ impl Render for SftpPanelView {
       .flex_col()
       .border_l_1()
       .border_color(gpui::rgb(palette.border_subtle))
+      // 面板本身是键盘焦点落点：点击面板任意空白/行即聚焦，↑↓ 进入文件
+      // 列表导航；聚焦时左缘线染强调色，告诉用户按键现在归面板。
+      .track_focus(&self.focus)
+      .focus(|style| style.border_color(gpui::rgb(palette.border_focus)))
       .bg(gpui::rgb(palette.bg_input))
       .text_size(ui_rems(12.))
       .text_color(gpui::rgb(palette.fg))
@@ -826,8 +921,14 @@ impl Render for SftpPanelView {
             }
             menu::MenuKeyOutcome::None => {}
           }
+          // 菜单开着时其余键也不落到文件列表：避免光标在菜单背后移动/删除
+          return;
         }
-        panel.handle_dialog_key(event, window, cx);
+        if panel.dialog.is_some() {
+          panel.handle_dialog_key(event, window, cx);
+          return;
+        }
+        panel.handle_list_key(event, window, cx);
       }))
       .child(self.render_header(cx))
       .child(self.render_path_bar(cx))
@@ -971,7 +1072,7 @@ impl SftpPanelView {
   /// 刷新按钮：导航栏右缘的唯一刷新入口；loading 时显示 …，再点只是重发一次
   /// 列目录请求，幂等。
   fn refresh_button(&self, id: &'static str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-    panel::clickable(id, cx.listener(|panel, _, _, cx| panel.refresh(cx)))
+    panel::clickable_named(id, "刷新", cx.listener(|panel, _, _, cx| panel.refresh(cx)))
       .px(px(6.))
       .py(px(2.))
       .rounded(px(4.))
@@ -984,6 +1085,8 @@ impl SftpPanelView {
   fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let mut list = div()
       .id("sftp-entries")
+      .role(Role::List)
+      .track_scroll(&self.list_scroll)
       .flex_1()
       .min_h(px(0.))
       .flex()
@@ -1036,6 +1139,9 @@ impl SftpPanelView {
     let menu_entry = entry.clone();
     let mut row = div()
       .id(("sftp-entry", index))
+      .role(Role::ListItem)
+      .aria_label(name.clone())
+      .aria_selected(selected)
       .flex()
       .items_center()
       .gap_x(px(6.))
@@ -1229,7 +1335,7 @@ impl SftpPanelView {
         .px(px(10.))
         .py(px(4.))
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.danger))
+        .text_color(gpui::rgb(tokens.danger_text))
         .child(error.clone()),
     )
   }
@@ -1333,7 +1439,7 @@ fn confirm_content(tokens: &UiTokens, message: &str, warning: Option<&str>) -> g
     content = content.child(
       div()
         .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.danger))
+        .text_color(gpui::rgb(tokens.danger_text))
         .child(warning.to_owned()),
     );
   }
@@ -1361,7 +1467,7 @@ fn action_button(
   label: &str,
   on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-  panel::clickable(id, on_click)
+  panel::clickable_named(id, label, on_click)
     .px(px(8.))
     .py(px(3.))
     .rounded(px(4.))
@@ -1383,6 +1489,18 @@ fn sort_entries(entries: &mut [RemoteEntry]) {
       .cmp(&dir_a)
       .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
   });
+}
+
+/// 键盘选择的下一项：无选中时按方向落到首/尾，有选中时在两端夹住。
+fn next_selection(current: Option<usize>, len: usize, delta: isize) -> Option<usize> {
+  if len == 0 {
+    return None;
+  }
+  Some(match current {
+    Some(index) => (index as isize + delta).clamp(0, len as isize - 1) as usize,
+    None if delta < 0 => len - 1,
+    None => 0,
+  })
 }
 
 /// 字节数的人类可读形式；1024 进制与多数文件管理器一致。
@@ -1476,8 +1594,8 @@ fn overwrite_message(action: &PendingTransfer, local: &Path) -> String {
 #[cfg(test)]
 mod tests {
   use super::{
-    PendingTransfer, clean_name, format_size, overwrite_message, progress_text, sibling_path, sort_entries,
-    upload_message,
+    PendingTransfer, clean_name, format_size, next_selection, overwrite_message, progress_text, sibling_path,
+    sort_entries, upload_message,
   };
   use std::path::{Path, PathBuf};
   use zhimaterm_recording::history::ProgressUnit;
@@ -1503,6 +1621,16 @@ mod tests {
     sort_entries(&mut entries);
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["Dir", "a.txt", "apple", "b.txt"]);
+  }
+
+  #[test]
+  fn keyboard_selection_starts_at_edges_and_clamps() {
+    assert_eq!(next_selection(None, 0, 1), None);
+    assert_eq!(next_selection(None, 3, 1), Some(0));
+    assert_eq!(next_selection(None, 3, -1), Some(2));
+    assert_eq!(next_selection(Some(1), 3, 1), Some(2));
+    assert_eq!(next_selection(Some(2), 3, 1), Some(2), "底部夹住");
+    assert_eq!(next_selection(Some(0), 3, -1), Some(0), "顶部夹住");
   }
 
   #[test]

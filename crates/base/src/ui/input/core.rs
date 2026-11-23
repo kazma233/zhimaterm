@@ -11,7 +11,7 @@ use std::time::Instant;
 use gpui::{
   App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Div, Element, ElementId, ElementInputHandler,
   Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId, KeyBinding, LayoutId,
-  MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollEvent, SharedString,
+  MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, ScrollEvent, SharedString,
   Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
   prelude::*, px, relative, size,
 };
@@ -924,6 +924,16 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
   fn core(&self) -> &TextCore;
   fn core_mut(&mut self) -> &mut TextCore;
 
+  /// 无障碍名称：表单的可见标签由 `input::field` 注入；没有注入时回落占位文案。
+  fn accessible_label(&self) -> Option<SharedString> {
+    None
+  }
+
+  /// 无障碍描述：校验错误这类补充信息。
+  fn accessible_description(&self) -> Option<SharedString> {
+    None
+  }
+
   /// 文本落地(非 IME 组合中间态)后的回调;上层借此做实时过滤
   fn set_on_change(&mut self, callback: impl Fn(&str, &mut Window, &mut App) + 'static) {
     self.core_mut().set_on_change(callback);
@@ -963,7 +973,7 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
   ///
   /// enter 只有多行框注册:单行框里 newline 是无操作,注册了反而会把按键
   /// 消费掉——单行框聚焦时 Enter 要让给外层(设置表单的下拉拾取等)
-  fn editing_actions(&self, base: Div, cx: &mut Context<Self>) -> Div {
+  fn editing_actions(&self, base: gpui::Stateful<Div>, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
     let multiline = self.core().multiline;
     base
       .on_action(cx.listener(Self::backspace))
@@ -980,7 +990,7 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
   /// 只读与编辑态共用的导航/选择动作:两种状态都要能移动光标、选中并复制。
   /// 上下方向键只有多行框注册:单行框没有纵向光标,注册了只会把按键消费成
   /// 无操作——单行框聚焦时上下键要让给外层(下拉高亮移动等)
-  fn navigation_actions(&self, base: Div, cx: &mut Context<Self>) -> Div {
+  fn navigation_actions(&self, base: gpui::Stateful<Div>, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
     let multiline = self.core().multiline;
     base
       .on_action(cx.listener(Self::left))
@@ -1012,7 +1022,7 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
 
   /// 两种实体共享的输入框外壳:样式、禁用/只读态、键位与鼠标监听。
   /// 返回的容器由调用方追加 `TextElement` 子元素
-  fn render_base(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+  fn render_base(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
     let focus_handle = Focusable::focus_handle(self, cx);
     let disabled = self.core().disabled;
     let read_only = self.core().read_only;
@@ -1022,17 +1032,24 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
     let tokens = crate::theme::tokens(cx);
     // 错误态优先于聚焦色:红色警示不能被聚焦高亮盖掉
     let border = if self.core().invalid {
-      tokens.danger
+      tokens.danger_text
     } else if focused {
       tokens.border_focus
     } else {
-      tokens.border_default
+      tokens.border_control
     };
     let (background, text_color) = if focused {
       (tokens.bg_focus, tokens.fg_bright)
     } else {
       (tokens.bg_input, tokens.fg)
     };
+    // 无障碍：可见标签由 field 注入；没有注入时占位文案就是最接近的名称。
+    // 掩码框不暴露 value，避免把密码读进辅助技术。
+    let aria_label = self
+      .accessible_label()
+      .unwrap_or_else(|| self.core().placeholder.clone());
+    let aria_description = self.accessible_description();
+    let aria_value = (!self.core().masked).then(|| self.core().content.clone());
     let mut base = div()
       .flex()
       .min_w(px(0.))
@@ -1048,6 +1065,13 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
       // 多行内容超出框高时裁剪,滚出视口的部分由滚动偏移控制
       .overflow_hidden()
       .key_context("TextInput")
+      // 角色/名称挂在实体自己的元素 id 上：输入框是视图根，id 与实体一一对应
+      .id(ElementId::View(cx.entity_id()))
+      .role(Role::TextInput)
+      .aria_label(aria_label)
+      .aria_placeholder(self.core().placeholder.clone())
+      .when_some(aria_description, |base, description| base.aria_description(description))
+      .when_some(aria_value, |base, value| base.aria_value(value))
       // 只读区用软底表示"内容是生成出来的",与可编辑的底色区分;
       // 不复用禁用态的灰化(那表达的是"当前不可用")
       .bg(if read_only {
@@ -1057,7 +1081,7 @@ pub(crate) trait TextWidget: EntityInputHandler + Focusable + Render {
       })
       .border_1()
       .border_color(if read_only && !self.core().invalid {
-        gpui::rgb(tokens.border_default)
+        gpui::rgb(tokens.border_control)
       } else {
         gpui::rgb(border)
       })

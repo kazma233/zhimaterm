@@ -63,6 +63,9 @@ fn main() {
       .open_window(
         WindowOptions {
           window_bounds: Some(window_bounds),
+          // 顶栏固定占位约 180px、侧栏最小 140px：再窄就只剩挤压与裁剪。
+          // 下限按「顶栏 + 侧栏 + 一列可用终端」定，不跟随界面字号缩放。
+          window_min_size: Some(size(px(480.), px(320.))),
           titlebar: Some(gpui::TitlebarOptions {
             title: Some("ZhimaTerm".into()),
             // 自绘顶栏（ADR-057）：系统标题栏退场，顶栏由 views::title_bar 画

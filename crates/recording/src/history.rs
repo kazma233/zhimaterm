@@ -504,7 +504,7 @@ pub fn state_color(tokens: &UiTokens, state: &TaskState) -> u32 {
   match state {
     TaskState::Running => tokens.accent,
     TaskState::Completed(_) => tokens.success,
-    TaskState::Failed(_) => tokens.danger,
+    TaskState::Failed(_) => tokens.danger_text,
     TaskState::Cancelled(_) => tokens.warn,
   }
 }

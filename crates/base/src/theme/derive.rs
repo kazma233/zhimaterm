@@ -50,13 +50,15 @@ pub struct UiTokens {
   /// 危险悬停底
   pub bg_danger: u32,
   // —— 线 ——
-  /// 容器与控件的主边框
+  /// 结构面主边框（卡片、菜单、tooltip）
   pub border_default: u32,
+  /// 可交互控件边界（输入框、下拉、描边按钮）：需与控件底保持 3:1
+  pub border_control: u32,
   /// 分组竖线、侧栏分隔、次要容器边框
   pub border_subtle: u32,
   /// 卡片内分隔线
   pub border_divider: u32,
-  /// 输入框悬停边框
+  /// 控件悬停边框
   pub border_hover: u32,
   /// 聚焦边框（= 强调色）
   pub border_focus: u32,
@@ -83,8 +85,6 @@ pub struct UiTokens {
   pub fg_faint: u32,
   /// 最暗的小节标题
   pub fg_dim: u32,
-  /// 彩色底上的反差文字
-  pub fg_on_accent: u32,
   // —— 语义强调 ——
   /// 界面强调色：聚焦边框、主按钮文字、选中态
   pub accent: u32,
@@ -94,10 +94,10 @@ pub struct UiTokens {
   pub warn: u32,
   /// 警示与危险之间的过渡（部分失败、计数提醒）
   pub warn_strong: u32,
-  /// 危险：错误、日志失效、高负载
+  /// 危险：错误、日志失效、高负载（原始语义色；彩底/边框可用）
   pub danger: u32,
-  /// 危险与警示之间的过渡（不可用提示）
-  pub danger_soft: u32,
+  /// 危险文字：在面板底上保证 4.5:1 的按背景调整色
+  pub danger_text: u32,
   // —— 叠加（0xRRGGBBAA，alpha 在低字节）——
   /// 模态遮罩
   pub overlay: u32,
@@ -136,6 +136,57 @@ pub(super) fn luminance(rgb: u32) -> f32 {
   (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.
 }
 
+/// WCAG 2.x 相对亮度：对比度断言的唯一口径。
+fn relative_luminance(rgb: u32) -> f32 {
+  let channel = |shift: u32| {
+    let value = ((rgb >> shift) & 0xff) as f32 / 255.;
+    if value <= 0.04045 {
+      value / 12.92
+    } else {
+      ((value + 0.055) / 1.055).powf(2.4)
+    }
+  };
+  0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// 彩底上的文字/图形色：按填充色亮度在纯黑、纯白两个绝对端之间二选一。
+///
+/// 主题 accent 从亮青到浅珊瑚都有，任何一对固定主题色都会在某套主题上失守；
+/// 两个绝对端在 `L = 0.179` 处交叉，二选一都 ≥4.58:1。只用于用户选不出
+/// 颜色的合成底（强调色主按钮、勾选框、信任卡按钮）。纯黑而不是近黑：
+/// 近黑在 GitHub Light Legacy 的红底上只有 4.17:1。
+pub fn readable_on(fill: u32) -> u32 {
+  if relative_luminance(fill) > 0.179 {
+    0x000000
+  } else {
+    0xffffff
+  }
+}
+
+fn contrast_ratio(a: u32, b: u32) -> f32 {
+  let (la, lb) = (relative_luminance(a), relative_luminance(b));
+  let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+  (hi + 0.05) / (lo + 0.05)
+}
+
+/// 语义色当文字用时的可读化：保持色相，朝黑/白逐步调整直到过 min。
+/// 浅色主题的 ANSI red 作为正文只有约 3:1；固定原始语义色会在这些主题上失守，
+/// 但直接换成纯黑/白又丢掉「错误」的色相提示，所以按背景亮度调色。
+fn readable_tint(color: u32, background: u32, min: f32) -> u32 {
+  let toward = if relative_luminance(background) > 0.5 {
+    0x000000
+  } else {
+    0xffffff
+  };
+  for step in 0..=50 {
+    let candidate = mix(color, toward, step as f32 / 50.);
+    if contrast_ratio(candidate, background) >= min {
+      return candidate;
+    }
+  }
+  toward
+}
+
 /// 界面强调色的回落：主题没有显式给出时用 ANSI 亮青。
 /// 亮青在各主题里都是高可见度的彩色，且与"光标即强调色"的惯例一致。
 fn accent_of(scheme: &ColorScheme) -> u32 {
@@ -157,6 +208,7 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
   let success = scheme.ansi[2];
   let warn = scheme.ansi[3];
   let danger = scheme.ansi[1];
+  let bg_panel = mix(bg, fg, 0.025);
 
   let on = |t: f32| mix(fg, bg, t);
 
@@ -165,7 +217,7 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
     bg_terminal: bg,
     bg_input: mix(bg, fg, 0.005),
     bg_read_only: mix(bg, fg, 0.015),
-    bg_panel: mix(bg, fg, 0.025),
+    bg_panel,
     bg_focus: mix(bg, fg, 0.04),
     bg_row: mix(bg, fg, 0.065),
     bg_row_hover: mix(bg, fg, 0.07),
@@ -179,9 +231,11 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
     bg_warn: mix(warn, bg, 0.85),
     bg_danger: mix(danger, bg, 0.75),
     border_default: mix(bg, fg, 0.17),
+    // 控件边界是识别字段的唯一线索：0.40 起在深色 Default 上约 3.1:1
+    border_control: mix(bg, fg, 0.40),
     border_subtle: mix(bg, fg, 0.15),
     border_divider: mix(bg, fg, 0.11),
-    border_hover: mix(bg, fg, 0.32),
+    border_hover: mix(bg, fg, 0.46),
     border_focus: accent,
     border_warn: mix(warn, bg, 0.75),
     border_danger: mix(danger, bg, 0.75),
@@ -195,16 +249,17 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
     fg_secondary: on(0.24),
     fg_status: on(0.30),
     fg_badge: on(0.34),
-    fg_muted: on(0.49),
-    fg_faint: on(0.57),
-    fg_dim: on(0.64),
-    fg_on_accent: if is_dark { mix(bg, away, 0.25) } else { 0xffffff },
+    // 三档静音文字都按 4.5:1 反推：再暗一档就会在列表选中底上失守
+    fg_muted: on(0.38),
+    fg_faint: on(0.40),
+    fg_dim: on(0.42),
     accent,
     success,
     warn,
     warn_strong: mix(warn, danger, 0.5),
     danger,
-    danger_soft: mix(danger, warn, 0.65),
+    // 面板底是错误文字最常见的承载面；更暗/更亮的根底上对比只会更高
+    danger_text: readable_tint(danger, bg_panel, 4.5),
     overlay: with_alpha(0x000000, 0xa8),
     // 落影是环境遮蔽：纯黑物理直觉；深色界面层级差小，落影要更重才读得出
     shadow_popover: with_alpha(0x000000, if is_dark { 0x8c } else { 0x40 }),
@@ -271,6 +326,7 @@ mod tests {
       ("bg_warn", hand.bg_warn, derived.bg_warn),
       ("bg_danger", hand.bg_danger, derived.bg_danger),
       ("border_default", hand.border_default, derived.border_default),
+      ("border_control", hand.border_control, derived.border_control),
       ("border_subtle", hand.border_subtle, derived.border_subtle),
       ("border_divider", hand.border_divider, derived.border_divider),
       ("border_hover", hand.border_hover, derived.border_hover),
@@ -286,13 +342,12 @@ mod tests {
       ("fg_muted", hand.fg_muted, derived.fg_muted),
       ("fg_faint", hand.fg_faint, derived.fg_faint),
       ("fg_dim", hand.fg_dim, derived.fg_dim),
-      ("fg_on_accent", hand.fg_on_accent, derived.fg_on_accent),
       ("accent", hand.accent, derived.accent),
       ("success", hand.success, derived.success),
       ("warn", hand.warn, derived.warn),
       ("warn_strong", hand.warn_strong, derived.warn_strong),
       ("danger", hand.danger, derived.danger),
-      ("danger_soft", hand.danger_soft, derived.danger_soft),
+      ("danger_text", hand.danger_text, derived.danger_text),
       ("overlay", hand.overlay, derived.overlay),
       ("shadow_popover", hand.shadow_popover, derived.shadow_popover),
       ("input_selection", hand.input_selection, derived.input_selection),
@@ -308,14 +363,10 @@ mod tests {
       if delta > worst.0 {
         worst = (delta, name);
       }
-      // 上限 32：多数 token 差 ≤16（深色分层下肉眼不可辨）。warn_strong 与
-      // danger_soft 是手挑的中间调、不落在 warn–danger 的 RGB 连线上，
-      // 线性混色到不了，单独放宽到 48。
-      let bound = if matches!(name, "warn_strong" | "danger_soft") {
-        48
-      } else {
-        32
-      };
+      // 上限 32：多数 token 差 ≤16（深色分层下肉眼不可辨）。warn_strong
+      // 是手挑的中间调、不落在 warn–danger 的 RGB 连线上，线性混色到不了，
+      // 单独放宽到 48。
+      let bound = if matches!(name, "warn_strong") { 48 } else { 32 };
       assert!(
         delta <= bound,
         "{name}: 手调 {want:#06x} vs 推导 {got:#06x}，通道差 {delta}"

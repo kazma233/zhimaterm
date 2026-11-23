@@ -267,13 +267,23 @@ impl ZhimaTermApp {
   }
 
   pub(super) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    self.activate_with_focus(index, true, window, cx);
+  }
+
+  /// 切换活动会话；`focus_terminal` 为 false 时把焦点留在侧栏列表（键盘
+  /// 浏览会话时按 ↑↓ 不能把焦点甩进终端，否则下一次按键就写到 shell 里）。
+  fn activate_with_focus(&mut self, index: usize, focus_terminal: bool, window: &mut Window, cx: &mut Context<Self>) {
     if index >= self.tabs.len() {
       return;
     }
     self.active = index;
-    let focus = self.tabs[index].focused_view().map(|view| view.read(cx).focus_handle());
-    if let Some(focus) = focus {
-      window.focus(&focus, cx);
+    if focus_terminal {
+      let focus = self.tabs[index].focused_view().map(|view| view.read(cx).focus_handle());
+      if let Some(focus) = focus {
+        window.focus(&focus, cx);
+      }
+    } else {
+      window.focus(&self.sidebar_focus, cx);
     }
     // 切到这个标签就算看过：清掉它全部格的响铃标记
     for view in self.tabs[index].views.values() {
@@ -281,6 +291,31 @@ impl ZhimaTermApp {
     }
     // 活动标签属于工作区状态（ADR-037）：切标签即落盘
     self.layout_changed(cx);
+  }
+
+  /// 键盘切换会话：按标签顺序循环，跳过浮层在场的情况（由调用方门控）。
+  pub(super) fn cycle_session(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(next) = active_after_cycle(self.active, self.tabs.len(), if forward { 1 } else { -1 }) else {
+      return;
+    };
+    self.activate(next, window, cx);
+  }
+
+  /// 侧栏聚焦时的 ↑↓：切活动会话但焦点留在侧栏。
+  pub(super) fn cycle_sidebar(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(next) = active_after_cycle(self.active, self.tabs.len(), if forward { 1 } else { -1 }) else {
+      return;
+    };
+    self.activate_with_focus(next, false, window, cx);
+  }
+
+  /// 侧栏 Home/End：跳到第一个或最后一个会话，焦点留在侧栏。
+  pub(super) fn select_sidebar_edge(&mut self, last: bool, window: &mut Window, cx: &mut Context<Self>) {
+    if self.tabs.is_empty() {
+      return;
+    }
+    let index = if last { self.tabs.len() - 1 } else { 0 };
+    self.activate_with_focus(index, false, window, cx);
   }
 
   /// 会话正常结束后关掉它所在的格。
@@ -486,6 +521,15 @@ fn active_after_move(active: usize, from: usize, to: usize) -> usize {
   }
   active
 }
+/// 循环切换后的会话下标：只有一个会话时没有「下一个」，返回 None 让调用方
+/// 不白白重设焦点与落盘。
+fn active_after_cycle(active: usize, len: usize, delta: isize) -> Option<usize> {
+  if len <= 1 {
+    return None;
+  }
+  Some((active as isize + delta).rem_euclid(len as isize) as usize)
+}
+
 /// 检查"会话是否已结束"的节奏。只读几个布尔值，不需要更密。
 pub(super) const REAP_INTERVAL_MS: u64 = 250;
 
@@ -534,6 +578,16 @@ mod tests {
     // 完全不跨过当前会话：不变
     assert_eq!(active_after_move(0, 1, 2), 0);
   }
+  #[test]
+  fn cycling_wraps_and_needs_at_least_two_sessions() {
+    assert_eq!(active_after_cycle(0, 0, 1), None);
+    assert_eq!(active_after_cycle(0, 1, 1), None);
+    assert_eq!(active_after_cycle(0, 3, 1), Some(1));
+    assert_eq!(active_after_cycle(2, 3, 1), Some(0), "末尾向前绕回第一个");
+    assert_eq!(active_after_cycle(0, 3, -1), Some(2), "第一个向后绕回末尾");
+    assert_eq!(active_after_cycle(1, 3, -1), Some(0));
+  }
+
   #[test]
   fn closing_a_session_keeps_the_current_one_or_moves_to_the_neighbour() {
     // 关掉当前会话右侧的：当前不变
