@@ -316,6 +316,16 @@ impl ZhimaTermApp {
     self.tabs.iter().flat_map(|tab| tab.views.values())
   }
 
+  /// 生效的「关闭后恢复会话内容」开关（ADR-039）：设置未配置或冻结时按
+  /// 默认关。新会话的初始取值、启动清理与运行中跟随共用这一个投影。
+  pub(super) fn scrollback_enabled(&self) -> bool {
+    self
+      .settings
+      .settings()
+      .map(|store| store.restore_scrollback_or_default())
+      .unwrap_or(false)
+  }
+
   // 收起全部锚定浮层（主题下拉 + 侧栏右键菜单）：锚定物种间的互斥收起
   /// 单点——新增第三个锚定浮层时，互斥只改这一个函数。
   pub(super) fn dismiss_anchored(&mut self) {

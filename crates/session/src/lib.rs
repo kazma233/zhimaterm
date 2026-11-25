@@ -413,6 +413,10 @@ enum SessionCommand {
   SetTheme(std::sync::Arc<zhimaterm_base::theme::ColorScheme>),
   /// 运行中调整终端参数：一个值类型一条命令，新增参数只扩展载荷。
   SetParams(RuntimeParams),
+  /// 运行中开关回滚持久化（设置「关闭后恢复会话内容」，ADR-039）：
+  /// None = 停止写盘并删掉本格文件；Some = 从这个路径恢复写盘。
+  /// 恢复（读回）只在会话启动时发生，运行中打开不会再灌旧内容。
+  SetScrollback(Option<std::path::PathBuf>),
   /// 运行中新增一条转发规则（ADR-038）：监听立即建立，失败只上报不改配置。
   AddForward(ForwardRule),
   /// 运行中移除一条转发规则（ADR-038）：关闭监听与它在途连接。
@@ -709,6 +713,12 @@ impl Session {
   /// 幂等偏好，下一次调整自然会覆盖，不值得为它阻塞。
   pub fn set_params(&self, params: RuntimeParams) {
     let _ = self.inner.commands.try_send(SessionCommand::SetParams(params));
+  }
+
+  /// 运行中开关回滚持久化（ADR-039）。与设置类命令同口径，队列满时丢弃：
+  /// 用户在终端刷屏的同时改设置是极少数场景，且下一次「应用」会重发同一结论。
+  pub fn set_scrollback(&self, path: Option<std::path::PathBuf>) {
+    let _ = self.inner.commands.try_send(SessionCommand::SetScrollback(path));
   }
 
   /// 运行中新增转发规则（ADR-038）。与设置类命令不同，这里不丢命令：

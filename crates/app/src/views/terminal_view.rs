@@ -250,7 +250,8 @@ pub struct TerminalView {
   history_sub: Option<gpui::Subscription>,
   /// 回滚持久化文件的键与工作区叶标识（ADR-039）：进程内只增不复用
   number: usize,
-  /// 回滚持久化文件（ADR-039）：重连时复用同一份；SSH 格为 None
+  /// 回滚持久化文件（ADR-039）：本地格恒有路径，开关态另记——关掉记录后
+  /// 重新打开按同一文件续写；SSH 格为 None
   scrollback: Option<std::path::PathBuf>,
 }
 
@@ -260,6 +261,10 @@ pub struct SessionParams {
   pub runtime: RuntimeParams,
   /// 终端核心后端（ADR-050）。
   pub backend: BackendKind,
+  /// 回滚持久化开关的初始值（ADR-039）：设置「关闭后恢复会话内容」在
+  /// 建格时的取值；运行中变更经 [`TerminalView::set_scrollback_enabled`]
+  /// 推给 worker，不经过这里。
+  pub scrollback_enabled: bool,
 }
 
 impl TerminalView {
@@ -317,7 +322,9 @@ impl TerminalView {
       target,
       backend: params.backend,
       history: params.runtime.scrolling_history,
-      scrollback: scrollback.clone(),
+      // 关掉「关闭后恢复会话内容」时路径照存（view 的 scrollback 字段留着
+      // 给运行中重新打开用），但 worker 不读不写：None 同时是恢复与落盘开关
+      scrollback: params.scrollback_enabled.then(|| scrollback.clone()).flatten(),
       pane,
     });
     // 主题经命令下发而不是构造参数：模型默认以 Default 方案起跑，
@@ -867,6 +874,15 @@ impl TerminalView {
   pub fn set_runtime_params(&mut self, runtime: RuntimeParams) {
     self.runtime = runtime;
     self.session.set_params(runtime);
+  }
+
+  /// 运行中开关回滚记录（设置「关闭后恢复会话内容」，ADR-039）：关掉时
+  /// worker 停写并删掉本格文件，重新打开按同一路径续写；SSH 格没有回滚
+  /// 文件，忽略。
+  pub fn set_scrollback_enabled(&self, enabled: bool) {
+    if let Some(path) = &self.scrollback {
+      self.session.set_scrollback(enabled.then(|| path.clone()));
+    }
   }
 
   /// 设置里的编辑器档位（ADR-055）：应用层在会话建立与设置应用时推送，

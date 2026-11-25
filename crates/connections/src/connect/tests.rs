@@ -12,14 +12,13 @@ use super::{ConnectForm, ConnectModal, ConnectToggle, ConnectView, Field, FormEr
 /// 错误模型（ADR-048 修订）：单字段错误挂在输入框上（标签右侧渲染），
 /// 编辑即重跑该字段校验、错误随值消长；认证信息的组合结论与全局失败进底栏，
 /// 认证相关字段一动就撤（过时即弃）；钥匙串失败贴在「记住密码」勾选行下；
-/// 转发草稿的错误画在各自盒子里。折叠段里的错误把段展开。
+/// 转发草稿的错误画在各自盒子里。所有分区常显，错误落位不依赖展开动作。
 ///
 /// 观察者是效果队列，在最外层 update 结束时冲洗：编辑的「重算」要等那一刻
 /// 才跑，所以每个阶段各占一个顶层 `form.update` 周期，不能包进同一个
 /// `cx.update` 里。
 #[gpui::test]
 fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppContext) {
-  use super::ConnectSection;
   let form = cx.update(|cx| {
     let font = zhimaterm_base::font::terminal_font("monospace");
     cx.new(|cx| ConnectForm::new(font, cx))
@@ -62,16 +61,13 @@ fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppCont
       form.user.update(cx, |input, cx| input.set_text("root", cx));
     });
 
-    // 认证信息的组合结论：进底栏（不属于单个输入框），认证段收起时把段
-    // 展开；相关字段（私钥路径）一动就撤——改了值旧结论即过时。结论的
-    // 表单侧生产者已随「保存不拦无认证」移除（ADR-048 修订；列表直连
-    // 的素材判定仍是生产者），这里用合成错误守住落位与过时即撤的机制
+    // 认证信息的组合结论：进底栏（不属于单个输入框）；相关字段（私钥
+    // 路径）一动就撤——改了值旧结论即过时。结论的表单侧生产者已随
+    // 「保存不拦无认证」移除（ADR-048 修订；列表直连的素材判定仍是
+    // 生产者），这里用合成错误守住落位与过时即撤的机制
     form.update(cx, |form, cx| {
       form.toggle(ConnectToggle::UseAgent, cx);
-      form.toggle_section(ConnectSection::Auth, cx);
-      assert!(!form.auth_open);
       form.fail(FormError::at(Field::Auth, "这条连接需要密码"), cx);
-      assert!(form.auth_open, "错误所在的段要展开");
       assert_eq!(form.error.as_deref(), Some("这条连接需要密码"));
       assert_eq!(form.host.read(cx).error(), None, "底栏错误不冒充字段错误");
     });
@@ -83,14 +79,12 @@ fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppCont
       form.toggle(ConnectToggle::UseAgent, cx);
     });
 
-    // 跳板开着但段收起、目标空：错误落跳板目标框并展开跳板段
+    // 跳板开着但目标空：错误落跳板目标框
     form.update(cx, |form, cx| {
       form.toggle(ConnectToggle::JumpEnabled, cx);
-      assert!(!form.jump_open);
       let error = form.saved_entry(cx).unwrap_err();
       assert_eq!(error.field, Some(Field::JumpTarget));
       form.fail(error, cx);
-      assert!(form.jump_open);
       assert_eq!(form.jump.target.read(cx).error(), Some("请填写主机"));
     });
     form.update(cx, |form, cx| {
@@ -103,15 +97,13 @@ fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppCont
       form.toggle(ConnectToggle::JumpEnabled, cx);
     });
 
-    // 转发草稿：没动笔不预报错；提交报在草稿上并展开段；编辑即重算
+    // 转发草稿：没动笔不预报错；提交报在草稿上；编辑即重算
     form.update(cx, |form, cx| {
       form.edit_forward(ForwardEdit::Add, cx);
-      assert!(!form.forwards_open);
       assert_eq!(form.forwards[0].error, None, "没动笔的新草稿不预报错");
       let error = form.saved_entry(cx).unwrap_err();
       assert_eq!(error.field, Some(Field::Forward(0)));
       form.fail(error, cx);
-      assert!(form.forwards_open);
       assert!(form.forwards[0].error.is_some());
     });
     form.update(cx, |form, cx| {
@@ -134,7 +126,7 @@ fn field_errors_live_on_inputs_and_revalidate_on_edit(cx: &mut gpui::TestAppCont
       assert_eq!(form.forwards[0].error, None);
     });
 
-    // 与字段无关的失败：只进底栏，不碰任何字段与折叠态
+    // 与字段无关的失败：只进底栏，不碰任何字段
     form.update(cx, |form, cx| {
       form.fail(FormError::global("保存失败：磁盘只读"), cx);
       assert_eq!(form.error.as_deref(), Some("保存失败：磁盘只读"));
@@ -714,31 +706,21 @@ fn blank_name_normalizes_to_none(cx: &mut gpui::TestAppContext) {
   });
 }
 
-/// 折叠段的行为分区：认证信息恒以展开起手，其余段在默认值时收起；手点
-/// 只翻转对应段、不影响业务开关；载入按内容展开——跳板、有转发规则
-/// 各自展开，纯默认连接只留认证段展开。
+/// 分区不再有折叠态：新建与载入后，焦点环都一次带上认证、跳板与每条转发
+/// 规则的输入框——Tab 能走到全部字段，没有藏在「点开才有」的分区。
 #[gpui::test]
-fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppContext) {
-  use super::ConnectSection;
+fn every_section_is_reachable_without_folding(cx: &mut gpui::TestAppContext) {
   use crate::connections::{SavedConnection, SavedCredentials, SavedForward, SavedJump};
 
   cx.update(|cx| {
     let font = zhimaterm_base::font::terminal_font("monospace");
 
-    // 新建态：认证信息展开起手，其余段收起；手点互不牵连；折叠不改连接行为
+    // 新建态：目标 4 + 认证 3 + 跳板 5（尚无转发规则）
     let form = cx.new(|cx| ConnectForm::new(font.clone(), cx));
-    form.update(cx, |form, cx| {
-      assert!(form.auth_open);
-      assert!(!form.jump_open && !form.forwards_open);
-      form.toggle_section(ConnectSection::Auth, cx);
-      form.toggle_section(ConnectSection::Forwards, cx);
-      assert!(!form.auth_open && form.forwards_open);
-      assert!(!form.jump_open);
-      form.toggle(ConnectToggle::ForwardAgent, cx);
-      assert!(form.forward_agent);
-    });
+    assert_eq!(form.read(cx).focus_ring(cx).len(), 12);
 
-    // 载入有货的连接：对应段展开
+    // 载入有货的连接：跳板的 5 个框与转发规则的 3 个框都在环里，
+    // 业务开关随条目回填
     let loaded = cx.new(|cx| ConnectForm::new(font.clone(), cx));
     let full = SavedConnection {
       id: crate::connections::new_id(),
@@ -769,12 +751,11 @@ fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppConte
     };
     loaded.update(cx, |form, cx| {
       form.load_saved(&full, cx);
-      assert!(form.auth_open, "认证段恒展开");
       assert!(form.forward_agent, "agent 转发随条目载入");
-      assert!(form.jump_open && form.forwards_open);
+      assert_eq!(form.focus_ring(cx).len(), 15, "全部字段 + 一条转发规则");
     });
 
-    // 纯 agent 默认连接：认证段仍展开，其余段收起
+    // 纯默认连接同样全显：环长度与新建态一致
     let bare = SavedConnection {
       id: crate::connections::new_id(),
       name: None,
@@ -792,21 +773,7 @@ fn sections_fold_by_content_and_toggle_independently(cx: &mut gpui::TestAppConte
     };
     loaded.update(cx, |form, cx| {
       form.load_saved(&bare, cx);
-      assert!(form.auth_open);
-      assert!(!form.jump_open && !form.forwards_open);
-    });
-
-    // 密码型条目：焦点落进密码框时认证段必然是展开的（恒展开的推论）
-    let password_only = SavedConnection {
-      credentials: SavedCredentials {
-        use_agent: false,
-        key_path: None,
-      },
-      ..bare
-    };
-    loaded.update(cx, |form, cx| {
-      form.load_saved(&password_only, cx);
-      assert!(form.auth_open);
+      assert_eq!(form.focus_ring(cx).len(), 12);
     });
   });
 }

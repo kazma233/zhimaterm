@@ -89,18 +89,6 @@ pub enum ConnectToggle {
   JumpUseAgent,
 }
 
-/// 连接表单里可折叠的段。折叠是纯界面态：只藏字段，不改变任何已勾选的
-/// 开关与草稿对连接的效力。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ConnectSection {
-  /// 认证信息
-  Auth,
-  /// 跳板机
-  Jump,
-  /// 端口转发
-  Forwards,
-}
-
 /// 校验错误落在哪：单字段的贴在该字段标签右侧（错误状态挂在 `TextInput` 上，
 /// `input::field` 渲染时读取）；段级与动作级的进底栏；转发规则的画在规则盒子
 /// 里——错误在离它最近的补法旁边。
@@ -181,12 +169,6 @@ pub struct ConnectForm {
   /// 编辑中的这条在钥匙串里有凭据（ADR-018 修订：勾选框已移除，输入密码
   /// 即保存；此字段由载入的条目带出，供「显示」取回与保存折算沿用）
   remember_password: bool,
-  /// 可折叠段的展开态（纯界面态，不落盘）。认证信息是填单的
-  /// 主路径，恒以展开起手；其余段按内容定——只有默认值的收起，有货的
-  /// 展开。之后用户手点为准
-  auth_open: bool,
-  jump_open: bool,
-  forwards_open: bool,
   /// 跳板区（ADR-020，默认关）：开关 + 独立的目标与认证信息
   jump_enabled: bool,
   /// 跳板的本地 ssh-agent 开关（默认开，与主表单一致）
@@ -236,9 +218,6 @@ impl ConnectForm {
       use_agent: true,
       forward_agent: false,
       remember_password: false,
-      auth_open: true,
-      jump_open: false,
-      forwards_open: false,
       jump_enabled: false,
       jump_use_agent: true,
       jump: JumpInputs {
@@ -467,17 +446,6 @@ impl ConnectForm {
     }
   }
 
-  /// 展开/收起一个段。收起只藏字段：已勾选的开关与转发草稿照常生效，
-  /// 连接行为不变。
-  pub fn toggle_section(&mut self, section: ConnectSection, cx: &mut Context<Self>) {
-    match section {
-      ConnectSection::Auth => self.auth_open = !self.auth_open,
-      ConnectSection::Jump => self.jump_open = !self.jump_open,
-      ConnectSection::Forwards => self.forwards_open = !self.forwards_open,
-    }
-    cx.notify();
-  }
-
   /// 把主机字段里粘贴的 `[user@]host[:port]` 拆进「用户」「端口」。
   ///
   /// 粘贴目标串（`deploy@10.0.0.1`、`deploy@host:2222`、`[::1]:2222`）不必手拆；
@@ -543,32 +511,26 @@ impl ConnectForm {
   }
 
   /// 表单里输入框的焦点环：按视觉顺序排（ADR-043）。模态内的 Tab 沿它移动，
-  /// 走完一圈回到作用域根。收起段的输入框不在环里——Tab 不落进看不见的框。
+  /// 走完一圈回到作用域根。所有字段常显，环里也就永远是全部输入框。
   pub fn focus_ring(&self, cx: &App) -> Vec<FocusHandle> {
     let mut ring = vec![
       self.name.read(cx).focus_handle(),
       self.host.read(cx).focus_handle(),
       self.port.read(cx).focus_handle(),
       self.user.read(cx).focus_handle(),
+      self.key_path.read(cx).focus_handle(),
+      self.key_passphrase.read(cx).focus_handle(),
+      self.password.read(cx).focus_handle(),
+      self.jump.target.read(cx).focus_handle(),
+      self.jump.user.read(cx).focus_handle(),
+      self.jump.key_path.read(cx).focus_handle(),
+      self.jump.key_passphrase.read(cx).focus_handle(),
+      self.jump.password.read(cx).focus_handle(),
     ];
-    if self.auth_open {
-      ring.push(self.key_path.read(cx).focus_handle());
-      ring.push(self.key_passphrase.read(cx).focus_handle());
-      ring.push(self.password.read(cx).focus_handle());
-    }
-    if self.jump_open {
-      ring.push(self.jump.target.read(cx).focus_handle());
-      ring.push(self.jump.user.read(cx).focus_handle());
-      ring.push(self.jump.key_path.read(cx).focus_handle());
-      ring.push(self.jump.key_passphrase.read(cx).focus_handle());
-      ring.push(self.jump.password.read(cx).focus_handle());
-    }
-    if self.forwards_open {
-      for draft in &self.forwards {
-        ring.push(draft.listen_port.read(cx).focus_handle());
-        ring.push(draft.target_host.read(cx).focus_handle());
-        ring.push(draft.target_port.read(cx).focus_handle());
-      }
+    for draft in &self.forwards {
+      ring.push(draft.listen_port.read(cx).focus_handle());
+      ring.push(draft.target_host.read(cx).focus_handle());
+      ring.push(draft.target_port.read(cx).focus_handle());
     }
     ring
   }
@@ -593,16 +555,8 @@ impl ConnectForm {
 
   /// 记下一条错误并放到离补法最近的地方：单字段的写进对应输入框（标签右侧
   /// 随之显示）；认证信息组合的与动作失败（含钥匙串读写）进底栏；
-  /// 转发规则的画进那条规则盒子。错误落在折叠段里时把那段展开——收起的字段
-  /// 看不见，贴在它旁边的提示也跟着看不见。
+  /// 转发规则的画进那条规则盒子。
   pub fn fail(&mut self, error: FormError, cx: &mut Context<Self>) {
-    match error.field {
-      Some(Field::Auth) => self.auth_open = true,
-      Some(Field::JumpTarget | Field::JumpUser | Field::JumpPassword) => self.jump_open = true,
-      Some(Field::Forward(_)) => self.forwards_open = true,
-      Some(Field::Host | Field::Port | Field::User) => {}
-      None => {}
-    }
     match error.field {
       Some(Field::Auth) => self.error = Some(error.message),
       Some(Field::Forward(index)) => {
@@ -727,11 +681,6 @@ impl ConnectForm {
       self.forwards.push(draft);
     }
 
-    // 展开态：认证信息恒展开（填单主路径）；其余段按载入的内容定——
-    // 段里有默认值之外的东西才展开，纯默认态收起
-    self.auth_open = true;
-    self.jump_open = saved.jump.is_some();
-    self.forwards_open = !saved.forwards.is_empty();
     // 回填的文字是基线：随后的观察者通知（含 set_error 与掩码刷新）不算编辑
     self.rebase_edits(cx);
   }
@@ -744,9 +693,6 @@ impl ConnectForm {
     self.use_agent = true;
     self.forward_agent = false;
     self.remember_password = false;
-    self.auth_open = true;
-    self.jump_open = false;
-    self.forwards_open = false;
     self.jump_enabled = false;
     self.jump_use_agent = true;
     self.forwards.clear();

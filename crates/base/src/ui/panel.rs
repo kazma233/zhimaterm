@@ -279,23 +279,9 @@ pub fn checkbox(
             .child(title.to_owned()),
         ),
     )
-    // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
-    // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
-    // 预先折算会少算间距
+    // 说明文字与勾选框左缘平齐：占满行宽自然换行，不缩进到标题下方
     .when(!description.is_empty(), |group| {
-      group.child(
-        div()
-          .flex()
-          .items_start()
-          .gap(px(8.))
-          .child(div().flex_none().w(ui_rems(14.)))
-          .child(
-            div()
-              .flex_1()
-              .min_w(px(0.))
-              .child(crate::ui::card::label(tokens, description)),
-          ),
-      )
+      group.child(crate::ui::card::label(tokens, description))
     })
 }
 

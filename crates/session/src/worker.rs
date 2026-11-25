@@ -17,7 +17,7 @@ use smol::channel::{Receiver, Sender, TrySendError};
 
 use super::{
   ControlEvent, ExitReason, ForwardEvent, ForwardEvents, PointerShape, SHUTDOWN_STEP_TIMEOUT, SessionCommand,
-  SessionConfig, SessionExit, StartupSize,
+  SessionConfig, SessionExit, SessionTarget, StartupSize,
 };
 use zhimaterm_base::input::{MouseAction, MouseButton, MouseGesture, WheelDirection};
 use zhimaterm_terminal::WindowSize;
@@ -287,6 +287,9 @@ pub(super) fn run(
     scrollback,
     pane: _,
   } = config;
+  // 本地格才采工作目录、才有回滚文件（ADR-039）：目标在建立连接后即被
+  // 释放，这里先记下类别
+  let is_local = matches!(target, SessionTarget::Local { .. });
   // 日志左边界先于连接尝试：连不上的尝试也留下一对标记（ADR-017）。
   // 埋点走记录门面（ADR-045）：本格没开日志或被运行时开关暂停时 no-op
   zhimaterm_recording::recorder::begin_session(&target.description());
@@ -344,14 +347,16 @@ pub(super) fn run(
   let mut restore_hold: Option<RestoreHold> = None;
   if let Some(path) = &scrollback {
     if size_trusted {
-      scrollback::restore(path, &mut terminal);
-    } else if let Some((lines, divider)) = scrollback::read(path) {
+      scrollback::restore(path, &mut terminal, history);
+    } else if let Some((lines, divider)) = scrollback::read(path, history) {
       restore_hold = Some(RestoreHold::Pending { lines, divider });
     }
   }
-  // 本地格的持久化开关就是回滚文件：生产路径每个本地格都有；测试不传就
-  // 完全不采样工作目录（macOS 上每 2 秒一次 lsof，并行用例里没必要）
-  let mut scrollback_state = scrollback.map(|path| ScrollbackState::new(path, shell_pid));
+  // 回滚状态按「本地格」建，不按「有回滚文件」建：工作目录采样挂在这里，
+  // 关掉回滚（path 为 None）只停写盘，不能连带停掉 cwd 上报（ADR-039）。
+  // 保留窗口取滚动历史设置：与终端内存里的历史同量级。SSH 格与非本地
+  // 测试不建，省掉每 2 秒一次的 lsof。
+  let mut scrollback_state = is_local.then(|| ScrollbackState::new(scrollback, shell_pid, history));
   let mut transcript = TranscriptState::new();
   let mut resize_gate = ResizeGate::new();
   let mut pending_frame: Option<TerminalSnapshot> = None;
@@ -398,6 +403,7 @@ pub(super) fn run(
       &mut terminal,
       &mut state,
       &mut restore_hold,
+      &mut scrollback_state,
       &mut resize_gate,
       &control,
     )?;
@@ -415,6 +421,7 @@ pub(super) fn run(
         &mut terminal,
         &mut state,
         &mut restore_hold,
+        &mut scrollback_state,
         &mut resize_gate,
         &control,
       )?;
@@ -432,6 +439,7 @@ pub(super) fn run(
         &mut terminal,
         &mut state,
         &mut restore_hold,
+        &mut scrollback_state,
         &mut resize_gate,
         &control,
       )?;
@@ -665,10 +673,14 @@ const SCROLLBACK_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// 工作目录采样间隔：macOS 上要起 lsof，只在有新输出后问，且最多这么频繁。
 const CWD_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 本地格的回滚持久化状态（ADR-039）：空闲时把最近若干行写回文件，
-/// 下次启动由新会话读回；工作目录顺带采样上报给 UI，随工作区落盘。
+/// 本地格的持久化状态（ADR-039）：空闲时把回滚写回文件，下次启动由新会话
+/// 读回；工作目录顺带采样上报给 UI，随工作区落盘。两者共用一个状态但彼此
+/// 独立——`path` 为 None 只停写盘，cwd 采样照常。
 struct ScrollbackState {
-  path: std::path::PathBuf,
+  /// 回滚文件；None = 记录关闭（设置「关闭后恢复会话内容」关掉时）
+  path: Option<std::path::PathBuf>,
+  /// 保留窗口：跟随设置「滚动历史行数」，运行中改设置经 `SetParams` 同步
+  max_lines: usize,
   generation: u64,
   saved_generation: u64,
   last_output: Instant,
@@ -680,9 +692,10 @@ struct ScrollbackState {
 }
 
 impl ScrollbackState {
-  fn new(path: std::path::PathBuf, shell_pid: Option<u32>) -> Self {
+  fn new(path: Option<std::path::PathBuf>, shell_pid: Option<u32>, max_lines: usize) -> Self {
     Self {
       path,
+      max_lines,
       generation: 0,
       saved_generation: 0,
       last_output: Instant::now(),
@@ -697,11 +710,23 @@ impl ScrollbackState {
     }
   }
 
+  /// 运行中开关记录（设置「关闭后恢复会话内容」）：关掉时停写并删掉本格
+  /// 文件——关闭态下这些内容不再有落点，留着会在重新打开后把旧内容复活。
+  /// 打开时从下一次空闲写回起按新路径写当前回滚。
+  fn set_path(&mut self, path: Option<std::path::PathBuf>) {
+    if path.is_none()
+      && let Some(old) = self.path.take()
+    {
+      scrollback::remove(&old);
+    }
+    self.path = path;
+  }
+
   /// 下一次需要醒来的等待：回滚待写或工作目录待采样。空闲期没有别的
   /// 定时器，不把它并进等待集合，2 秒空闲写回与目录采样永远不会发生。
   fn next_wakeup(&self) -> Option<std::time::Duration> {
-    let scrollback =
-      (self.generation != self.saved_generation).then(|| SCROLLBACK_IDLE.saturating_sub(self.last_output.elapsed()));
+    let scrollback = (self.path.is_some() && self.generation != self.saved_generation)
+      .then(|| SCROLLBACK_IDLE.saturating_sub(self.last_output.elapsed()));
     let cwd = (self.cwd_pending && self.shell_pid.is_some())
       .then(|| CWD_SAMPLE_INTERVAL.saturating_sub(self.last_cwd_sample.elapsed()));
     [scrollback, cwd].into_iter().flatten().min()
@@ -718,10 +743,13 @@ impl ScrollbackState {
   /// 跳过写盘（ADR-049：未灌入恢复内容的模型不能覆盖回滚文件）。
   fn tick(&mut self, terminal: &TerminalModel, control: &Sender<ControlEvent>, persist_allowed: bool) {
     let now = Instant::now();
-    if self.generation != self.saved_generation && now.duration_since(self.last_output) >= SCROLLBACK_IDLE {
+    if let Some(path) = &self.path
+      && self.generation != self.saved_generation
+      && now.duration_since(self.last_output) >= SCROLLBACK_IDLE
+    {
       // 尽力而为的旁路：写失败或门控未开（ADR-049）都保留上一份文件，
       // 退避一个空闲周期再试，避免 next_wakeup 返回 0 空转
-      let wrote = persist_allowed && scrollback::persist(&self.path, terminal).is_ok();
+      let wrote = persist_allowed && scrollback::persist(path, terminal, self.max_lines).is_ok();
       if wrote {
         self.saved_generation = self.generation;
       } else {
@@ -822,6 +850,7 @@ fn apply_command(
   terminal: &mut TerminalModel,
   state: &mut SessionState,
   restore_hold: &mut Option<RestoreHold>,
+  scrollback: &mut Option<ScrollbackState>,
   resize_gate: &mut ResizeGate,
   control: &Sender<ControlEvent>,
 ) -> Result<CommandOutcome> {
@@ -919,9 +948,24 @@ fn apply_command(
       terminal.set_option_as_alt(params.option_as_alt);
       // 历史调整会改网格（截断）也改底栏数值：全量置脏，下一帧快照随之更新
       terminal.set_scrolling_history(params.scrolling_history);
+      // 回滚保留窗口跟随同一个设置（ADR-039 2026-11-25 修订）：调小后下一次
+      // 空闲写回就按新窗口截断，调大后写得更远
+      if let Some(state) = scrollback.as_mut() {
+        state.max_lines = params.scrolling_history;
+      }
       Ok(CommandOutcome {
         closing: false,
         dirty: true,
+      })
+    }
+    // 运行中开关回滚（ADR-039）：只动写盘路径，不动网格
+    SessionCommand::SetScrollback(path) => {
+      if let Some(state) = scrollback.as_mut() {
+        state.set_path(path);
+      }
+      Ok(CommandOutcome {
+        closing: false,
+        dirty: false,
       })
     }
     // 运行中增删转发（ADR-038）：建立结果经转发事件流回报
@@ -1150,8 +1194,9 @@ fn finish(
 ) -> Result<()> {
   if let Some((state, allowed)) = scrollback_exit
     && allowed
+    && let Some(path) = &state.path
   {
-    let _ = scrollback::persist(&state.path, terminal);
+    let _ = scrollback::persist(path, terminal, state.max_lines);
   }
   for line in transcript.finish(terminal) {
     zhimaterm_recording::recorder::output_line(&line);
@@ -1289,8 +1334,8 @@ mod tests {
   use super::join_with_deadline;
   use super::text_area_size_reply;
   use super::wait_startup_size;
-  use super::{RESIZE_QUIET, ResizeGate, RestoreHold, advance_restore_hold, restore_poured};
-  use super::{RequestAction, SessionState, TranscriptState, apply_local_mouse, plan_requests};
+  use super::{RESIZE_QUIET, ResizeGate, RestoreHold, SCROLLBACK_IDLE, ScrollbackState, advance_restore_hold};
+  use super::{RequestAction, SessionState, TranscriptState, apply_local_mouse, plan_requests, restore_poured};
   use crate::{ControlEvent, PointerShape, SessionCommand, StartupSize};
   use smol::channel::bounded;
   use std::sync::mpsc;
@@ -1718,6 +1763,50 @@ mod tests {
     });
     assert!(restore_poured(&armed), "已灌入可写");
     assert!(!restore_poured(&pending_hold()), "未灌入不可写");
+  }
+
+  /// 运行中开关记录（ADR-039）：关掉即删本格文件并停写，重新打开后随新生
+  /// 成输出恢复写盘；关闭态不排写盘定时器（不留 0 延时空转）。
+  #[test]
+  fn scrollback_switch_stops_and_resumes_writes() {
+    let dir = std::env::temp_dir().join(format!("zhimaterm-scrollback-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let path = dir.join("1.log");
+    let (control, _events) = bounded(8);
+    let mut terminal = TerminalModel::new(40, 8);
+    let idle = || {
+      Instant::now()
+        .checked_sub(SCROLLBACK_IDLE + Duration::from_millis(1))
+        .unwrap()
+    };
+
+    let mut state = ScrollbackState::new(Some(path.clone()), None, 100);
+    terminal.advance(b"recorded\r\n");
+    state.note_output();
+    state.last_output = idle();
+    state.tick(&terminal, &control, true);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("recorded"));
+
+    // 关掉：文件立即删除，再有输出也不写
+    state.set_path(None);
+    assert!(!path.exists(), "关掉记录即删本格文件");
+    terminal.advance(b"while off\r\n");
+    state.note_output();
+    state.last_output = idle();
+    state.tick(&terminal, &control, true);
+    assert!(!path.exists(), "关闭态不再写盘");
+    assert!(state.next_wakeup().is_none(), "关闭态不排写盘定时器");
+
+    // 重新打开：新输出触发写盘，当前回滚整体落一次
+    state.set_path(Some(path.clone()));
+    terminal.advance(b"re-enabled\r\n");
+    state.note_output();
+    state.last_output = idle();
+    state.tick(&terminal, &control, true);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("re-enabled"));
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   /// 右键回归鼠标上报（ADR-063）后，右键松开不能把进行中的左键拖选提前

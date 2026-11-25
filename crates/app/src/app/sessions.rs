@@ -133,10 +133,9 @@ impl ZhimaTermApp {
   // 建一个会话视图（标签首格与分屏新格共用）。
   pub(super) fn new_view(&self, number: usize, target: SessionTarget, cx: &mut Context<Self>) -> Entity<TerminalView> {
     // 本地格的回滚文件按会话编号命名（ADR-039），SSH 不持久化；命名
-    // 契约（构造/解析）单点在 zhimaterm-session 的 scrollback
-    let scrollback = matches!(target, SessionTarget::Local { .. })
-      .then(|| file_for(number))
-      .flatten();
+    // 契约（构造/解析）单点在 zhimaterm-session 的 scrollback。路径与
+    // 开关分开：开关关掉时路径仍记在视图上，运行中重新打开按它续写
+    let scrollback = scrollback_file_for(&target, number);
     let metrics = self.metrics;
     let font = self.font.clone();
     // 会话固有参数从设置取一次：后端随格定型（ADR-050），运行中改设置
@@ -159,6 +158,7 @@ impl ZhimaTermApp {
         .settings()
         .map(|store| store.terminal_backend_or_default())
         .unwrap_or_default(),
+      scrollback_enabled: self.scrollback_enabled(),
     };
 
     // 运行中转发的外壳入口（ADR-038）：视图不持有保存的连接与 id 分配，
@@ -546,6 +546,15 @@ fn active_after_cycle(active: usize, len: usize, delta: isize) -> Option<usize> 
   Some((active as isize + delta).rem_euclid(len as isize) as usize)
 }
 
+/// 新会话的回滚文件路径（ADR-039）：只有本地格持久化回滚。是否读写由
+/// 设置开关另行决定（见 [`ZhimaTermApp::scrollback_enabled`]）：路径先
+/// 定下来，关掉记录后重新打开仍按同一文件续写。
+fn scrollback_file_for(target: &SessionTarget, number: usize) -> Option<std::path::PathBuf> {
+  matches!(target, SessionTarget::Local { .. })
+    .then(|| file_for(number))
+    .flatten()
+}
+
 /// 检查"会话是否已结束"的节奏。只读几个布尔值，不需要更密。
 pub(super) const REAP_INTERVAL_MS: u64 = 250;
 
@@ -571,6 +580,29 @@ fn normalize_session_name(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// 回滚文件只挂本地格：SSH 格任何时候都不持久化（ADR-039 的边界）。
+  /// 开关态不改变路径本身（关掉后重新打开要按同一文件续写），只决定
+  /// worker 是否读写。
+  #[test]
+  fn scrollback_files_attach_only_to_local_sessions() {
+    let local = SessionTarget::Local {
+      shell: LocalShell::Default { cwd: None },
+    };
+    assert!(scrollback_file_for(&local, 7).is_some(), "本地格有回滚文件");
+
+    let ssh = SessionTarget::Ssh(zhimaterm_session::SshTarget {
+      host: "example.com".into(),
+      port: 22,
+      user: "tester".into(),
+      auth: zhimaterm_session::SshAuth::agent_only(),
+      forward_agent: false,
+      forwards: Vec::new(),
+      jump: None,
+      credential_id: None,
+    });
+    assert_eq!(scrollback_file_for(&ssh, 7), None, "SSH 永不持久化回滚");
+  }
 
   #[test]
   fn session_names_trim_and_treat_blank_as_unnamed() {

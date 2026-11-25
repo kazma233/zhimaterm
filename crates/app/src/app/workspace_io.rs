@@ -138,6 +138,13 @@ impl ZhimaTermApp {
     let Ok(dir) = zhimaterm_base::config_paths::scrollback_dir() else {
       return;
     };
+    // 回滚关闭时目录整个清掉：关闭态下这些文件既不再读也不再写，留着
+    // 只会在重新打开开关后被旧内容复活（ADR-039 2026-11-25 修订）。
+    // 启动清理是后台动作，失败不阻塞启动（用户主动关开关那条路径会报错）
+    if !self.scrollback_enabled() {
+      let _ = self.clear_scrollback_files();
+      return;
+    }
     let referenced: std::collections::HashSet<usize> = self.views().map(|view| view.read(cx).number()).collect();
     let Ok(entries) = std::fs::read_dir(&dir) else {
       return;
@@ -156,6 +163,16 @@ impl ZhimaTermApp {
         let _ = std::fs::remove_file(entry.path());
       }
     }
+  }
+
+  /// 清掉回滚目录里的全部记录（设置关闭「关闭后恢复会话内容」时）：目录
+  /// 是专用目录，但只动符合命名契约的文件，别的东西不碰。Err 文案已完整，
+  /// 调用方加语境前缀即可。
+  pub(super) fn clear_scrollback_files(&self) -> Result<(), String> {
+    let dir =
+      zhimaterm_base::config_paths::scrollback_dir().map_err(|error| format!("无法定位回滚记录目录：{error:#}"))?;
+    remove_scrollback_files(&dir).map_err(|error| format!("清理回滚记录目录失败：{error}"))?;
+    Ok(())
   }
 
   /// 窗口几何防抖写（500ms）：拖拽/缩放期间只记录代际，停下来后写最后一次。
@@ -187,6 +204,48 @@ impl ZhimaTermApp {
       }
     })
     .detach();
+  }
+}
+
+/// 删除目录里符合回滚命名契约的全部文件（含原子写的 `.tmp` 孤儿），
+/// 返回删掉的个数。命名解析归 `session::scrollback`（`session_number_of`），
+/// 目录里的无关文件不动。目录不存在算成功（还没落过回滚）；删除失败
+/// 返回第一个错误，不让用户以为目录已经清干净。
+fn remove_scrollback_files(dir: &std::path::Path) -> std::io::Result<usize> {
+  let entries = match std::fs::read_dir(dir) {
+    Ok(entries) => entries,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+    Err(error) => return Err(error),
+  };
+  let mut removed = 0;
+  let mut first_error = None;
+  for entry in entries {
+    let entry = match entry {
+      Ok(entry) => entry,
+      Err(error) => {
+        first_error.get_or_insert(error);
+        continue;
+      }
+    };
+    let name = entry.file_name();
+    let Some(name) = name.to_str() else {
+      continue;
+    };
+    if session_number_of(name).is_none() {
+      continue;
+    }
+    match std::fs::remove_file(entry.path()) {
+      Ok(()) => removed += 1,
+      // 并发删除（worker 停写时删了自己的文件）不算失败
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => {
+        first_error.get_or_insert(error);
+      }
+    }
+  }
+  match first_error {
+    Some(error) => Err(error),
+    None => Ok(removed),
   }
 }
 
@@ -229,6 +288,27 @@ fn restored_shell(node: &workspace::SavedNode, shell_pref: Option<&str>, workdir
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// 关闭回滚时清目录：只删符合命名契约的记录（含 `.log.tmp` 孤儿），
+  /// 目录里的无关文件不动。
+  #[test]
+  fn clearing_scrollback_files_keeps_foreign_files() {
+    let dir = std::env::temp_dir().join(format!("zhimaterm-clear-scrollback-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    for name in ["1.log", "2.log.tmp", "notes.txt"] {
+      std::fs::write(dir.join(name), "x").expect("预置文件");
+    }
+    assert_eq!(
+      remove_scrollback_files(&dir).expect("清理应成功"),
+      2,
+      "两条记录文件都删"
+    );
+    assert!(!dir.join("1.log").exists());
+    assert!(!dir.join("2.log.tmp").exists(), "半写完的临时孤儿一并清");
+    assert!(dir.join("notes.txt").exists(), "无关文件不动");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   /// v1 文件没有叶编号（serde 默认 0）：按当前计数分配新编号。
   #[test]

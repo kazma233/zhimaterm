@@ -8,6 +8,7 @@
 //! 只有语义动作（应用 / 取消）经 [`ModalActions`] 回调改应用状态。
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -40,6 +41,9 @@ pub struct ModalActions {
   /// 「打开设置文件」：外壳用当前生效的编辑器档位打开盘上的
   /// settings.json（ADR-055 修订）。动作区与冻结横幅两处共用同一动作。
   pub open_file: WindowAction,
+  /// 点目录路径：用系统文件管理器打开回滚记录目录（ADR-039），
+  /// 目录不存在时由外壳先建好再开。
+  pub open_scrollback_dir: WindowAction,
   /// 「取消」：关闭表单。要窗口：关闭时把焦点还给会话
   pub cancel: WindowAction,
 }
@@ -165,6 +169,8 @@ pub struct SettingsForm {
   custom_editor: Entity<TextInput>,
   /// 默认工作目录（空 = home）：新会话的回落值，焦点格有目录时被继承优先（ADR-054）
   workdir: Entity<TextInput>,
+  /// 关闭后恢复会话内容（ADR-039）：新开的本地格是否读写回滚文件。
+  restore_scrollback: bool,
   /// macOS 上 ⌥ 键当 Alt（ADR-033）。默认关：保持系统原生特殊字符输入。
   option_as_alt: bool,
   /// 可选的等宽字体：打开表单时取一次（系统字体列表不会在运行中变化）
@@ -261,6 +267,7 @@ impl SettingsForm {
       editor_choice,
       custom_editor,
       workdir,
+      restore_scrollback: current.restore_scrollback,
       option_as_alt: current.option_as_alt,
       candidates,
       ui_candidates,
@@ -328,6 +335,7 @@ impl SettingsForm {
       option_as_alt: self.option_as_alt,
       terminal_backend: self.terminal_backend,
       text_editor,
+      restore_scrollback: self.restore_scrollback,
     })
   }
 
@@ -346,6 +354,12 @@ impl SettingsForm {
   /// 选终端核心（图标单选，ADR-060）；生效仍由「应用」触发。
   pub fn pick_backend(&mut self, backend: BackendKind, cx: &mut Context<Self>) {
     self.terminal_backend = backend;
+    cx.notify();
+  }
+
+  /// 切换「关闭后恢复会话内容」（ADR-039）；生效仍由「应用」触发。
+  pub fn toggle_restore_scrollback(&mut self, cx: &mut Context<Self>) {
+    self.restore_scrollback = !self.restore_scrollback;
     cx.notify();
   }
 
@@ -557,6 +571,7 @@ impl SettingsForm {
     self.custom_shell.update(cx, |input, cx| input.set_text("", cx));
     self.custom_editor.update(cx, |input, cx| input.set_text("", cx));
     self.workdir.update(cx, |input, cx| input.set_text("", cx));
+    self.restore_scrollback = false;
     self.option_as_alt = false;
     self.ligatures = true;
     self.features.update(cx, |input, cx| input.set_text("", cx));
@@ -636,9 +651,9 @@ fn font_row(
     )
 }
 
-/// 一行开关设置：勾选框与标题同行，说明独占一行并与标题对齐。
-/// 整行可点，与下拉选择行的交互重量一致；说明文字解释两个状态各自的含义。
-/// 调用方：连字开关（全平台，ADR-059）与 ⌥ 键开关（仅 macOS 渲染，ADR-033）。
+/// 一行开关设置：勾选框与标题同行，说明独占一行、与勾选框左缘平齐（不缩进
+/// 到标题下方）。整行可点，与下拉选择行的交互重量一致；说明文字解释两个状态
+/// 各自的含义。调用方：连字、⌥ 键（仅 macOS）与会话记录开关。
 fn checkbox_row(
   tokens: &zhimaterm_base::theme::UiTokens,
   id: &'static str,
@@ -693,17 +708,9 @@ fn checkbox_row(
         )
         .child(card::title(tokens, title)),
     )
-    // 说明文字独占一行：用与标题行同构的 spacer 对齐标题左缘。勾选框宽随
-    // 字号缩放（rem）、间距是固定像素，两个单位相加只能在布局层做，pl 里
-    // 预先折算会少算间距；长文字允许换行
-    .child(
-      div()
-        .flex()
-        .items_start()
-        .gap(px(8.))
-        .child(div().flex_none().w(ui_rems(14.)))
-        .child(div().flex_1().min_w(px(0.)).child(card::label(tokens, description))),
-    )
+    // 说明文字与勾选框左缘平齐：占满行宽自然换行，不再用勾选框宽度的
+    // spacer 缩进到标题下方
+    .child(card::label(tokens, description))
 }
 
 /// 终端核心图标单选（ADR-060）：两个后端各一枚大图标按钮并排，点击即改
@@ -762,12 +769,17 @@ fn backend_picker(
 /// 表单内容：两个字体都是收起的 select（点击展开选项浮层，选项用该字体
 /// 渲染名字作预览），终端字体限于等宽候选、界面字体放开到全部系统字体，
 /// 两个字号各自限定在允许范围内；本地 Shell 用无预览的普通 select（候选来自
-/// 系统注册表，末位「自定义…」切路径输入），工作目录是文本输入（ADR-036）。
+/// 系统注册表，末位「自定义…」切路径输入），工作目录是文本输入（ADR-036）；
+/// 会话记录分区是「关闭后恢复会话内容」开关 + 回滚记录目录只读展示与
+/// 路径可点击打开（ADR-039）。
 pub struct SettingsModal {
   pub form: Entity<SettingsForm>,
   pub actions: ModalActions,
   /// 设置文件读盘错误的横幅（打开时快照：模态期间设置不会再被写）
   pub error_banner: Option<String>,
+  /// 回滚记录目录（ADR-039）：打开时由外壳解析一次，模态只展示；
+  /// 配置目录定位失败时 None，目录行只给原因、不可点击。
+  pub scrollback_dir: Option<PathBuf>,
 }
 
 impl ModalView for SettingsModal {
@@ -1003,6 +1015,47 @@ impl ModalView for SettingsModal {
       "默认工作目录（留空 = home；新会话优先沿用当前会话目录）",
       form.workdir.clone(),
     ));
+    // 会话记录（ADR-039）：关掉即停记录并清空目录——运行中的本地会话立即
+    // 停写，新会话也不恢复。目录行常显，用来查看与清理记录；目录不存在时
+    // 由点击路径的动作建好再开。
+    content = content
+      .child(zhimaterm_base::ui::horizontal_divider(tokens))
+      .child(section_header(tokens, "会话记录", Some("关掉即停止记录并清空目录")))
+      .child(checkbox_row(
+        tokens,
+        "toggle-restore-scrollback",
+        "关闭后恢复会话内容",
+        "开：重开应用时本地会话续接上次回滚（带「上次会话结束于」分界行）；关：立即停止记录并清空目录，新会话也不恢复。SSH 会话不记录",
+        form.restore_scrollback,
+        {
+          let form = self.form.clone();
+          move |_, _, cx| {
+            form.update(cx, |form, cx| form.toggle_restore_scrollback(cx));
+          }
+        },
+      ))
+      .child(field_column(
+        tokens,
+        "回滚记录目录（保留行数跟随「滚动历史行数」）",
+        match &self.scrollback_dir {
+          // 路径本身就是入口：点击用系统文件管理器打开。完整换行显示——目录
+          // 名可能很长，省略号会把最有辨识度的末段截掉。
+          Some(dir) => {
+            let open_dir = self.actions.open_scrollback_dir.clone();
+            div().child(
+              panel::clickable("open-scrollback-dir", move |_, window, cx| open_dir(window, cx))
+                .role(Role::Link)
+                .aria_label("打开回滚记录目录")
+                .debug_selector(|| "open-scrollback-dir".into())
+                .text_size(ui_rems(11.))
+                .text_color(gpui::rgb(tokens.accent))
+                .hover(|style| style.text_color(gpui::rgb(tokens.fg)))
+                .child(dir.display().to_string()),
+            )
+          }
+          None => panel::error_line(tokens, "配置目录不可用，回滚记录没有落点"),
+        },
+      ));
     // 内容区自滚（卡片走 full_content，不套内边距）：padding 与字段间距由
     // 滚动容器自带（与卡片默认内边距同源），字段整体超过内容区高度时在区
     // 内滚动，弹窗 header 与动作区保持可见
@@ -1348,6 +1401,8 @@ mod tests {
       terminal_backend: BackendKind::Alacritty,
       option_as_alt: true,
       text_editor: Some("vscode".to_owned()),
+      // 取与默认（关）不同的值，往返才有区分度
+      restore_scrollback: true,
     }
   }
 
@@ -1364,6 +1419,8 @@ mod tests {
       assert_eq!(edited.local_shell.as_deref(), Some(test_paths::alt_shell().as_str()));
       assert_eq!(edited.local_workdir, None);
       assert!(edited.option_as_alt);
+      // 关闭后恢复会话内容随表单往返（ADR-039）
+      assert!(edited.restore_scrollback);
       // 编辑器档位经候选下标往返（ADR-055）
       assert_eq!(edited.text_editor.as_deref(), Some("vscode"));
       // 连字与字体特性原样往返（ADR-059）
@@ -1452,6 +1509,7 @@ mod tests {
       assert_eq!(edited.local_shell, None);
       assert_eq!(edited.local_workdir, None);
       assert!(!edited.option_as_alt);
+      assert!(!edited.restore_scrollback, "恢复默认 = 关闭会话内容恢复");
       // 连字回到默认开、特性清空（ADR-059）
       assert!(edited.font_ligatures);
       assert_eq!(edited.font_features, "");
@@ -1533,9 +1591,11 @@ mod tests {
           actions: ModalActions {
             apply: Rc::new(|_, _| {}),
             open_file: Rc::new(|_, _| {}),
+            open_scrollback_dir: Rc::new(|_, _| {}),
             cancel: Rc::new(|_, _| {}),
           },
           error_banner: None,
+          scrollback_dir: None,
         };
         let mut root = div()
           .id("settings-harness")
@@ -1636,29 +1696,35 @@ mod tests {
     assert!(!cx.update(|_, cx| form.read(cx).dropdown_open()), "拾取后下拉收起");
   }
 
-  /// 设置模态的渲染级验收（ADR-055/059）：连字开关与字体特性输入框在场，
-  /// 「打开设置文件」按钮在动作区——点击真的回外壳动作（不是死按钮）。
+  /// 设置模态的渲染级验收（ADR-039/055/059）：连字开关、字体特性输入框、
+  /// 会话记录开关与目录行在场，「打开设置文件」按钮与目录路径点击后真的
+  /// 回外壳动作（不是死按钮）。
   #[gpui::test]
-  fn the_settings_modal_renders_the_new_controls_and_the_open_file_button(cx: &mut gpui::TestAppContext) {
+  fn the_settings_modal_renders_the_new_controls_and_the_open_buttons(cx: &mut gpui::TestAppContext) {
     use std::cell::Cell;
 
     struct Harness {
       form: Entity<SettingsForm>,
       /// 「打开设置文件」被点了几次：动作确实回到外壳
       opened: Rc<Cell<usize>>,
+      /// 目录路径被点了几次
+      opened_dir: Rc<Cell<usize>>,
     }
 
     impl gpui::Render for Harness {
       fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         let opened = self.opened.clone();
+        let opened_dir = self.opened_dir.clone();
         let modal = SettingsModal {
           form: self.form.clone(),
           actions: ModalActions {
             apply: Rc::new(|_, _| {}),
             open_file: Rc::new(move |_, _| opened.set(opened.get() + 1)),
+            open_scrollback_dir: Rc::new(move |_, _| opened_dir.set(opened_dir.get() + 1)),
             cancel: Rc::new(|_, _| {}),
           },
           error_banner: None,
+          scrollback_dir: Some(std::env::temp_dir()),
         };
         div()
           .id("settings-harness")
@@ -1671,23 +1737,39 @@ mod tests {
     cx.update(|cx| zhimaterm_base::theme::init(None, cx));
     let form = cx.new(|cx| SettingsForm::new(lists(), effective(), cx));
     let opened = Rc::new(Cell::new(0usize));
+    let opened_dir = Rc::new(Cell::new(0usize));
     let window = cx.add_window(|_, _| Harness {
       form: form.clone(),
       opened: opened.clone(),
+      opened_dir: opened_dir.clone(),
     });
     let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    // 窗口拉高到能装下整张表单：会话记录分区在内容末尾，默认窗口高下
+    // 会被内容区滚动裁掉，画不进 rendered frame（debug_bounds 拿不到）
+    cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(2200.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
-    // 连字开关与特性输入框在场（ADR-059）
+    // 连字开关与特性输入框在场（ADR-059）；会话记录开关与目录按钮在场（ADR-039）
     assert!(cx.debug_bounds("toggle-ligatures").is_some(), "连字开关要渲染出来");
+    assert!(
+      cx.debug_bounds("toggle-restore-scrollback").is_some(),
+      "关闭后恢复会话内容的开关要渲染出来"
+    );
+    assert!(
+      cx.debug_bounds("open-scrollback-dir").is_some(),
+      "回滚记录目录路径要渲染出来（可点击打开）"
+    );
     assert!(
       cx.debug_bounds("settings-open-file").is_some(),
       "「打开设置文件」按钮要渲染在动作区"
     );
 
-    // 点它：动作回到外壳（按钮不是死按钮）
+    // 两个按钮都真的回外壳动作（不是死按钮）
     let button = cx.debug_bounds("settings-open-file").expect("按钮已渲染");
     cx.simulate_click(button.center(), gpui::Modifiers::default());
     assert_eq!(opened.get(), 1, "点「打开设置文件」应回外壳动作");
+    let dir_path = cx.debug_bounds("open-scrollback-dir").expect("目录路径已渲染");
+    cx.simulate_click(dir_path.center(), gpui::Modifiers::default());
+    assert_eq!(opened_dir.get(), 1, "点目录路径应回外壳动作");
   }
 }

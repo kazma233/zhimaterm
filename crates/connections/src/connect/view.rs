@@ -14,7 +14,7 @@ use zhimaterm_base::ui::panel;
 use zhimaterm_base::ui::ui_rems;
 
 use super::forward::{ForwardEdit, forward_rule_row};
-use super::{ConnectForm, ConnectSection, ConnectToggle};
+use super::{ConnectForm, ConnectToggle};
 
 /// 需要窗口的模态动作统一签名见 `ui::WindowAction`（连接要开新会话、进编辑
 /// 要挪焦点、关闭要还焦点）。
@@ -23,7 +23,7 @@ pub type SavedAction = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// 忘掉一条已保存的连接：参数是列表下标。
 pub type ForgetSavedAction = Rc<dyn Fn(usize, &mut App)>;
 /// 连接弹窗的交互装配：渲染层只依赖回调，不接触应用实体，改的始终是应用状态机。
-/// 回调只留需要外壳资源的语义动作；逐控件交互（开关、折叠、转发草稿）由
+/// 回调只留需要外壳资源的语义动作；逐控件交互（开关、转发草稿）由
 /// 渲染层直调表单实体（与设置表单同一纪律，ADR-026）。
 pub struct ModalActions {
   /// 行上「连接」：直接连（缺口令时由外壳弹输入框或退到编辑视图）
@@ -119,7 +119,8 @@ impl ConnectModal {
     div().flex_1().min_h(px(0.)).flex().flex_col().child(list)
   }
 
-  /// 编辑视图主体：一条连接的全部字段，单栏纵向滚动。
+  /// 编辑视图主体：一条连接的全部字段，单栏纵向滚动；四个分区常显，用大标题
+  /// 与横线分隔。
   fn edit_body(&self, tokens: &zhimaterm_base::theme::UiTokens, cx: &App) -> gpui::Div {
     let form = self.form.read(cx);
     let actions = &self.actions;
@@ -132,12 +133,6 @@ impl ConnectModal {
         form.update(cx, |form, cx| form.toggle(field, cx));
       })
     };
-    let toggle_section = {
-      let form = form_entity.clone();
-      Rc::new(move |section: ConnectSection, cx: &mut App| {
-        form.update(cx, |form, cx| form.toggle_section(section, cx));
-      })
-    };
     let edit_forwards = {
       let form = form_entity.clone();
       Rc::new(move |edit: ForwardEdit, cx: &mut App| {
@@ -145,8 +140,9 @@ impl ConnectModal {
       })
     };
     // 分组结构（better-layout：组间距 ≥ 2× 组内距）：容器 gap(16) 管组间，
-    // 每组内部 gap(8)；组间再画分组线，各段边界一眼可辨（与设置表单同一
-    // 分组语言）。口令类短字段两列并排压缩竖向高度。
+    // 每组内部 gap(8)；每组以分区标题 + 横线起手，所有字段常显——填单时
+    // 不用先猜哪里能点开，也免得错误提示被藏在收起段里。口令类短字段两列
+    // 并排压缩竖向高度。
     let mut fields = div().flex().flex_col().gap(px(16.));
 
     // 组 1：目标。名称放首位——它是列表里认这条连接的标题（ADR-048）
@@ -155,7 +151,7 @@ impl ConnectModal {
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(panel::section_header(tokens, "目标", None))
+        .child(section_heading(tokens, "目标", None))
         .child(input::field(tokens, cx, "名称", &form.name))
         .child(input::field(tokens, cx, "主机", &form.host))
         .child(
@@ -166,237 +162,195 @@ impl ConnectModal {
             .child(div().flex_1().child(input::field(tokens, cx, "用户", &form.user))),
         ),
     );
-    fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
     // 组 2：认证信息（ADR-010/012）：本地 agent 与 agent 转发两个 agent 开关
-    // 相邻，加可选的私钥与密码。「都可选」与尝试顺序写在段说明里；开关旁
-    // 提示跟随状态。段可折叠，恒以展开起手（填单主路径）。
+    // 相邻，加可选的私钥与密码。「都可选」与尝试顺序写在分区说明里；开关旁
+    // 提示跟随状态。
     let agent_hint = if form.use_agent {
       "本机 agent 里的钥匙自动参与认证"
     } else {
       "已关闭：只用下面填写的认证信息"
     };
-    let auth_open = form.auth_open;
     fields = fields.child(
       div()
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(fold_section(
+        .child(section_heading(
           tokens,
-          "connect-fold-auth",
           "认证信息",
           Some("都可选；按 agent → 私钥 → 密码 顺序尝试"),
-          auth_open,
-          {
-            let toggle = toggle_section.clone();
-            move |_, _, cx| toggle(ConnectSection::Auth, cx)
-          },
         ))
-        .children(auth_open.then(|| {
+        // 两个 agent 开关同行（与端口/用户同一套两列节奏）：同是 agent
+        // 在认证链里的角色，一个管本地参与，一个管递给远端继续认证
+        // （ADR-012）；两侧说明都短，最窄弹窗下半列也放得下
+        .child(
           div()
             .flex()
-            .flex_col()
             .gap(px(8.))
-            // 两个 agent 开关同行（与端口/用户同一套两列节奏）：同是 agent
-            // 在认证链里的角色，一个管本地参与，一个管递给远端继续认证
-            // （ADR-012）；两侧说明都短，最窄弹窗下半列也放得下
+            .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
+              tokens,
+              "connect-use-agent",
+              "使用本地 ssh-agent",
+              agent_hint,
+              form.use_agent,
+              {
+                let toggle = toggle.clone();
+                move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
+              },
+            )))
+            .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
+              tokens,
+              "connect-forward-agent",
+              "转发 agent 到远端",
+              "私钥不出本机",
+              form.forward_agent,
+              {
+                let toggle = toggle.clone();
+                move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
+              },
+            ))),
+        )
+        // 私钥文件：右侧「选择」开原生文件选择器——手输路径容易写错，选一次就到手
+        .child(
+          div()
+            .flex()
+            .items_end()
+            .gap(px(6.))
             .child(
               div()
-                .flex()
-                .gap(px(8.))
-                .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
-                  tokens,
-                  "connect-use-agent",
-                  "使用本地 ssh-agent",
-                  agent_hint,
-                  form.use_agent,
-                  {
-                    let toggle = toggle.clone();
-                    move |_, _, cx| toggle(ConnectToggle::UseAgent, cx)
-                  },
-                )))
-                .child(div().flex_1().min_w(px(0.)).child(panel::checkbox(
-                  tokens,
-                  "connect-forward-agent",
-                  "转发 agent 到远端",
-                  "私钥不出本机",
-                  form.forward_agent,
-                  {
-                    let toggle = toggle.clone();
-                    move |_, _, cx| toggle(ConnectToggle::ForwardAgent, cx)
-                  },
-                ))),
+                .flex_1()
+                .min_w(px(0.))
+                .child(input::field(tokens, cx, "私钥文件", &form.key_path)),
             )
-            // 私钥文件：右侧「选择」开原生文件选择器——手输路径容易写错，选一次就到手
+            .child(panel::secondary_button(tokens, "connect-pick-key", "选择", None, {
+              let pick = actions.pick_key_file.clone();
+              move |_, window, cx| pick(window, cx)
+            })),
+        )
+        .child(
+          div()
+            .flex()
+            .gap(px(8.))
             .child(
               div()
-                .flex()
-                .items_end()
-                .gap(px(6.))
-                .child(
-                  div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(input::field(tokens, cx, "私钥文件", &form.key_path)),
-                )
-                .child(panel::secondary_button(tokens, "connect-pick-key", "选择", None, {
-                  let pick = actions.pick_key_file.clone();
-                  move |_, window, cx| pick(window, cx)
-                })),
+                .flex_1()
+                .child(input::field(tokens, cx, "私钥口令", &form.key_passphrase)),
             )
-            .child(
-              div()
-                .flex()
-                .gap(px(8.))
-                .child(
-                  div()
-                    .flex_1()
-                    .child(input::field(tokens, cx, "私钥口令", &form.key_passphrase)),
-                )
-                // 密码框自带框内「显示 / 隐藏」：编辑有已存凭据的
-                // 条目时，空的框先以星号示意已存有密码，点「显示」
-                // 才从钥匙串取回明文
-                .child(div().flex_1().child(input::field(tokens, cx, "密码", &form.password))),
-            )
-            // 输入即保存（ADR-018 修订）：密码框非空保存时写钥匙串，
-            // 不再有「记住密码」勾选；忘掉连接仍是删除凭据的唯一出口
-            .child(muted(tokens, "输入并保存即写入系统钥匙串；留空沿用已存的"))
-        })),
+            // 密码框自带框内「显示 / 隐藏」：编辑有已存凭据的
+            // 条目时，空的框先以星号示意已存有密码，点「显示」
+            // 才从钥匙串取回明文
+            .child(div().flex_1().child(input::field(tokens, cx, "密码", &form.password))),
+        )
+        // 输入即保存（ADR-018 修订）：密码框非空保存时写钥匙串，
+        // 不再有「记住密码」勾选；忘掉连接仍是删除凭据的唯一出口
+        .child(muted(tokens, "输入并保存即写入系统钥匙串；留空沿用已存的")),
     );
-    fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
-    // 组 3：跳板机（ADR-020）：折叠管可见性，checkbox 只管功能开关——关掉时
-    // 字段照常显示、配置保留，只是连接不走跳板。跳板密码不进钥匙串写进
-    // 段说明。
+    // 组 3：跳板机（ADR-020）：checkbox 只管功能开关——关掉时字段照常显示、
+    // 配置保留，只是连接不走跳板。跳板密码不进钥匙串写进分区说明。
     let jump_agent_hint = if form.jump_use_agent {
       "本机 agent 里的钥匙自动参与跳板认证"
     } else {
       "已关闭：只用下面填写的认证信息"
     };
-    let jump_open = form.jump_open;
-    let jump_content = div()
-      .flex()
-      .flex_col()
-      .gap(px(8.))
-      .child(panel::checkbox(
-        tokens,
-        "connect-jump-enabled",
-        "经跳板机连接",
-        // 跳板链的第二跳要借本机 agent 盖章：依赖关系写在决策现场，
-        // 不然用户要到内网机器认证失败才撞见这个开关
-        if form.jump_enabled {
-          "第二跳登录需要配合认证信息里的「转发 agent 到远端」"
-        } else {
-          ""
-        },
-        form.jump_enabled,
-        {
-          let toggle = toggle.clone();
-          move |_, _, cx| toggle(ConnectToggle::JumpEnabled, cx)
-        },
-      ))
-      .child(
-        div()
-          .flex()
-          .gap(px(8.))
-          .child(
-            div()
-              .flex_1()
-              .child(input::field(tokens, cx, "跳板主机[:端口]", &form.jump.target)),
-          )
-          .child(
-            div()
-              .flex_1()
-              .child(input::field(tokens, cx, "跳板用户", &form.jump.user)),
-          ),
-      )
-      .child(panel::checkbox(
-        tokens,
-        "connect-jump-agent",
-        "跳板用本地 ssh-agent",
-        jump_agent_hint,
-        form.jump_use_agent,
-        {
-          let toggle = toggle.clone();
-          move |_, _, cx| toggle(ConnectToggle::JumpUseAgent, cx)
-        },
-      ))
-      .child(input::field(tokens, cx, "跳板私钥文件", &form.jump.key_path))
-      .child(
-        div()
-          .flex()
-          .gap(px(8.))
-          .child(
-            div()
-              .flex_1()
-              .child(input::field(tokens, cx, "跳板私钥口令", &form.jump.key_passphrase)),
-          )
-          .child(
-            div()
-              .flex_1()
-              .child(input::field(tokens, cx, "跳板密码", &form.jump.password)),
-          ),
-      );
     fields = fields.child(
       div()
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(fold_section(
+        .child(section_heading(
           tokens,
-          "connect-fold-jump",
           "跳板机",
           Some("连接经跳板转发（ProxyJump）；跳板密码只在内存，不进钥匙串"),
-          jump_open,
+        ))
+        .child(panel::checkbox(
+          tokens,
+          "connect-jump-enabled",
+          "经跳板机连接",
+          // 跳板链的第二跳要借本机 agent 盖章：依赖关系写在决策现场，
+          // 不然用户要到内网机器认证失败才撞见这个开关
+          if form.jump_enabled {
+            "第二跳登录需要配合认证信息里的「转发 agent 到远端」"
+          } else {
+            ""
+          },
+          form.jump_enabled,
           {
-            let toggle = toggle_section.clone();
-            move |_, _, cx| toggle(ConnectSection::Jump, cx)
+            let toggle = toggle.clone();
+            move |_, _, cx| toggle(ConnectToggle::JumpEnabled, cx)
           },
         ))
-        .children(jump_open.then_some(jump_content)),
+        .child(
+          div()
+            .flex()
+            .gap(px(8.))
+            .child(
+              div()
+                .flex_1()
+                .child(input::field(tokens, cx, "跳板主机[:端口]", &form.jump.target)),
+            )
+            .child(
+              div()
+                .flex_1()
+                .child(input::field(tokens, cx, "跳板用户", &form.jump.user)),
+            ),
+        )
+        .child(panel::checkbox(
+          tokens,
+          "connect-jump-agent",
+          "跳板用本地 ssh-agent",
+          jump_agent_hint,
+          form.jump_use_agent,
+          {
+            let toggle = toggle.clone();
+            move |_, _, cx| toggle(ConnectToggle::JumpUseAgent, cx)
+          },
+        ))
+        .child(input::field(tokens, cx, "跳板私钥文件", &form.jump.key_path))
+        .child(
+          div()
+            .flex()
+            .gap(px(8.))
+            .child(
+              div()
+                .flex_1()
+                .child(input::field(tokens, cx, "跳板私钥口令", &form.jump.key_passphrase)),
+            )
+            .child(
+              div()
+                .flex_1()
+                .child(input::field(tokens, cx, "跳板密码", &form.jump.password)),
+            ),
+        ),
     );
-    fields = fields.child(zhimaterm_base::ui::horizontal_divider(tokens));
 
     // 组 4：端口转发（ADR-011）——规则列表天然占行，组内收窄到 6。
     let mut forward_rows = div().flex().flex_col().gap(px(6.));
     for (index, draft) in form.forwards.iter().enumerate() {
       forward_rows = forward_rows.child(forward_rule_row(tokens, index, draft, &form_entity));
     }
-    let forwards_open = form.forwards_open;
     fields = fields.child(
       div()
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(fold_section(
+        .child(section_heading(
           tokens,
-          "connect-fold-forwards",
           "端口转发",
           Some("建立连接时生效；单条失败不影响会话"),
-          forwards_open,
-          {
-            let toggle = toggle_section.clone();
-            move |_, _, cx| toggle(ConnectSection::Forwards, cx)
-          },
         ))
-        .children(forwards_open.then(|| {
-          div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(forward_rows)
-            .child(div().flex().child(panel::secondary_button(
-              tokens,
-              "connect-add-forward",
-              "＋ 添加转发规则",
-              None,
-              {
-                let edit = edit_forwards.clone();
-                move |_, _, cx| edit(ForwardEdit::Add, cx)
-              },
-            )))
-        })),
+        .child(forward_rows)
+        .child(div().flex().child(panel::secondary_button(
+          tokens,
+          "connect-add-forward",
+          "＋ 添加转发规则",
+          None,
+          {
+            let edit = edit_forwards.clone();
+            move |_, _, cx| edit(ForwardEdit::Add, cx)
+          },
+        ))),
     );
 
     // 内容（含转发规则）高于弹窗时必须能滚动——否则溢出的字段会画到底栏按钮上。
@@ -499,7 +453,7 @@ impl ModalView for ConnectModal {
 
   /// 大分区模态：宽度跟随窗口（上下限是硬边界——小窗口下弹窗不能溢出，超宽屏
   /// 上也不能撑成满屏面板），两视图同宽，切换不跳。高度：列表随条目数长到
-  /// 八成窗高封顶后内部滚动；编辑视图定高八成——切转发类型、折叠段时弹窗
+  /// 八成窗高封顶后内部滚动；编辑视图定高八成——切转发类型、增删规则时弹窗
   /// 尺寸不跳。内容区不套内边距、纵向伸展（视图自带 padding）。
   fn card(&self, window: &Window, cx: &App) -> gpui::Div {
     let tokens = zhimaterm_base::theme::tokens(cx);
@@ -565,39 +519,27 @@ fn muted(tokens: &zhimaterm_base::theme::UiTokens, text: &str) -> gpui::Div {
     .child(text.to_owned())
 }
 
-/// 可折叠段的标题行：节名 + 说明 + 右端展开箭头，整行可点。说明收起时也在——
-/// 收起的是字段，不是这段的语义。行不加横向内边距，标题与字段标签同一起点。
-fn fold_section(
-  tokens: &zhimaterm_base::theme::UiTokens,
-  id: impl Into<gpui::ElementId>,
-  title: &str,
-  note: Option<&str>,
-  open: bool,
-  on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-  panel::clickable(id, on_click)
-    .w_full()
-    .py(px(3.))
-    .rounded(px(4.))
+/// 分区标题：大号题名 + 右侧说明，下面一条横线把标题与字段隔开。段与段之间
+/// 只靠横线与留白区分——所有字段常显，不做收起展开。
+fn section_heading(tokens: &zhimaterm_base::theme::UiTokens, title: &str, note: Option<&str>) -> gpui::Div {
+  div()
     .flex()
-    .items_center()
+    .flex_col()
     .gap(px(6.))
-    .hover(|style| style.bg(gpui::rgb(tokens.bg_hover)))
     .child(
       div()
-        .text_size(ui_rems(11.))
-        .text_color(gpui::rgb(tokens.fg_secondary))
-        .child(title.to_owned()),
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+          div()
+            .text_size(ui_rems(13.))
+            .text_color(gpui::rgb(tokens.fg))
+            .child(title.to_owned()),
+        )
+        .children(note.map(|note| muted(tokens, note))),
     )
-    .children(note.map(|note| muted(tokens, note)))
-    .child(div().flex_1())
-    .child(
-      div()
-        .flex_none()
-        .text_size(ui_rems(10.))
-        .text_color(gpui::rgb(tokens.fg_muted))
-        .child(if open { "▴" } else { "▾" }),
-    )
+    .child(zhimaterm_base::ui::horizontal_divider(tokens))
 }
 
 /// 一行保存的连接：行本身不可点，动作全是行右侧的文字按钮——「连接」进会话、
@@ -693,7 +635,7 @@ fn saved_row(
     )
 }
 
-/// 列表行上的文字按钮：与可折叠段标题同一套悬停反馈，颜色由动作的分量决定。
+/// 列表行上的文字按钮：与行内小动作同一套悬停反馈，颜色由动作的分量决定。
 fn row_action(
   tokens: &zhimaterm_base::theme::UiTokens,
   id: impl Into<ElementId>,

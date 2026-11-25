@@ -72,6 +72,10 @@ pub struct Settings {
   /// "vscode"/"zed" = 已安装编辑器档位（打开时走发现链重解析）；
   /// 其余值 = 自定义可执行文件绝对路径（校验规则与 local_shell 一致）。
   pub text_editor: Option<String>,
+  /// 关闭后恢复会话内容（ADR-039）：None = 默认关（不记录也不恢复）；
+  /// 开 = 本地格回滚照常读写。关掉时所有本地会话立即停止记录、
+  /// `<config>/scrollback` 清零。
+  pub restore_scrollback: Option<bool>,
 }
 
 /// 设置表单的值：打开时的生效快照与「应用」出口共用一份字段。
@@ -99,6 +103,8 @@ pub struct SettingsValues {
   /// 文件路径点击的打开档位（ADR-055）：None = 系统默认。值域与
   /// [`Settings::text_editor`] 一致，解释见 `editor::EditorChoice`。
   pub text_editor: Option<String>,
+  /// 关闭后恢复会话内容（ADR-039）：本地格是否读写回滚文件。
+  pub restore_scrollback: bool,
 }
 
 impl SettingsValues {
@@ -120,6 +126,7 @@ impl SettingsValues {
       local_workdir: self.local_workdir.clone(),
       terminal_backend: Some(self.terminal_backend.name().to_owned()),
       text_editor: self.text_editor.clone(),
+      restore_scrollback: Some(self.restore_scrollback),
     }
   }
 
@@ -181,6 +188,12 @@ impl Settings {
       .ui_font_size
       .unwrap_or(zhimaterm_base::ui::DEFAULT_UI_FONT_SIZE)
       .clamp(MIN_UI_FONT_SIZE, MAX_UI_FONT_SIZE)
+  }
+
+  /// 生效的「关闭后恢复会话内容」：未配置 = 关（记录与恢复默认都不做）。
+  /// 关掉时本地格不读也不写回滚文件，目录由应用层清空。
+  pub fn restore_scrollback_or_default(&self) -> bool {
+    self.restore_scrollback.unwrap_or(false)
   }
 
   /// 生效滚动历史上限：未配置用默认；手改文件塞进坏值时夹回来
@@ -623,6 +636,7 @@ mod tests {
       option_as_alt: true,
       terminal_backend: zhimaterm_terminal::backend::BackendKind::Ghostty,
       text_editor: Some("vscode".into()),
+      restore_scrollback: false,
     };
     assert_eq!(
       values.to_settings(&existing),
@@ -640,8 +654,9 @@ mod tests {
         local_workdir: Some("/tmp".into()),
         terminal_backend: Some("ghostty".into()),
         text_editor: Some("vscode".into()),
+        restore_scrollback: Some(false),
       },
-      "12 个编辑字段全部落盘，theme 从现有设置抄回；特性串裁剪存储"
+      "13 个编辑字段全部落盘，theme 从现有设置抄回；特性串裁剪存储"
     );
   }
 
@@ -665,6 +680,7 @@ mod tests {
       option_as_alt: false,
       terminal_backend: zhimaterm_terminal::backend::BackendKind::Alacritty,
       text_editor: None,
+      restore_scrollback: true,
     };
     assert_eq!(values.to_settings(&existing).ui_font_family, None);
     assert_eq!(
@@ -691,6 +707,7 @@ mod tests {
       local_workdir: Some("/tmp".into()),
       terminal_backend: None,
       text_editor: Some("zed".into()),
+      restore_scrollback: Some(false),
     };
     settings.save_at(path.clone()).expect("保存应成功");
 
@@ -716,6 +733,10 @@ mod tests {
     assert_eq!(partial.font_size, Some(15.0));
     assert_eq!(partial.ui_font_size, None);
     assert_eq!(partial.scrolling_history_or_default(), DEFAULT_SCROLLING_HISTORY);
+    assert!(
+      !partial.restore_scrollback_or_default(),
+      "未配置 = 默认关闭会话内容恢复（不记录也不恢复）"
+    );
   }
 
   #[test]
@@ -882,6 +903,7 @@ mod tests {
       option_as_alt: false,
       terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
       text_editor: None,
+      restore_scrollback: true,
     };
     assert_eq!(
       store.apply(&edited).unwrap_err(),
@@ -925,12 +947,14 @@ mod tests {
       option_as_alt: true,
       terminal_backend: zhimaterm_terminal::backend::BackendKind::default(),
       text_editor: None,
+      restore_scrollback: false,
     };
     store.apply(&edited).expect("可写时应用应成功");
     let saved = Settings::load_at(path.clone()).expect("落盘应可读回");
     assert_eq!(saved.font_family.as_deref(), Some("Mono"));
     assert_eq!(saved.theme.as_deref(), Some("Dracula"), "theme 从旧设置抄回");
     assert!(saved.option_as_alt);
+    assert_eq!(saved.restore_scrollback, Some(false), "关掉恢复也落盘");
 
     store.set_theme("Nord").expect("可写时换主题应成功");
     assert_eq!(Settings::load_at(path).unwrap().theme.as_deref(), Some("Nord"));

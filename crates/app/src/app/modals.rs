@@ -277,6 +277,9 @@ impl ZhimaTermApp {
         .map(|store| store.terminal_backend_or_default())
         .unwrap_or_default(),
       text_editor: store.and_then(|store| store.text_editor.clone()),
+      restore_scrollback: store
+        .map(|store| store.restore_scrollback_or_default())
+        .unwrap_or(false),
     };
     // 候选只在打开时取一次：系统字体列表与注册表不会在表单打开期间变化
     let lists = CandidateLists {
@@ -299,6 +302,8 @@ impl ZhimaTermApp {
         // 读盘错误在打开时快照:模态打开期间设置文件不会再被写
         // (主题下拉已被互斥收起),不需要每帧读外壳
         error_banner: self.settings_error.clone(),
+        // 目录也是环境事实：打开时解析一次，模态只展示路径
+        scrollback_dir: zhimaterm_base::config_paths::scrollback_dir().ok(),
       }),
       window,
       cx,
@@ -320,6 +325,28 @@ impl ZhimaTermApp {
       return self.fail_settings("无法定位设置文件：配置目录不可用".into(), cx);
     };
     crate::editor::open(&choice, path, None, None);
+  }
+
+  /// 打开回滚记录目录（ADR-039）：用系统文件管理器直开，供用户查看或清理
+  /// 记录。目录还没被创建过（从未落过回滚）时先建好再开——记录入口不该因为
+  /// 「还没有内容」而打不开；失败报在设置表单底部，不静默吞掉。
+  fn open_scrollback_dir(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    let dir = match zhimaterm_base::config_paths::scrollback_dir() {
+      Ok(dir) => dir,
+      Err(error) => return self.fail_settings(format!("无法定位回滚记录目录：{error:#}"), cx),
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+      return self.fail_settings(format!("创建回滚记录目录失败：{error}"), cx);
+    }
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    if let Err(error) = std::process::Command::new(program).arg(&dir).spawn() {
+      self.fail_settings(format!("打开回滚记录目录失败：{error}"), cx);
+    }
   }
 
   /// 打开快捷键参考模态（只读，Esc 关闭）。
@@ -418,7 +445,22 @@ impl ZhimaTermApp {
 
     // 冻结与落盘在 Store 域内裁决（GLOSSARY「持久化冻结」）；前缀是本动作
     // 的语境（界面已经换上了）
-    if let Err(message) = self.settings.apply(&edited) {
+    let applied = self.settings.apply(&edited);
+    if let Err(message) = applied {
+      return self.fail_settings(format!("已应用，但{message}"), cx);
+    }
+
+    // 回滚开关（ADR-039）：落盘成功后才停记录——worker 收到关闭指令会删掉
+    // 本格文件，写盘失败时磁盘仍是「开」，提前删历史会变成开着记录却只剩
+    // 空目录。开启没有销毁性，也同样放在落盘之后，失败时行为维持原样。
+    for view in self.views() {
+      view.update(cx, |view, _| view.set_scrollback_enabled(edited.restore_scrollback));
+    }
+    // 已结束会话留下的记录由目录清理收口；worker 删自己的文件与这里并发
+    // 删除同一命名空间是安全的（删不到按成功处理）
+    if !edited.restore_scrollback
+      && let Err(message) = self.clear_scrollback_files()
+    {
       return self.fail_settings(format!("已应用，但{message}"), cx);
     }
 
@@ -791,6 +833,7 @@ fn settings_modal_actions(cx: &Context<ZhimaTermApp>) -> ModalActions {
   ModalActions {
     apply: modal_action(cx, |this, window, cx| this.apply_settings(window, cx)),
     open_file: modal_action(cx, |this, window, cx| this.open_settings_file(window, cx)),
+    open_scrollback_dir: modal_action(cx, |this, window, cx| this.open_scrollback_dir(window, cx)),
     cancel: modal_action(cx, |this, window, cx| this.overlay_close_top(window, cx)),
   }
 }

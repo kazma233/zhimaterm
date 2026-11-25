@@ -594,10 +594,8 @@ fn restored_scrollback_waits_for_a_late_resize() {
 /// 目录变化的路径。
 #[test]
 fn local_cwd_changes_are_reported_for_workspace_persistence() {
-  // 工作目录采集与回滚文件共用一个开关（本地格生产路径两者都有）
-  let dir = std::env::temp_dir().join(format!("zhimaterm-cwd-{}", std::process::id()));
-  let _ = std::fs::remove_dir_all(&dir);
-  std::fs::create_dir_all(&dir).unwrap();
+  // 工作目录采样与回滚记录解耦（ADR-039 2026-11-25 修订）：不挂回滚文件
+  // 也照常上报，关掉「关闭后恢复会话内容」不能连带丢 cwd
   #[cfg(windows)]
   let (shell, change_dir, expected) = (
     LocalShell::Program {
@@ -618,7 +616,8 @@ fn local_cwd_changes_are_reported_for_workspace_persistence() {
     target: SessionTarget::Local { shell },
     backend: zhimaterm_terminal::backend::BackendKind::Alacritty,
     history: 10_000,
-    scrollback: Some(dir.join("cwd.log")),
+    // 记录关掉（不挂回滚文件）也必须照常上报 cwd
+    scrollback: None,
     pane: crate::tests::support::test_pane(),
   });
   let first = wait_session_event(&events, Duration::from_secs(10), |event| match event {
@@ -633,7 +632,6 @@ fn local_cwd_changes_are_reported_for_workspace_persistence() {
     _ => None,
   });
   let moved = moved.expect("cd 后应上报新工作目录");
-  let _ = std::fs::remove_dir_all(&dir);
   assert_eq!(
     std::fs::canonicalize(&moved).expect("上报的目录应存在"),
     std::fs::canonicalize(&expected).expect("目标目录应存在"),
