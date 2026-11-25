@@ -832,7 +832,7 @@ pub fn render_sidebar_row(
     )
 }
 
-/// 待确认的关闭目标：一个格（分屏里的 ⌘W / 格内 ✕）或整个标签（侧栏 ✕）。
+/// 待确认的关闭目标：一个格（分屏里的 ⌘W）或整个标签（侧栏 ✕）。
 /// 关闭确认模态的数据类型归这里，外壳（app）引用它装配目标。
 #[derive(Clone, Copy)]
 pub(crate) enum CloseTarget {

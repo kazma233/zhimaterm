@@ -36,7 +36,13 @@ pub fn mouse_listener_canvas(
 
 /// IME 输入处理器载体：`handle_input` 只能在 paint 阶段注册，与鼠标监听同一套做法。
 /// 注册后平台会把输入法组合与提交文本送进 `EntityInputHandler`。
-pub fn input_handler_canvas<V: EntityInputHandler>(focus: &FocusHandle, entity: gpui::Entity<V>) -> gpui::AnyElement {
+/// `inset` 让处理器 bounds 与网格实际绘制/命中区域同源（终端网格有内边距时，
+/// 候选窗位置不能按整块面板算）。
+pub fn input_handler_canvas<V: EntityInputHandler>(
+  focus: &FocusHandle,
+  entity: gpui::Entity<V>,
+  inset: Pixels,
+) -> gpui::AnyElement {
   let focus = focus.clone();
   canvas(
     |_, _, _| {},
@@ -45,7 +51,7 @@ pub fn input_handler_canvas<V: EntityInputHandler>(focus: &FocusHandle, entity: 
     },
   )
   .absolute()
-  .inset_0()
+  .inset(inset)
   .into_any_element()
 }
 

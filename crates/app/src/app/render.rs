@@ -185,12 +185,6 @@ impl ZhimaTermApp {
         let app = app.clone();
         Rc::new(move |pane, cx| app.update(cx, |this, cx| this.focus_pane(tab_index, pane, cx)))
       },
-      close_pane: {
-        let app = app.clone();
-        Rc::new(move |pane, window, cx| {
-          app.update(cx, |this, cx| this.request_close_pane(tab_index, pane, window, cx));
-        })
-      },
       start_drag: {
         let app = app.clone();
         Rc::new(move |split, cx| {

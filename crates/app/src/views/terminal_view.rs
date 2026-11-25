@@ -12,20 +12,19 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-  Action, App, Bounds, ClickEvent, ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, KeyDownEvent,
-  MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollEvent, UTF16Selection, Window, canvas, div,
-  point, px, size,
+  App, Bounds, ClickEvent, ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, KeyDownEvent, MouseButton,
+  MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollEvent, UTF16Selection, Window, canvas, div, point, px,
+  size,
 };
 
 use crate::editor::{self, EditorChoice};
 use crate::views::grid;
-use crate::views::panes;
 use crate::views::session_state::{FocusAction, SessionEffect, SessionSignal, fold_signal};
 use crate::views::shell;
 use zhimaterm_base::font::{self, CellMetrics, FontConfig};
 use zhimaterm_base::input::{
-  CopySelection, GestureModifiers, MouseAction, MouseGesture, OpenSearch, PasteClipboard, SplitDown, SplitRight,
-  WheelDirection, horizontal_delta_lines, is_link_modifier, key_input, mouse_button, scroll_delta_lines,
+  CopySelection, GestureModifiers, MouseAction, MouseGesture, OpenSearch, PasteClipboard, WheelDirection,
+  horizontal_delta_lines, is_link_modifier, key_input, mouse_button, scroll_delta_lines,
 };
 use zhimaterm_base::ui::dialog::{self, Dialog};
 use zhimaterm_base::ui::input::{ImeComposition, TextInput};
@@ -52,6 +51,16 @@ const BACKEND_BADGE_DURATION: Duration = Duration::from_secs(1);
 /// 指标历史的保留点数：与迷你图槽位同源（2 秒一拍 × 30 = 最近 1 分钟），
 /// 两边必须一致，图上每槽才有对应样本。
 const METRIC_HISTORY_CAPACITY: usize = shell::SPARKLINE_SLOTS;
+
+/// 网格内容与终端面边缘的留白：文字不贴着窗口边、分割条或焦点边框。
+/// 只内缩绘制/命中/PTY 用的矩形，留白区仍是终端底色；点击留白只聚焦
+/// 不产生终端输入（见 `handle_mouse_down` 的 bounds 闸门）。
+const TERMINAL_GRID_PADDING: f32 = 6.0;
+
+/// 回看标记的整体存活时长：最后一次滚动后 1 秒内线性淡出，到期整条消失。
+const SCROLL_MARKER_FADE: Duration = Duration::from_secs(1);
+/// 淡出动画的重绘节拍（约 30fps）：只在标记存活期间跑，到期循环退出。
+const SCROLL_MARKER_FADE_TICK: Duration = Duration::from_millis(33);
 
 /// 打开「添加转发规则」表单
 pub type OpenForwardForm = Rc<dyn Fn(Entity<TerminalView>, &mut Window, &mut App)>;
@@ -155,11 +164,14 @@ pub struct TerminalView {
   window_active: bool,
   /// 终端区域 bounds 由渲染帧写入，鼠标位置据此换算成格坐标
   surface_bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
+  /// 分屏焦点描边（ADR-064）：多格标签里本格是否为活动格。由外壳按布局树
+  /// 的 `focused` 同步——边框画在整格（含停靠面板与状态底栏）外沿。
+  pane_focus_ring: bool,
   /// 指针悬停的格与其上的超链接，用来决定下划线与指针形状
   hovered: Option<(usize, usize)>,
   hovered_link: Option<TerminalLink>,
-  /// 文件路径点击的确认浮层（ADR-055）：锚点（窗口坐标，同 context_menu
-  /// 语义）与已展开并验证存在的待开目标；None = 浮层没开
+  /// 文件路径点击的确认浮层（ADR-055）：待开目标已展开并验证存在；
+  /// None = 浮层没开
   confirm_open: Option<ConfirmOpen>,
   /// 文件路径的打开档位（settings 推送，ADR-055）：确认后按它 spawn 编辑器
   editor: EditorChoice,
@@ -196,12 +208,6 @@ pub struct TerminalView {
   forward_hooks: ForwardHooks,
   /// 「同时保存到连接」勾选：默认开（ADR-038）
   forward_save: bool,
-  /// 右键菜单的锚点（窗口坐标，渲染时换算成终端容器内的位置）；None = 菜单没开
-  context_menu: Option<gpui::Point<gpui::Pixels>>,
-  /// 右键菜单的键盘高亮游标：菜单开着期间与 `context_menu` 配对使用
-  context_menu_cursor: menu::MenuCursor,
-  /// 终端容器（浮层的定位基准）的窗口 bounds，渲染帧写入：菜单定位与夹取按它换算
-  container_bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
   /// 搜索条是否展开（ADR-015）
   search_open: bool,
   /// 搜索条输入框：打开时创建，关闭时丢弃
@@ -212,6 +218,11 @@ pub struct TerminalView {
   scroll_anchor: Option<i32>,
   /// 最近一次纵向滚动的方向（true = 往上）：方向变化时重新锚定
   scroll_last_up: bool,
+  /// 回看标记最后一次滚动的时间：标记整体在 1s 内淡出（ADR-064 修订）。
+  /// None = 标记已消失或没有滚动。
+  scroll_marker_at: Option<Instant>,
+  /// 淡出循环是否在跑：滚动只刷新时间戳，循环在标记消失后自行退出。
+  scroll_fade_running: bool,
   /// 光标闪烁相位（true = 亮）。键入时复位为亮，程序输出不复位——否则 htop 这类
   /// 持续刷新的程序会让光标恒亮（Alacritty 同）
   cursor_blink_on: bool,
@@ -342,6 +353,7 @@ impl TerminalView {
       scroll_remainder_x: 0.0,
       window_active: true,
       surface_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))))),
+      pane_focus_ring: false,
       hovered: None,
       hovered_link: None,
       confirm_open: None,
@@ -361,14 +373,13 @@ impl TerminalView {
       forward_open: false,
       forward_hooks,
       forward_save: true,
-      context_menu: None,
-      context_menu_cursor: Default::default(),
-      container_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))))),
       search_open: false,
       search_input: None,
       search_regex: false,
       scroll_anchor: None,
       scroll_last_up: true,
+      scroll_marker_at: None,
+      scroll_fade_running: false,
       cursor_blink_on: true,
       blink_running: false,
       last_input_at: Instant::now(),
@@ -400,6 +411,7 @@ impl TerminalView {
 
   /// 回看标记的视口位置：锚定行 + display_offset 即它在视口里的行号；
   /// 落在视口外（滚过头）就没有标记。实时视图（offset = 0）不画。
+  /// 整条标记随最后一次滚动的时间在 1s 内淡出（ADR-064 修订）。
   fn scroll_marker(&self) -> Option<grid::ScrollMarker> {
     let snapshot = self.snapshot.as_ref()?;
     if snapshot.display_offset == 0 {
@@ -407,9 +419,15 @@ impl TerminalView {
     }
     let anchor = self.scroll_anchor?;
     let row = anchor + snapshot.display_offset as i32;
+    let alpha = scroll_marker_alpha(self.scroll_marker_at?.elapsed())?;
     (0..snapshot.rows.len() as i32)
       .contains(&row)
-      .then_some(grid::ScrollMarker { row: row as usize })
+      .then_some(grid::ScrollMarker {
+        row: row as usize,
+        // 拖尾沿实际滚动方向铺：往上回看时向上，滚回实时视图时向下
+        trail_down: !self.scroll_last_up,
+        alpha,
+      })
   }
 
   /// 响铃标记是否待确认（侧栏行据此点亮）。
@@ -533,6 +551,12 @@ impl TerminalView {
     self.focus.clone()
   }
 
+  /// 同步分屏焦点描边（ADR-064）：外壳在布局树焦点或格数变化后调用；
+  /// 单格标签恒为 false（没有第二个格可混淆）。
+  pub fn set_pane_focus_ring(&mut self, focused: bool) {
+    self.pane_focus_ring = focused;
+  }
+
   /// 会话事件循环：帧与控制事件到达即更新视图。新建与重连共用。
   /// 事件携带代数：重连后旧会话（其 worker 因通道关闭而发终态）的迟到事件被丢弃。
   fn watch_events(events: session::SessionEvents, generation: u64, cx: &mut Context<Self>) {
@@ -564,6 +588,42 @@ impl TerminalView {
         if !still_ticking {
           // 实体可能已销毁；只在确实拿到时清标志
           let _ = this.update(cx, |view, _| view.clock_running = false);
+          return;
+        }
+      }
+    })
+    .detach();
+  }
+
+  /// 按需启动回看标记的整体淡出循环（ADR-064 修订）：最后一次滚动后
+  /// 1s 内每帧重画让整条标记降到透明；滚动只刷新时间戳，不重新起循环。
+  fn ensure_scroll_fade(&mut self, cx: &mut Context<Self>) {
+    if self.scroll_fade_running {
+      return;
+    }
+    self.scroll_fade_running = true;
+    cx.spawn(async move |this, cx| {
+      loop {
+        cx.background_executor().timer(SCROLL_MARKER_FADE_TICK).await;
+        let keep = this
+          .update(cx, |view, cx| {
+            let Some(at) = view.scroll_marker_at else {
+              view.scroll_fade_running = false;
+              return false;
+            };
+            if at.elapsed() >= SCROLL_MARKER_FADE {
+              view.scroll_marker_at = None;
+              // 标记退场即结束这一轮回看提示：下一次滚动重新锚定到当时的视口边缘
+              view.scroll_anchor = None;
+              view.scroll_fade_running = false;
+              cx.notify();
+              return false;
+            }
+            cx.notify();
+            true
+          })
+          .unwrap_or(false);
+        if !keep {
           return;
         }
       }
@@ -903,9 +963,10 @@ impl TerminalView {
   fn handle_session_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
     match event {
       SessionEvent::Frame(snapshot) => {
-        // 回到实时视图：上一个回看会话的锚点作废
+        // 回到实时视图：上一个回看会话的锚点与淡出计时作废
         if snapshot.display_offset == 0 {
           self.scroll_anchor = None;
+          self.scroll_marker_at = None;
         }
         let blinking = snapshot.cursor_blinking;
         self.snapshot = Some(Arc::new(snapshot));
@@ -1096,41 +1157,8 @@ impl TerminalView {
 
   fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     use crate::views::terminal_keys::{KeyRoute, route_key};
-    // 右键菜单开着：菜单键（上下/Enter/Esc）先于一切路由，Esc 在
-    // `route_key` 也有兜底，这里全量接管保证键盘与鼠标同一套动作
-    if self.context_menu.is_some() {
-      let items = terminal_context_menu_items(cx);
-      // 处理完菜单键必须 return：stop_propagation 只挡祖先派发，不中断本函数
-      // 后续逻辑——否则按键继续走 route_key 写进 PTY，菜单与终端同时响应
-      match menu::route_menu_keys(&event.keystroke, &items, &self.context_menu_cursor) {
-        menu::MenuKeyOutcome::Moved => {
-          cx.stop_propagation();
-          cx.notify();
-          return;
-        }
-        menu::MenuKeyOutcome::Picked(index) => {
-          if let Some(menu::MenuEntry::Item(item)) = items.get(index) {
-            (item.on_pick)(window, cx);
-          }
-          cx.stop_propagation();
-          return;
-        }
-        menu::MenuKeyOutcome::Close => {
-          self.context_menu = None;
-          cx.stop_propagation();
-          cx.notify();
-          return;
-        }
-        // 菜单开着时上下/Enter 一律不进终端，即使没有可执行动作
-        menu::MenuKeyOutcome::Consumed => {
-          cx.stop_propagation();
-          return;
-        }
-        menu::MenuKeyOutcome::None => {}
-      }
-    }
-    // 守卫顺序（确认浮层 → 菜单 → 搜索 → 死会话 → 焦点 → 连接中）在
-    // 纯函数里，见 `terminal_keys::route_key`；这里只执行动作
+    // 守卫顺序（确认浮层 → 搜索 → 死会话 → 焦点 → 连接中）在纯函数里，
+    // 见 `terminal_keys::route_key`；这里只执行动作
     let route = route_key(
       self.state.data(),
       self.confirm_open.is_some(),
@@ -1316,6 +1344,9 @@ impl TerminalView {
         });
       }
       self.scroll_last_up = up;
+      // 回看标记整体只活 1s：滚动刷新时间戳，淡出循环按帧重画到 0
+      self.scroll_marker_at = Some(Instant::now());
+      self.ensure_scroll_fade(cx);
       self.send_mouse(
         event.position,
         MouseAction::Wheel(direction, vertical_lines.abs() as i32),
@@ -1398,8 +1429,13 @@ impl TerminalView {
   /// 唯一的视觉效应是链接下划线与指针形状，无链接区内的移动不再触发
   /// 整屏重画（此前每过一个格就重画一次）。
   fn update_hover(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-    let hovered =
-      grid::cell_at(self.surface_bounds.get(), position, self.metrics).map(|(column, row, _)| (column, row));
+    // 留白区不是网格：不给边缘格制造悬停链接与下划线
+    let bounds = self.surface_bounds.get();
+    let hovered = bounds
+      .contains(&position)
+      .then(|| grid::cell_at(bounds, position, self.metrics))
+      .flatten()
+      .map(|(column, row, _)| (column, row));
     if hovered == self.hovered {
       return;
     }
@@ -1423,19 +1459,17 @@ impl TerminalView {
     }
     self.clear_bell(cx);
 
-    // 右键打开本地菜单（拆分与搜索的入口），不再转发给前台程序：主流终端
-    // 都把右键留给本地菜单。按下不上报，松开与按住移动同样不上报（成对约定）
-    if event.button == MouseButton::Right {
-      self.context_menu = Some(event.position);
-      self.context_menu_cursor.set(None);
-      cx.notify();
+    // 网格四周的留白只负责聚焦，不向终端发按下：`cell_at` 会把越界坐标
+    // 钳到边缘格（拖拽出界的既有语义），按下不能借用这个钳制落到首格/末格
+    if !self.surface_bounds.get().contains(&event.position) {
       return;
     }
 
-    // ⌘/Ctrl + 点击落在链接上就处理它：这一下不给终端，既不选区也不上报。
+    // ⌘/Ctrl + 左键落在链接上就处理它：这一下不给终端，既不选区也不上报。
     // URL 直接交给系统打开；文件路径先过本地格与存在性闸门，再进确认
     // 浮层（ADR-055）——打开本地文件是显式动作，不允许单击直达
-    if is_link_modifier(event.modifiers)
+    if event.button == MouseButton::Left
+      && is_link_modifier(event.modifiers)
       && let Some((column, row, _)) = grid::cell_at(self.surface_bounds.get(), event.position, self.metrics)
       && let Some(link) = self.link_at(column, row).filter(|link| self.actionable_link(link))
     {
@@ -1454,7 +1488,6 @@ impl TerminalView {
         TerminalLink::FilePath { path, line, column } => {
           let path = editor::expand_home(&path);
           if path.exists() {
-            self.context_menu = None;
             self.confirm_open = Some(ConfirmOpen { path, line, column });
           }
         }
@@ -1478,19 +1511,11 @@ impl TerminalView {
 
   fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
     self.update_hover(event.position, cx);
-    // 右键已被本地菜单接管：按住右键的移动不作为按键动作上报
-    let pressed = event
-      .pressed_button
-      .filter(|button| *button != MouseButton::Right)
-      .and_then(mouse_button);
+    let pressed = event.pressed_button.and_then(mouse_button);
     self.send_mouse(event.position, MouseAction::Motion(pressed), event.modifiers);
   }
 
   fn handle_mouse_up(&mut self, event: &MouseUpEvent) {
-    // 右键按下没有上报：松开也不能上报，xterm 上报要求按下/松开成对
-    if event.button == MouseButton::Right {
-      return;
-    }
     let Some(button) = mouse_button(event.button) else {
       return;
     };
@@ -1614,6 +1639,12 @@ fn close_needs_confirmation(local: bool, exited: bool, alt_screen: bool, foregro
   (!local && !exited) || alt_screen || (local && foreground_child)
 }
 
+/// 回看标记的整体不透明度：最后一次滚动后 1s 内从 1 线性降到 0，
+/// 到期（或更久）返回 None——整条标记不再绘制。
+fn scroll_marker_alpha(elapsed: Duration) -> Option<f32> {
+  (elapsed < SCROLL_MARKER_FADE).then(|| 1.0 - elapsed.as_secs_f32() / SCROLL_MARKER_FADE.as_secs_f32())
+}
+
 /// 网格中央提示的内容规则（ADR-016）。只服务本地格：本地格没有底栏，凡是"终端
 /// 还没起来或起不来"的状态都在这里说明；远端格的一切状态（连接中带秒数、监控、
 /// 结束原因与键位）都在底栏，中央不重复。纯函数，便于单测；
@@ -1690,9 +1721,9 @@ fn status_extras(
   any.then(move || row.into_any_element())
 }
 
-/// 搜索条（ADR-015，2026-11-17 修订位置：动作行下方）：终端右上的浮动
-/// 覆盖层——输入框、正则开关、上/下跳转与匹配总数、关闭。覆盖而不是
-/// 挤占网格：搜索开关不改变网格行列数，PTY 不被无谓 resize。正则无效时
+/// 搜索条（ADR-015/063：终端右上角浮动）：输入框、正则开关、上/下跳转与
+/// 匹配总数、关闭。覆盖而不是挤占网格：搜索开关不改变网格行列数，PTY
+/// 不被无谓 resize。正则无效时
 /// 输入框标红（`danger` 边框），不再用文字提示；「上跳 / 下跳 / 总数」
 /// 三元素常驻，有匹配时强调色可点，没有时总数 0、上下置灰。
 fn render_search_bar(
@@ -1714,7 +1745,7 @@ fn render_search_bar(
   }
   let mut bar = div()
     .absolute()
-    .top(px(panes::OVERLAY_TOP_BELOW_ACTION_ROW))
+    .top(px(8.))
     .right(px(8.))
     .rounded(px(8.))
     .border_1()
@@ -1807,57 +1838,8 @@ fn render_search_bar(
   )
 }
 
-/// 终端格的右键菜单（ADR-023，2026-11-17 修订：只剩两个拆分项，搜索入口
-/// 移至格右上角动作行）：动作语义与键位完全一致——拆分走既有 action 派发
-/// （应用根的 on_action 处理，跟随焦点格）。
-fn render_context_menu(
-  click: gpui::Point<gpui::Pixels>,
-  container: gpui::Size<gpui::Pixels>,
-  cursor: &menu::MenuCursor,
-  cx: &mut Context<TerminalView>,
-) -> Vec<gpui::AnyElement> {
-  let tokens = zhimaterm_base::theme::tokens(cx);
-  let items = terminal_context_menu_items(cx);
-  let entity = cx.entity();
-  vec![
-    menu::context_menu_backdrop(move |_, cx| {
-      entity.update(cx, |view, cx| {
-        view.context_menu = None;
-        cx.notify();
-      });
-    })
-    .into_any_element(),
-    menu::context_menu(&tokens, "terminal-context-menu", click, container, cursor, items).into_any_element(),
-  ]
-}
-
-/// 菜单条目在渲染与键盘裁决两处共用：键盘 Enter 拾取与鼠标点击跑同一组
-/// 回调，动作语义只有一份。
-fn terminal_context_menu_items(cx: &mut Context<TerminalView>) -> Vec<menu::MenuEntry> {
-  let entity = cx.entity();
-  let split_right = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
-    entity.update(cx, |this, cx| {
-      this.context_menu = None;
-      window.dispatch_action(SplitRight.boxed_clone(), cx);
-    });
-  });
-  let entity = cx.entity();
-  let split_down = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
-    entity.update(cx, |this, cx| {
-      this.context_menu = None;
-      window.dispatch_action(SplitDown.boxed_clone(), cx);
-    });
-  });
-  vec![
-    // 措辞与动作行的 tooltip 统一（ADR-058）：废弃「水平/垂直拆分」的
-    // 歧义叫法，动作与键位参考表同口径
-    menu::MenuEntry::item("左右分屏", split_right),
-    menu::MenuEntry::item("上下分屏", split_down),
-  ]
-}
-
-/// 文件路径点击的确认浮层（ADR-055）：容器居中的确认卡片（与右键菜单
-/// 同一挂载机制），说明「用哪个编辑器打开哪个文件」，确认后才 spawn。
+/// 文件路径点击的确认浮层（ADR-055）：容器居中的确认卡片（遮罩 + 浮层
+/// 的通用挂载机制），说明「用哪个编辑器打开哪个文件」，确认后才 spawn。
 /// 打开失败静默——本地格没有回执通道，设置保存时的校验挡住绝大多数坏值。
 fn render_confirm_open(
   confirm: &ConfirmOpen,
@@ -2043,8 +2025,8 @@ fn render_forward_overlay(
 
   div()
     .absolute()
-    // 与搜索条同一条避让规则：动作行下方（ADR-058）
-    .top(px(panes::OVERLAY_TOP_BELOW_ACTION_ROW))
+    // 与搜索条同位：右上角（ADR-063 移除动作行后不再需要向下避让）
+    .top(px(8.))
     .right(px(8.))
     .w(px(340.))
     .rounded(px(8.))
@@ -2205,14 +2187,23 @@ impl Render for TerminalView {
       // 锚点有面积就会抢走网格的点击聚焦、终端就打不了字；焦点派发
       // 只需要它存在于派发树里（焦点路径的起点），不需要可见可点。
       .child(div().absolute().size_0().track_focus(&self.dead_focus))
+      // 分屏焦点描边（ADR-064）：框住整格——网格、停靠面板与状态底栏同属
+      // 一个会话格；纯渲染覆盖层，不改尺寸、不挡命中
+      .children(self.pane_focus_ring.then(|| {
+        div()
+          .absolute()
+          .inset_0()
+          .border_2()
+          .border_color(gpui::rgb(tokens.border_focus))
+      }))
   }
 }
 
 impl TerminalView {
   /// 主区容器：终端网格面与一切停靠/浮层（探针面板、转发浮层、SFTP 面板、
-  /// 搜索条、右键菜单）的宿主。SFTP 浮层根是 absolute，以这层（relative）
+  /// 搜索条）的宿主。SFTP 浮层根是 absolute，以这层（relative）
   /// 为定位基准贴右缘悬浮；探针面板是 flex 子元素，展开时终端让宽、PTY
-  /// 按新列数重排（ADR-028）。搜索条与右键菜单最后挂载，盖在面板之上。
+  /// 按新列数重排（ADR-028）。搜索条最后挂载，盖在面板之上。
   fn render_main_area(&self, tokens: &zhimaterm_base::theme::UiTokens, cx: &mut Context<Self>) -> gpui::Div {
     let view_entity = cx.entity();
     div()
@@ -2224,8 +2215,8 @@ impl TerminalView {
       // 探针停靠面板（ADR-028）：展开时作为 flex 子元素贴右缘，
       // 终端让宽、PTY 按新列数重排；收起时不渲染
       .children(self.probe_panel.clone())
-      // 转发状态浮层（ADR-011/012/038）：右上角小卡片（动作行下方避让，
-      // ADR-058），标题栏按钮开关；增删在浮层里完成，写回配置经外壳回调
+      // 转发状态浮层（ADR-011/012/038）：右上角小卡片，标题栏按钮开关；
+      // 增删在浮层里完成，写回配置经外壳回调
       .children(self.forward_open.then(|| {
         render_forward_overlay(
           tokens,
@@ -2238,8 +2229,7 @@ impl TerminalView {
         )
       }))
       .children(self.sftp_panel.clone())
-      // 搜索条（ADR-015，2026-11-17 修订：动作行下方的右上角覆盖层），
-      // 不挤占网格（PTY 不因开关无谓 resize）
+      // 搜索条（ADR-015/063：右上角覆盖层），不挤占网格（PTY 不因开关无谓 resize）
       .children(self.search_open.then(|| {
         render_search_bar(
           self.search_input.as_ref(),
@@ -2248,25 +2238,7 @@ impl TerminalView {
           cx,
         )
       }))
-      // 右键菜单（ADR-023）：遮罩与浮层最后挂载，盖在面板与搜索条之上
-      .children(
-        self
-          .context_menu
-          .and_then(|click| {
-            let bounds = self.container_bounds.get();
-            (bounds.size.width > px(0.)).then(|| {
-              render_context_menu(
-                click - bounds.origin,
-                bounds.size,
-                &self.context_menu_cursor.clone(),
-                cx,
-              )
-            })
-          })
-          .into_iter()
-          .flatten(),
-      )
-      // 文件路径的确认浮层（ADR-055）：与右键菜单互斥，最后挂载盖住一切
+      // 文件路径的确认浮层（ADR-055）：最后挂载，盖住一切
       .children(
         self
           .confirm_open
@@ -2275,10 +2247,6 @@ impl TerminalView {
           .into_iter()
           .flatten(),
       )
-      // 容器 bounds 每帧写入：菜单的容器内定位与夹取按它换算
-      .child(zhimaterm_base::ui::canvas::bounds_recorder(
-        self.container_bounds.clone(),
-      ))
   }
 
   /// 终端网格面：字体与命中测试的宿主。画布三件套（resize 记录、全局鼠标
@@ -2305,6 +2273,7 @@ impl TerminalView {
       // 叠加色走主题 token（ADR-022）：搜索高亮与回看标记跟着主题换色
       search_highlight_color: gpui::rgba(tokens.search_highlight),
       scroll_marker_color: gpui::rgba(tokens.scroll_marker),
+      scroll_marker_gutter: TERMINAL_GRID_PADDING,
       cursor_hidden: !self.cursor_blink_on,
       cursor_hollow: !self.window_active,
       offsets: Rc::clone(&self.offsets_cache),
@@ -2353,6 +2322,8 @@ impl TerminalView {
           this.handle_mouse_down(event, window, cx);
         }),
       )
+      // 三个按键走同一条鼠标管线：右键不再开本地菜单（ADR-063），
+      // 程序没要求上报时本地也无语义（选区只认左键）
       .on_mouse_down(
         MouseButton::Right,
         cx.listener(|this, event, window, cx| {
@@ -2393,12 +2364,13 @@ impl TerminalView {
           |_, _, _, _| {},
         )
         .absolute()
-        .inset_0(),
+        .inset(px(TERMINAL_GRID_PADDING)),
       )
       .child(mouse_listeners)
       .child(zhimaterm_base::ui::canvas::input_handler_canvas(
         &self.focus,
         cx.entity(),
+        px(TERMINAL_GRID_PADDING),
       ))
       // 网格立即模式绘制：绝对定位铺满终端区域，字形逐格钉位
       // （见 grid::GridPainter）。比逐行 div 少两个数量级的布局节点。
@@ -2414,7 +2386,7 @@ impl TerminalView {
           }
         })
         .absolute()
-        .inset_0(),
+        .inset(px(TERMINAL_GRID_PADDING)),
       )
       .children(self.render_center_cards(tokens, cx))
       .into_any_element()
@@ -2797,8 +2769,19 @@ fn path_parts_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
 mod center_notice_tests {
   use super::center_notice;
   use super::hover_notify_needed;
+  use super::{SCROLL_MARKER_FADE, scroll_marker_alpha};
   use std::sync::Arc;
+  use std::time::Duration;
   use zhimaterm_terminal::TerminalLink;
+
+  /// 回看标记整体 1s 内线性淡出：刚滚动时全实，半程 50%，1s 到期不再绘制。
+  #[test]
+  fn scroll_marker_alpha_fades_out_within_one_second() {
+    assert_eq!(scroll_marker_alpha(Duration::ZERO), Some(1.0));
+    assert!((scroll_marker_alpha(Duration::from_millis(500)).unwrap() - 0.5).abs() < 1e-6);
+    assert_eq!(scroll_marker_alpha(SCROLL_MARKER_FADE), None);
+    assert_eq!(scroll_marker_alpha(SCROLL_MARKER_FADE + Duration::from_millis(1)), None);
+  }
 
   #[test]
   fn local_pane_hints_startup_in_the_center() {

@@ -1025,7 +1025,7 @@ fn apply_local_mouse(gesture: &MouseGesture, terminal: &mut TerminalModel, state
       terminal.extend_selection(gesture.column, gesture.row, gesture.side);
       true
     }
-    MouseAction::Release(_) => {
+    MouseAction::Release(MouseButton::Left) => {
       if !state.selecting {
         return false;
       }
@@ -1033,6 +1033,9 @@ fn apply_local_mouse(gesture: &MouseGesture, terminal: &mut TerminalModel, state
       // 单击（没有拖出范围）由这里清掉单格残留高亮；拖出范围则保留选区
       terminal.finish_selection()
     }
+    // 中键与右键的松开同样没有本地语义（ADR-063：右键回归鼠标上报后，
+    // 右键松开不能把进行中的左键拖选提前结束）
+    MouseAction::Release(_) => false,
     MouseAction::Wheel(direction, count) => {
       let lines = match direction {
         WheelDirection::Up => count,
@@ -1287,11 +1290,12 @@ mod tests {
   use super::text_area_size_reply;
   use super::wait_startup_size;
   use super::{RESIZE_QUIET, ResizeGate, RestoreHold, advance_restore_hold, restore_poured};
-  use super::{RequestAction, TranscriptState, plan_requests};
+  use super::{RequestAction, SessionState, TranscriptState, apply_local_mouse, plan_requests};
   use crate::{ControlEvent, PointerShape, SessionCommand, StartupSize};
   use smol::channel::bounded;
   use std::sync::mpsc;
   use std::time::{Duration, Instant};
+  use zhimaterm_base::input::{CellSide, GestureModifiers, MouseAction, MouseButton, MouseGesture};
   use zhimaterm_terminal::backend::BackendKind;
   use zhimaterm_terminal::{StoredLine, StoredRun, StoredStyle, TermRequest, TerminalModel, WindowSize};
 
@@ -1714,5 +1718,41 @@ mod tests {
     });
     assert!(restore_poured(&armed), "已灌入可写");
     assert!(!restore_poured(&pending_hold()), "未灌入不可写");
+  }
+
+  /// 右键回归鼠标上报（ADR-063）后，右键松开不能把进行中的左键拖选提前
+  /// 结束：本地选区只认左键的按下/移动/松开。
+  #[test]
+  fn right_release_does_not_finish_a_left_drag_selection() {
+    let mut model = TerminalModel::new(20, 4);
+    model.advance(b"hello world");
+    let mut state = SessionState::default();
+    let gesture = |action| MouseGesture {
+      action,
+      column: 1,
+      row: 0,
+      side: CellSide::Left,
+      modifiers: GestureModifiers::default(),
+    };
+    assert!(apply_local_mouse(
+      &gesture(MouseAction::Press {
+        button: MouseButton::Left,
+        click_count: 1,
+      }),
+      &mut model,
+      &mut state
+    ));
+    assert!(!apply_local_mouse(
+      &gesture(MouseAction::Release(MouseButton::Right)),
+      &mut model,
+      &mut state
+    ));
+    assert!(state.selecting, "右键松开不该结束左键拖选");
+    assert!(apply_local_mouse(
+      &gesture(MouseAction::Release(MouseButton::Left)),
+      &mut model,
+      &mut state
+    ));
+    assert!(!state.selecting);
   }
 }

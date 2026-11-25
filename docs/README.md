@@ -78,11 +78,13 @@
 - [ADR-055：文件路径点击与编辑器打开](decisions/055-file-path-click-and-editor.md)：输出里的本地路径识别为链接（TerminalLink 分轨 URL），仅本地会话经确认浮层用配置编辑器打开（系统默认/VS Code/Zed/自定义，发现链重解析，VS Code/Zed 带行号）；SSH 不响应，延续 ADR-002 边界。
 - [ADR-056：WSL 管理命令层与管理页](decisions/056-wsl-management.md)：wsl.exe 子命令薄包装归 `local::wsl`，Windows 常显入口呼出管理模态（取代 ADR-021 选择模态），业务叠放链驱动 ADR-044 修订；安装设置一步确认、自定义用户名装后落地、wsl.conf GUI 原文基底合并。
 - [ADR-057：窗口顶栏——自绘标题栏统一承载全局入口](decisions/057-window-title-bar.md)：appears_transparent + app_owns_titlebar_drag（macOS）/ Client 装饰请求（Linux），会话入口、活动会话标题与设置/快捷键/主题色板收编进 34px 顶栏，拖拽状态机对齐 Zed，侧栏瘦身为纯会话列表（取代 ADR-041 §1/§2 位置约定）。
-- [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。
+- [ADR-058：格右上角动作图标组](decisions/058-pane-action-row.md)：拆分/搜索/关闭的常驻图标行归 panes、点击先切树焦点再走既有动作、满格禁用；搜索条与转发卡片统一下移避让；右键菜单删搜索项（修订 ADR-015/023）。（已由 ADR-063 取代）
 - [ADR-059：连字开关与手输字体特性](decisions/059-font-ligatures-and-features.md)：两个设置项只作用终端网格字体，calt 唯一所有者是连字开关，表单严格校验、手改文件跳坏项留好项，测量与渲染同源。
 - [ADR-060：VT 后端原样接入与双后端收敛](decisions/060-as-is-vt-backend-convergence.md)：适配层只做「字节→网格」契约桥接，上游差异原样暴露、分歧表记账不修齐；终态 alacritty + ghostty 双后端。进度：步骤 1（砍兼容层）与步骤 3 删除部分（termwiz 退役、枚举收窄）已执行（2026-11-21）；剩余步骤 2（ghostty Linux 真实使用验证）与切默认。
 - [ADR-061：侧栏与 SFTP 文件列表的键盘导航](decisions/061-list-keyboard-navigation.md)：`⌘⇧E` 聚焦会话列表、↑↓/Home/End 切会话、Enter/Esc 回终端；`⌘⇧S` 打开/聚焦 SFTP，列表 ↑↓ 选择、Enter/→ 进目录、Backspace/← 上级、Delete 删除；焦点边框与返回路径明确。
 - [ADR-062：锚定浮层的常驻滚动条](decisions/062-anchored-popover-scrollbar.md)：滚动条状态归浮层所有者，track/thumb 画在滚动容器外；`max_offset` 是正的可滚距离，拖动/轨道跳转/滚轮同一 offset 口径；字体/主题/Shell/镜像下拉统一获得位置感。
+- [ADR-063：终端右键菜单与格动作行退役](decisions/063-retire-terminal-context-menu-and-pane-actions.md)：终端右键回归鼠标上报管线、格右上角动作行删除，拆分/搜索/关闭只保留键位；搜索条与转发卡片回到右上角 8px（取代 ADR-058，修订 ADR-015/023）。
+- [ADR-064：终端网格留白与分屏焦点标识](decisions/064-terminal-grid-padding-and-pane-focus.md)：网格四周 6px 内边距（绘制/命中/PTY/IME 同源）、多格时焦点格 2px 强调色描边（纯渲染覆盖，不触发 resize）。
 
 ## 背景与调研（`context/`）
 

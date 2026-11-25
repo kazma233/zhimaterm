@@ -230,6 +230,7 @@ impl ZhimaTermApp {
     // 新格获得键盘焦点与树焦点
     let focus = view.read(cx).focus_handle();
     window.focus(&focus, cx);
+    self.sync_pane_focus_ring(self.active, cx);
     self.layout_changed(cx);
   }
 
@@ -254,7 +255,21 @@ impl ZhimaTermApp {
         window.focus(&focus, cx);
       }
     }
+    self.sync_pane_focus_ring(tab_index, cx);
     self.layout_changed(cx);
+  }
+
+  /// 把布局树焦点同步到各格的描边开关（ADR-064）：多格标签的焦点格画框，
+  /// 单格或非焦点格清掉。视图只被动接收——焦点仍以布局树为唯一所有者。
+  pub(super) fn sync_pane_focus_ring(&mut self, tab_index: usize, cx: &mut Context<Self>) {
+    let Some(tab) = self.tabs.get(tab_index) else {
+      return;
+    };
+    let focused = tab.tree.focused();
+    let multi = tab.views.len() > 1;
+    for (pane, view) in &tab.views {
+      view.update(cx, |view, _| view.set_pane_focus_ring(multi && *pane == focused));
+    }
   }
 
   /// 点某一格：把树的焦点挪过去（键盘焦点由终端视图自己在按下时接管）。
@@ -262,6 +277,7 @@ impl ZhimaTermApp {
     if let Some(tab) = self.tabs.get_mut(tab_index)
       && tab.tree.focus(pane)
     {
+      self.sync_pane_focus_ring(tab_index, cx);
       cx.notify();
     }
   }
@@ -337,7 +353,7 @@ impl ZhimaTermApp {
     }
   }
 
-  /// 用户显式关闭一个格（⌘W 多格时、格内 ✕）：目标需要确认就先挂起，
+  /// 用户显式关闭一个格（多格时的 ⌘W）：目标需要确认就先挂起，
   /// 弹确认浮层；否则直接关。会话正常结束的自动回收不走这里。
   pub(super) fn request_close_pane(
     &mut self,

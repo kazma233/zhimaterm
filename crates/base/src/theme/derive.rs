@@ -105,7 +105,7 @@ pub struct UiTokens {
   pub shadow_popover: u32,
   /// 搜索匹配高亮
   pub search_highlight: u32,
-  /// 回看滚动位置标记
+  /// 回看滚动位置标记：取主题 accent 的同色相高对比变体（见推导式）
   pub scroll_marker: u32,
   /// 输入框内选区叠加
   pub input_selection: u32,
@@ -264,7 +264,10 @@ pub fn derive_tokens(scheme: &ColorScheme) -> UiTokens {
     // 落影是环境遮蔽：纯黑物理直觉；深色界面层级差小，落影要更重才读得出
     shadow_popover: with_alpha(0x000000, if is_dark { 0x8c } else { 0x40 }),
     search_highlight: with_alpha(warn, 0x73),
-    scroll_marker: with_alpha(mix(warn, danger, 0.5), 0xff),
+    // 回看标记跟随主题 accent，但做明度特异化：深色主题向白提亮、浅色主题
+    // 向黑压暗一档。既保持主题色相、又和焦点边框/选中态同色不同调，
+    // 4px 细条在终端底上的对比也比原始 accent 更稳。
+    scroll_marker: with_alpha(mix(accent, if is_dark { 0xffffff } else { 0x000000 }, 0.25), 0xff),
     input_selection: with_alpha(accent, 0x30),
     scrollbar_thumb: with_alpha(mix(bg, fg, 0.35), 0x66),
   }
@@ -304,9 +307,9 @@ mod tests {
     let derived: UiTokens = derive_tokens(&theme.scheme);
 
     // 名字、手调值、推导值同列一行：新增字段只在这里加一行，不会出现
-    // 平行数组长度不齐被 zip 静默截断的漏检。overlay 与 input_selection
-    // 由公式直接命中手调值，纳入守护；search_highlight 与 scroll_marker
-    // 的手挑琥珀调不落在 warn 色的插值线上，线性推导到不了，不进基线。
+    // 平行数组长度不齐被 zip 静默截断的漏检。overlay、input_selection 与
+    // scroll_marker 由公式直接命中手调值，纳入守护；search_highlight 的
+    // 手挑琥珀调不落在 warn 色的插值线上，线性推导到不了，不进基线。
     let cases = [
       ("bg_root", hand.bg_root, derived.bg_root),
       ("bg_terminal", hand.bg_terminal, derived.bg_terminal),
@@ -351,6 +354,7 @@ mod tests {
       ("overlay", hand.overlay, derived.overlay),
       ("shadow_popover", hand.shadow_popover, derived.shadow_popover),
       ("input_selection", hand.input_selection, derived.input_selection),
+      ("scroll_marker", hand.scroll_marker, derived.scroll_marker),
       ("scrollbar_thumb", hand.scrollbar_thumb, derived.scrollbar_thumb),
     ];
     let mut worst = (0u32, "");
@@ -374,5 +378,18 @@ mod tests {
     }
     // 允许的偏差是上限不是目标：这条输出在评审时人工看一眼量级
     assert!(worst.0 > 0, "推导与手调完全一致不需要校准上限，检查基准是否抄错");
+  }
+
+  /// 回看标记跟随主题 accent 的色相，但明度向底色反方向偏一档：
+  /// 深色主题提亮、浅色主题压暗，与纯 accent 同色不同调。
+  #[test]
+  fn scroll_marker_is_a_tonal_variant_of_the_accent() {
+    let theme = default_theme();
+    let tokens = derive_tokens(&theme.scheme);
+    assert_eq!(
+      tokens.scroll_marker,
+      with_alpha(mix(tokens.accent, 0xffffff, 0.25), 0xff)
+    );
+    assert_ne!(tokens.scroll_marker >> 8, tokens.accent, "特异化：不能等同于纯 accent");
   }
 }

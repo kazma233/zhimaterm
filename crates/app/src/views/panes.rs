@@ -7,13 +7,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{Action, AnyElement, App, Entity, MouseButton, Window, canvas, div, px};
+use gpui::{AnyElement, App, Entity, MouseButton, canvas, div, px};
 
-use crate::views::icons;
 use crate::views::terminal_view::TerminalView;
 use crate::workspace::{LayoutSpec, PaneId, SplitAxis};
-use zhimaterm_base::input::{SplitDown, SplitRight};
-use zhimaterm_base::ui::tooltip;
 
 /// 分割节点标识：拖拽比例时用来定位是哪一条分割条。
 pub type SplitId = u64;
@@ -36,12 +33,6 @@ pub const DIVIDER_THICKNESS: f32 = 6.0;
 /// 比例夹取范围：拖到极端也要留下可用的两格。
 const MIN_RATIO: f32 = 0.15;
 const MAX_RATIO: f32 = 0.85;
-
-/// 格右上角动作行的几何（ADR-058）：行顶偏移与行高。
-pub const PANE_ACTION_ROW_TOP: f32 = 6.0;
-pub const PANE_ACTION_ROW_HEIGHT: f32 = 22.0;
-/// 动作行之下浮层（搜索条、转发卡片）的顶部偏移：行底 + 一档间距。
-pub const OVERLAY_TOP_BELOW_ACTION_ROW: f32 = PANE_ACTION_ROW_TOP + PANE_ACTION_ROW_HEIGHT + 6.0;
 
 /// 布局节点：叶是格，内部节点是一次分割。
 enum Node {
@@ -406,8 +397,6 @@ fn set_ratio_at(node: &mut Node, bounds: Rect, split: SplitId, x: f32, y: f32) -
 
 /// 把树焦点挪到某格（键盘焦点由终端视图自己接管）
 pub type FocusPane = Rc<dyn Fn(PaneId, &mut App)>;
-/// 关闭某格
-pub type ClosePane = Rc<dyn Fn(PaneId, &mut Window, &mut App)>;
 /// 按下分割条：进入拖拽
 pub type StartDrag = Rc<dyn Fn(SplitId, &mut App)>;
 /// 拖拽中的移动：指针窗口坐标
@@ -421,8 +410,6 @@ pub type AreaChanged = Rc<dyn Fn(Rect, &mut App)>;
 pub struct AreaActions {
   /// 点击某格：把树焦点挪过去（键盘焦点由终端视图自己接管）
   pub focus_pane: FocusPane,
-  /// 关闭某格
-  pub close_pane: ClosePane,
   /// 按下分割条：进入拖拽
   pub start_drag: StartDrag,
   /// 拖拽中的移动：指针窗口坐标
@@ -433,7 +420,7 @@ pub struct AreaActions {
   pub area_changed: AreaChanged,
 }
 
-/// 渲染格区域（ADR-014）：每格绝对定位到布局矩形里，叠加分割条与格的关闭按钮；
+/// 渲染格区域（ADR-014）：每格绝对定位到布局矩形里，叠加分割条；
 /// 拖拽分割条期间挂全局鼠标监听，指针离开格区域也能继续拖（与侧栏调宽同一模式）。
 ///
 /// `view_of` 由调用方给出格到视图实体的映射；`key` 只用于元素 id 去重。
@@ -480,14 +467,13 @@ pub fn render_area(
   }
 
   let layout = tree.layout(area);
-  let multi = layout.len() > 1;
   let mut children: Vec<AnyElement> = Vec::new();
 
   for (pane, rect) in &layout {
     let Some(view) = view_of(*pane) else {
       continue;
     };
-    let mut cell = div()
+    let cell = div()
       .id(("pane", key * 100 + *pane as usize))
       .absolute()
       .left(px(rect.x - area.x))
@@ -501,16 +487,13 @@ pub fn render_area(
         let pane = *pane;
         move |_, _, cx| focus_pane(pane, cx)
       })
-      // 右键同样把树焦点切到被点的格：分割动作从焦点格发起（ADR-014），
-      // 多格时右键菜单的「拆分」必须拆的是被点的那格
+      // 右键同样把树焦点切到被点的格：右键已回归鼠标上报（ADR-063），
+      // 但活动格仍随点击切换，⌘W/⌘F 才不会落到旧格
       .on_mouse_down(MouseButton::Right, {
         let focus_pane = actions.focus_pane.clone();
         let pane = *pane;
         move |_, _, cx| focus_pane(pane, cx)
       });
-    // 格右上角动作行（ADR-058）：单格也在（单格恰恰最需要拆分入口），
-    // 多格时末位追加关闭钮
-    cell = cell.child(pane_action_row(tokens, key, *pane, view, layout.len(), multi, actions));
     children.push(cell.into_any_element());
   }
 
@@ -583,203 +566,9 @@ pub fn render_area(
     .into_any_element()
 }
 
-/// 动作行上各按钮的可用状态（ADR-058）：满 `MAX_PANES_PER_TAB` 格时拆分
-/// 禁用（菜单表达不了禁用态，这是按钮的净增益），搜索与关闭恒可用。
-/// 纯判定，便于单测守住上限口径。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ActionAvailability {
-  /// 左右分屏按钮
-  pub split_side: bool,
-  /// 上下分屏按钮
-  pub split_stack: bool,
-  /// 搜索按钮
-  pub search: bool,
-  /// 关闭此格按钮
-  pub close: bool,
-}
-
-/// 按格数与是否多格算出动作行的按钮状态（ADR-058）。
-pub fn action_availability(pane_count: usize, multi: bool) -> ActionAvailability {
-  let can_split = pane_count < MAX_PANES_PER_TAB;
-  ActionAvailability {
-    split_side: can_split,
-    split_stack: can_split,
-    search: true,
-    // 关闭只在多格时出现：单格关闭 = 关标签，走侧栏与 ⌘W
-    close: multi,
-  }
-}
-
-/// 格右上角的动作图标行（ADR-058）：`[左右分屏][上下分屏][搜索]` 常驻，
-/// 多格时末位追加 `[✕ 关闭]`。整行截住鼠标（按下不落到格、不触发格的
-/// 选区/焦点），行内空隙的点击同样不穿透。
-///
-/// 拆分点击 = 先把树焦点切到本格，再派发既有 action（应用根的 on_action
-/// → `split_focused`）：派发延帧执行而树焦点同步生效，「在哪点就拆哪格」
-/// 与右键菜单同语义（ADR-014/023），新格会话类型也因此跟随本格（ADR-054）。
-/// 搜索直调本格视图方法，不走 action 派发——action 沿焦点路径派发，
-/// 焦点在别的格时会开错格。满 `MAX_PANES_PER_TAB` 时拆分钮禁用。
-fn pane_action_row(
-  tokens: &zhimaterm_base::theme::UiTokens,
-  key: usize,
-  pane: PaneId,
-  view: Entity<TerminalView>,
-  pane_count: usize,
-  multi: bool,
-  actions: &AreaActions,
-) -> gpui::Stateful<gpui::Div> {
-  let available = action_availability(pane_count, multi);
-  let element_id = |name: &'static str| gpui::ElementId::from((name, key * 100 + pane as usize));
-
-  let focus_pane = actions.focus_pane.clone();
-  let split_side = available
-    .split_side
-    .then_some(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-      focus_pane(pane, cx);
-      window.dispatch_action(SplitRight.boxed_clone(), cx);
-    });
-  let focus_pane = actions.focus_pane.clone();
-  let split_stack = available
-    .split_stack
-    .then_some(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-      focus_pane(pane, cx);
-      window.dispatch_action(SplitDown.boxed_clone(), cx);
-    });
-  let open_search = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-    view.update(cx, |view, cx| view.open_search(window, cx));
-  };
-  let close = actions.close_pane.clone();
-  let close_pane = available
-    .close
-    .then_some(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-      close(pane, window, cx);
-    });
-
-  let mut row = div()
-    .id(element_id("pane-actions"))
-    .absolute()
-    .top(px(PANE_ACTION_ROW_TOP))
-    .right(px(8.))
-    .flex()
-    .items_center()
-    .gap(px(4.))
-    .occlude()
-    // 行内按下不冒泡到格（格的按下会切树焦点/动选区）：按钮动作自持，
-    // 空隙点击也不落到网格
-    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-  row = row
-    .child(action_button(
-      tokens,
-      element_id("pane-split-side"),
-      icons::SPLIT_SIDE,
-      if available.split_side {
-        "左右分屏"
-      } else {
-        "最多 8 格"
-      },
-      available.split_side,
-      split_side,
-    ))
-    .child(action_button(
-      tokens,
-      element_id("pane-split-stack"),
-      icons::SPLIT_STACK,
-      if available.split_stack {
-        "上下分屏"
-      } else {
-        "最多 8 格"
-      },
-      available.split_stack,
-      split_stack,
-    ))
-    .child(action_button(
-      tokens,
-      element_id("pane-search"),
-      icons::SEARCH,
-      "搜索",
-      available.search,
-      Some(open_search),
-    ));
-  if let Some(close_pane) = close_pane {
-    row = row.child(action_button(
-      tokens,
-      element_id("pane-close"),
-      icons::CLOSE,
-      "关闭此格",
-      true,
-      Some(close_pane),
-    ));
-  }
-  row
-}
-
-/// 动作行的单个图标按钮（ADR-058）：外观沿用原关闭钮的 chip 语言
-/// （`bg_row` 圆角小块），禁用态置灰、箭头光标、tooltip 说明原因。
-/// 启用的按钮走 `panel::clickable` 基座（ADR-024 的「松开在按钮内才触发」
-/// 语义）；禁用的按钮不挂点击。
-fn action_button(
-  tokens: &zhimaterm_base::theme::UiTokens,
-  id: impl Into<gpui::ElementId>,
-  icon: &'static str,
-  tip: &'static str,
-  enabled: bool,
-  on_click: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
-) -> gpui::Stateful<gpui::Div> {
-  let fg = if enabled { tokens.fg_muted } else { tokens.fg_faint };
-  let hover_bg = if enabled { tokens.bg_hover } else { tokens.bg_row };
-  let mut button = div()
-    .id(id)
-    .flex_none()
-    .h(px(PANE_ACTION_ROW_HEIGHT))
-    .px(px(4.))
-    .flex()
-    .items_center()
-    .rounded(px(4.))
-    .bg(gpui::rgb(tokens.bg_row))
-    .cursor(if enabled {
-      zhimaterm_base::ui::CLICKABLE
-    } else {
-      gpui::CursorStyle::Arrow
-    })
-    .tooltip(tooltip::tip(tip))
-    .hover(move |style| style.bg(gpui::rgb(hover_bg)))
-    .child(icons::icon(icon).text_color(gpui::rgb(fg)))
-    .occlude();
-  if let Some(on_click) = on_click {
-    // 基座接管点击判定（ADR-024）：元素 id 已在上面给过，基座沿用它
-    button = button.on_click(on_click);
-  }
-  button
-}
-
 #[cfg(test)]
 mod tests {
-  use super::{ActionAvailability, LayoutSpec, MAX_PANES_PER_TAB, PaneTree, Rect, SplitAxis, action_availability};
-
-  /// 动作行的按钮状态（ADR-058）：拆分与搜索常驻、关闭只在多格时出现、
-  /// 满格时拆分禁用（菜单表达不了禁用态）。
-  #[test]
-  fn action_row_buttons_follow_the_pane_count() {
-    // 单格：拆分与搜索可用，没有关闭钮
-    let single = action_availability(1, false);
-    assert_eq!(
-      single,
-      ActionAvailability {
-        split_side: true,
-        split_stack: true,
-        search: true,
-        close: false,
-      }
-    );
-    // 多格：关闭钮出现
-    let multi = action_availability(2, true);
-    assert!(multi.close);
-    assert!(multi.split_side && multi.split_stack);
-    // 满格：拆分禁用，搜索与关闭仍可用
-    let full = action_availability(MAX_PANES_PER_TAB, true);
-    assert!(!full.split_side && !full.split_stack, "满 8 格不能再拆");
-    assert!(full.search && full.close, "搜索与关闭不受格数影响");
-  }
+  use super::{LayoutSpec, PaneTree, Rect, SplitAxis};
 
   /// 结构投影与重建往返：树形、方向、比例与格序一致，比例越界被夹回。
   #[test]

@@ -65,7 +65,7 @@ const DEFAULT_UI: UiTokens = UiTokens {
   overlay: 0x000000a8,
   shadow_popover: 0x0000008c,
   search_highlight: 0xf5c45173,
-  scroll_marker: 0xffb454ff,
+  scroll_marker: 0xa8e0d7ff,
   input_selection: 0x8bd5ca30,
   scrollbar_thumb: 0x59595966,
 };

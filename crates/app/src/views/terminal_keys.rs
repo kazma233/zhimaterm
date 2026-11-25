@@ -69,9 +69,7 @@ pub(crate) enum KeyRoute {
 }
 
 /// 一条按键在会话视图里的归属。守卫顺序与旧实现逐条对应：确认浮层 →
-/// 搜索 → 死会话 → 焦点 → 连接中。右键菜单的键不经过这里：菜单开着时
-/// 上下/Enter/Esc 由 `menu::route_menu_keys` 在更早处整体接管
-/// （见 `TerminalView::handle_key_down`）。
+/// 搜索 → 死会话 → 焦点 → 连接中。
 pub(crate) fn route_key(
   state: &SessionViewStateData,
   confirm_open: bool,
@@ -233,7 +231,7 @@ mod tests {
     assert_eq!(dead_session_text(true, "esc"), DeadSessionKey::None);
   }
 
-  /// 守卫顺序即语义：确认浮层与菜单的 Esc 优先于搜索，搜索优先于死会话，
+  /// 守卫顺序即语义：确认浮层的 Esc 优先于搜索，搜索优先于死会话，
   /// 死会话优先于焦点与连接中。
   #[test]
   fn key_route_order_is_the_semantics() {

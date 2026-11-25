@@ -65,6 +65,8 @@ impl ZhimaTermApp {
         views,
         name: tab.name.clone(),
       });
+      // 恢复出来的标签可能多格：焦点落在树序第一格，描边随之同步（ADR-064）
+      self.sync_pane_focus_ring(self.tabs.len() - 1, cx);
       restored += 1;
     }
     if restored == 0 {

@@ -83,10 +83,45 @@ pub fn cell_at(
 
 /// 回看标记：锚在一行**内容**上（绝对网格行号），跟着文字一起滚动——
 /// 往上滚时锚在视口首行、往下滚锚在视口末行，滚出视口即消失。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ScrollMarker {
   /// 该行在当前视口里的行号（0 = 视口首行）
   pub row: usize,
+  /// 渐隐拖尾的延伸方向：true = 向视口下方（滚回实时视图时标记下移），
+  /// false = 向视口上方（往上回看时标记上移）。拖尾从锚点行向实际滚动
+  /// 方向铺开，每行低一档透明度。
+  pub trail_down: bool,
+  /// 整条标记的存活不透明度：最后一次滚动后 1s 内由 1 线性降到 0
+  /// （ADR-064 修订），与每行的空间渐隐相乘。
+  pub alpha: f32,
+}
+
+/// 回看标记拖尾最多覆盖的行数：首行 100%、第 10 行 10%，再往后不画。
+const SCROLL_MARKER_TRAIL_ROWS: usize = 10;
+
+/// 回看标记的拖尾行与不透明度：从 `marker.row` 起沿 `marker.trail_down`
+/// 的方向最多铺 `SCROLL_MARKER_TRAIL_ROWS` 行，越出视口的行截断。
+/// 纯计算，绘制与单测共用（不透明度按 1/10 递减，最后一行仍有 10%）。
+fn scroll_marker_trail(marker: ScrollMarker, rows: usize) -> Vec<(usize, f32)> {
+  let mut trail = Vec::with_capacity(SCROLL_MARKER_TRAIL_ROWS);
+  if rows == 0 {
+    return trail;
+  }
+  let start = marker.row.min(rows - 1);
+  for step in 0..SCROLL_MARKER_TRAIL_ROWS {
+    let Some(row) = (if marker.trail_down {
+      start.checked_add(step)
+    } else {
+      start.checked_sub(step)
+    }) else {
+      break;
+    };
+    if row >= rows {
+      break;
+    }
+    trail.push((row, 1.0 - step as f32 / SCROLL_MARKER_TRAIL_ROWS as f32));
+  }
+  trail
 }
 
 /// 「run 文本 → 每格起始字节偏移」的跨帧缓存（见 [`GridPainter`]）。
@@ -144,6 +179,9 @@ pub struct GridPainter {
   pub search_highlight_color: gpui::Rgba,
   /// 回看标记颜色：画在文本之上，窄条也要一眼看见，由主题 token 提供。
   pub scroll_marker_color: gpui::Rgba,
+  /// 网格左侧留白宽度（与终端网格内边距同源）：回看标记画在这条间隙里，
+  /// 不压首格文字。0 时退回旧行为（贴在网格左缘）。
+  pub scroll_marker_gutter: f32,
   /// 闪烁的灭相：光标格按普通格画。IME 锚点来自快照的 `cursor_cell`，不受影响。
   pub cursor_hidden: bool,
   /// 窗口非激活：光标不论形状都画成空心框（Alacritty 的 unfocused_hollow），
@@ -239,16 +277,22 @@ impl GridPainter {
       self.paint_preedit(preedit, bounds, snapshot, window, cx);
     }
 
-    // 回看标记画在最后（压在文本之上）：2px 竖条贴在标记行的最左缘，
-    // 表示"从这一行开始是滚出来的内容"。宽度只有 2px，不会盖住字形本身。
+    // 回看标记画在最后，落在网格左侧的留白间隙里：占满行高、宽 4px、
+    // 在间隙内居中，不覆盖首格文字。留白为 0（无内边距）时贴左缘的旧行为。
+    // 从锚点行沿滚动方向铺一条最多 10 行的渐隐拖尾（ADR-064 修订）。
     if let Some(marker) = self.scroll_marker {
-      let row = marker.row.min(snapshot.rows.len().saturating_sub(1));
-      let top = bounds.origin.y + px(self.metrics.height * row as f32);
-      // 占满行高、左缘起 4px：窄于首格字形的左留白不会糊住文字，又足够醒目
-      window.paint_quad(fill(
-        Bounds::new(point(bounds.origin.x, top), size(px(4.), px(self.metrics.height))),
-        self.scroll_marker_color,
-      ));
+      let width = 4.;
+      let left =
+        f32::from(bounds.origin.x) - self.scroll_marker_gutter + (self.scroll_marker_gutter - width).max(0.) / 2.;
+      for (row, opacity) in scroll_marker_trail(marker, snapshot.rows.len()) {
+        let top = bounds.origin.y + px(self.metrics.height * row as f32);
+        window.paint_quad(fill(
+          Bounds::new(point(px(left), top), size(px(width), px(self.metrics.height))),
+          self
+            .scroll_marker_color
+            .alpha(self.scroll_marker_color.a * opacity * marker.alpha),
+        ));
+      }
     }
   }
 
@@ -993,8 +1037,8 @@ mod tests {
   use gpui::{Bounds, size};
 
   use super::{
-    BlockGeometry, CellMetrics, CellSide, GridGeometry, UnderlineKind, block_geometry, cell_at, cell_start_bytes,
-    grid_size, preedit_clusters, preedit_columns, underline_segments,
+    BlockGeometry, CellMetrics, CellSide, GridGeometry, ScrollMarker, UnderlineKind, block_geometry, cell_at,
+    cell_start_bytes, grid_size, preedit_clusters, preedit_columns, scroll_marker_trail, underline_segments,
   };
 
   const METRICS: CellMetrics = CellMetrics::for_tests(8.6, 19.0);
@@ -1309,5 +1353,60 @@ mod tests {
     assert_eq!(block_geometry('▜'), Some(BlockGeometry::Rects(&[UL, UR, LR])));
     assert_eq!(block_geometry('▞'), Some(BlockGeometry::Rects(&[UR, LL])));
     assert_eq!(block_geometry('▟'), Some(BlockGeometry::Rects(&[UR, LL, LR])));
+  }
+
+  /// 回看标记的渐隐拖尾（ADR-064 修订）：从锚点行沿滚动方向最多 10 行，
+  /// 每行透明度递减 1/10；越出视口或到达边缘即截断。
+  #[test]
+  fn scroll_marker_trail_fades_over_ten_rows() {
+    let down = scroll_marker_trail(
+      ScrollMarker {
+        row: 3,
+        trail_down: true,
+        alpha: 1.0,
+      },
+      30,
+    );
+    assert_eq!(down.len(), 10);
+    assert_eq!(down[0], (3, 1.0));
+    assert_eq!(down[1].0, 4);
+    assert!((down[1].1 - 0.9).abs() < 1e-6);
+    assert_eq!(down[9].0, 12);
+    assert!((down[9].1 - 0.1).abs() < 1e-6);
+
+    // 向下拖尾被视口下缘截断
+    let clipped = scroll_marker_trail(
+      ScrollMarker {
+        row: 28,
+        trail_down: true,
+        alpha: 1.0,
+      },
+      30,
+    );
+    assert_eq!(clipped.iter().map(|(row, _)| *row).collect::<Vec<_>>(), vec![28, 29]);
+
+    // 往下滚回实时视图时拖尾向上铺，被视口上缘截断
+    let up = scroll_marker_trail(
+      ScrollMarker {
+        row: 2,
+        trail_down: false,
+        alpha: 1.0,
+      },
+      30,
+    );
+    assert_eq!(up.iter().map(|(row, _)| *row).collect::<Vec<_>>(), vec![2, 1, 0]);
+
+    // 空视口没有可画的行
+    assert!(
+      scroll_marker_trail(
+        ScrollMarker {
+          row: 0,
+          trail_down: true,
+          alpha: 1.0,
+        },
+        0
+      )
+      .is_empty()
+    );
   }
 }
